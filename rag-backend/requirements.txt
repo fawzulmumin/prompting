@@ -33,3 +33,9 @@ tqdm==4.67.1
 
 # langgraph (untuk knowledge graph management)
 langgraph==1.0.7
+
+# Fuzzy Matching (untuk entity linking)
+rapidfuzz==3.13.0
+
+# Async HTTP Client (untuk API calls)
+aiohttp==3.11.0
