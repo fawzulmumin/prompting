@@ -6,7 +6,46 @@ from elasticsearch import AsyncElasticsearch
 from elasticsearch import ApiError, TransportError
  
 logger = logging.getLogger(__name__)
- 
+ # ── Metric target mapping ────────────────────────────────────────────────────
+# Format: metric_target → (agg_type, es_field)
+_METRIC_MAP: Dict[str, tuple] = {
+    "siswa":            ("sum", "siswa_total"),
+    "siswa_l":          ("sum", "siswa_l"),
+    "siswa_p":          ("sum", "siswa_p"),
+    "guru":             ("sum", "guru_total"),
+    "guru_pns":         ("sum", "guru_pns"),
+    "guru_honor":       ("sum", "guru_honor"),
+    "guru_sertifikasi": ("sum", "guru_sertifikasi"),
+    "tendik":           ("sum", "tendik_l"),   # tendik_l + tendik_p handled below
+    # default (None / "sekolah") → count npsn
+}
+
+def build_metric_aggs(metric_target: Optional[str]) -> Dict[str, Any]:
+    """
+    Bangun ES aggregation clause untuk metric yang diminta.
+    Return dict siap dimasukkan ke body["aggs"].
+    """
+    if not metric_target or metric_target == "sekolah":
+        return {"main_metric": {"value_count": {"field": "npsn"}}}
+
+    entry = _METRIC_MAP.get(metric_target)
+    if not entry:
+        logger.warning("[AGG_CORE] metric_target tidak dikenal: %s, fallback ke count", metric_target)
+        return {"main_metric": {"value_count": {"field": "npsn"}}}
+
+    agg_type, field = entry
+
+    aggs = {
+        "main_metric": {agg_type: {"field": field}},
+        "avg_metric":  {"avg":    {"field": field}},
+    }
+
+    # Tendik: jumlahkan laki + perempuan
+    if metric_target == "tendik":
+        aggs["main_metric_p"] = {"sum": {"field": "tendik_p"}}
+
+    return aggs
+
 async def execute_aggregation_query(
     es_client: AsyncElasticsearch,
     entities: Dict[str, Any]
@@ -14,7 +53,7 @@ async def execute_aggregation_query(
  
     logger.info(f"EXTRACTED ENTITIES FINAL: {entities}")
  
-    index = os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent_v2")
+    index = os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent")
  
     filters = build_filters(entities)
  
@@ -48,7 +87,8 @@ async def execute_aggregation_query(
  
 async def execute_nested_aggregation_query(
     es_client: AsyncElasticsearch,
-    entities: Dict[str, Any]
+    entities: Dict[str, Any],
+    metric_target: Optional[str] = None,          # ← NEW
 ) -> Optional[Dict[str, Any]]:
     """
     Jalankan count + breakdown jenjang & status dalam SATU query ES.
@@ -62,18 +102,19 @@ async def execute_nested_aggregation_query(
         }
         atau None jika gagal.
     """
-    index = os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent_v2")
+    index = os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent")
     filters = build_filters(entities)
     _akreditasi = entities.get("akreditasi")
     jenjang_multi = entities.get("jenjang_multi")
+
+    # Metric aggs — dinamis berdasarkan target
+    metric_aggs = build_metric_aggs(metric_target)
+
     body = {
         "size": 0,
-        "query": {
-            "bool": {
-                "filter": filters
-            }
-        },
+        "query": {"bool": {"filter": filters}},
         "aggs": {
+            **metric_aggs,                          # ← main_metric (sum/count)
             "by_jenjang": {
                 "terms": {
                     "field": "bentuk_pendidikan",
@@ -82,10 +123,7 @@ async def execute_nested_aggregation_query(
                 }
             },
             "by_status": {
-                "terms": {
-                    "field": "status_sekolah",
-                    "size": 5
-                }
+                "terms": {"field": "status_sekolah", "size": 5}
             }
         },
         "track_total_hits": True
@@ -144,10 +182,24 @@ async def execute_nested_aggregation_query(
             for b in status_buckets
         }
  
+        # Ambil nilai metric utama
+        aggs_raw = response.get("aggregations", {})
+        main_val = aggs_raw.get("main_metric", {}).get("value", 0) or 0
+
+        # Khusus tendik: jumlahkan L + P
+        if metric_target == "tendik":
+            main_val += aggs_raw.get("main_metric_p", {}).get("value", 0) or 0
+
+        # Fallback: jika metric adalah count (value_count), ambil value
+        # Jika metric adalah sum, main_val sudah benar
+        total_doc = total_raw.get("value", 0) if isinstance(total_raw, dict) else total_raw
+
         return {
-            "total": total,
+            "total": int(main_val) if metric_target and metric_target != "sekolah" else total_doc,
+            "total_doc": total_doc,          # jumlah dokumen (sekolah) selalu tersedia
+            "metric_target": metric_target or "sekolah",
             "breakdown_jenjang": breakdown_jenjang,
-            "breakdown_status": breakdown_status,
+            "breakdown_status":  breakdown_status,
         }
  
     except (ApiError, TransportError):
@@ -290,8 +342,9 @@ async def get_entity_doc_count(es_client, entity: Dict[str, str]) -> int:
         "size": 0
     }
  
+    index = os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent")
     response = await es_client.search(
-        index="idx_prompting_agent_v2",
+        index=index,
         body=query
     )
  
@@ -301,7 +354,7 @@ async def get_entity_doc_count(es_client, entity: Dict[str, str]) -> int:
 async def get_entity_doc_counts_batch(
     es_client,
     entities_list: list,
-    index: str = "idx_prompting_agent_v2"
+    index: str = "idx_prompting_agent"
 ) -> list:
     """
     Batch version of get_entity_doc_count using ES msearch.
@@ -385,7 +438,7 @@ async def execute_global_ranking_query(
     size: int = 1
 ) -> Optional[List[Dict[str, Any]]]:
  
-    index = os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent_v2")
+    index = os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent")
  
     body = {
         "size": 0,
@@ -484,7 +537,7 @@ async def execute_drilldown_query(
     Return:
         [{"name": "kab. bogor", "count": 8234}, ...]
     """
-    index = os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent_v2")
+    index = os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent")
     filters = build_filters(entities)
  
     body = {

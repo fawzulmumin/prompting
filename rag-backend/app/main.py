@@ -1021,6 +1021,7 @@ async def ask_question(
                     pct_of_total=result.get("pct_of_total"),
                     active_filters=result.get("active_filters"),
                     jenjang_requested=result.get("jenjang_requested"),
+                    metric_target=result.get("metric_target"),
                 )
  
             # Disclaimer confidence rendah untuk desa
@@ -1446,7 +1447,7 @@ if __name__ == "__main__":
         ]
     )
  
-    port = int(os.getenv("PORT", 3000))
+    port = int(os.getenv("PORT", 3001))
     uvicorn.run(
         "rag_server:app",
         host="0.0.0.0",

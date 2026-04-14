@@ -63,6 +63,7 @@ class CognitiveIntent:
     siswa_max:    Optional[int]   = None   # filter "kurang dari X siswa"
     sort_by:      Optional[str]   = None   # "siswa_total" | "guru_total" | "akreditasi"
     sort_order:   Optional[str]   = None   # "asc" | "desc"
+    metric_target: Optional[str]  = None   # "sekolah"|"siswa"|"guru"|"guru_pns"|"guru_honor"|"guru_sertifikasi"|"tendik"
     # OOT
     is_oot:    bool = False
     oot_reason: Optional[str] = None
@@ -144,6 +145,7 @@ SCHEMA OUTPUT:
     "siswa_max": "<angka maksimum siswa atau null — untuk 'di bawah X', 'kurang dari X'>",
     "sort_by":   "<siswa_total|guru_total|akreditasi|null>",
     "sort_order":"<asc|desc|null>",
+    "metric_target": "<sekolah|siswa|guru|guru_pns|guru_honor|guru_sertifikasi|tendik|null>"
     "nama_sekolah": "<nama sekolah spesifik atau null>",
     "npsn": "<8 digit atau null>",
     "wilayah": {
@@ -291,7 +293,24 @@ FILTER NUMERIK:
 SORTING:
   "urutkan dari terbanyak siswa" / "dari yang paling banyak siswanya" → sort_by: "siswa_total", sort_order: "desc"
   "urutkan dari paling sedikit" → sort_by: "siswa_total", sort_order: "asc"
+  METRIC_TARGET — Apa yang ingin dihitung/dijumlah:
+  "berapa siswa" / "jumlah murid" / "total peserta didik" / "jumlah siswa"
+    → metric_target: "siswa"
+  "berapa guru" / "jumlah PTK" / "jumlah tenaga pendidik" / "total guru"
+    → metric_target: "guru"
+  "guru PNS" / "jumlah guru PNS" / "PNS saja"
+    → metric_target: "guru_pns"
+  "guru honorer" / "guru honor" / "tenaga honor"
+    → metric_target: "guru_honor"
+  "guru bersertifikasi" / "guru sertifikasi"
+    → metric_target: "guru_sertifikasi"
+  "tenaga kependidikan" / "tendik"
+    → metric_target: "tendik"
+  "berapa sekolah" / "jumlah sekolah" / tidak ada target spesifik
+    → metric_target: null   ← default, berarti hitung sekolah
   
+  PENTING: metric_target HANYA diisi saat module=aggregation atau module=comparison.
+  Untuk module=profile, metric_target selalu null.
 ═══════════════════════════════════════════════════════════
 SCOPE NASIONAL — Aturan Deteksi:
 ═══════════════════════════════════════════════════════════
@@ -703,6 +722,14 @@ def _safe_float(v) -> Optional[float]:
         return result if result > 0 else None
     except (ValueError, TypeError):
         return None
+    
+def _safe_int(v) -> Optional[int]:
+    if v is None or v in ("null", "", "None"):
+        return None
+    try:
+        return int(float(v))
+    except (ValueError, TypeError):
+        return None
 # ════════════════════════════════════════════════════════════════
 # LLM OUTPUT PARSER
 # ════════════════════════════════════════════════════════════════
@@ -775,6 +802,11 @@ def _parse_llm_output(raw: str) -> Optional[CognitiveIntent]:
             yayasan=_norm(ent.get("yayasan")),
             koordinat_user=bool(ent.get("koordinat_user", False)),
             radius_km=_safe_float(ent.get("radius_km")),
+            metric_target=_norm(ent.get("metric_target")),
+            siswa_min=_safe_int(ent.get("siswa_min")),
+            siswa_max=_safe_int(ent.get("siswa_max")),
+            sort_by=_norm(ent.get("sort_by")),
+            sort_order=_norm(ent.get("sort_order")),
             is_oot=bool(obj.get("is_oot", False)),
             oot_reason=_norm(obj.get("oot_reason")),
             raw_label=raw[:80],

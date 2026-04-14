@@ -3,6 +3,7 @@ import asyncio
 import json
 import hashlib
 import logging
+import os
 import re
 from rapidfuzz import fuzz
 from typing import Dict, Any, Optional
@@ -20,11 +21,13 @@ from app.services.core.aggregation_core import (
     execute_multi_aggregation_query,
     execute_nested_aggregation_query,
     execute_drilldown_query,
-    normalize_entity_hierarchy
+    normalize_entity_hierarchy,
+    build_metric_aggs,
+    build_filters,
 )
 from app.services.core.es_query_builder import (
     extract_filters_from_intent,
-    build_aggregation_query
+    build_aggregation_query,
 )
 from app.services.confidence_engine import compute_aggregation_confidence 
 from app.utils.cache import get_cache, set_cache
@@ -294,6 +297,9 @@ async def handle_aggregation_query(
         if getattr(intent, 'siswa_max', None) is not None:
             entities['siswa_max'] = intent.siswa_max
             logger.debug("[AGG_BRIDGE_EARLY] siswa_max: %s", intent.siswa_max)
+        if getattr(intent, 'metric_target', None):
+            entities['metric_target'] = intent.metric_target
+            logger.debug("[AGG_BRIDGE_EARLY] metric_target: %s", intent.metric_target)
     # ── BRIDGE: merge intent → entities (akreditasi & jenjang) ─────────────
     if intent:
 
@@ -641,7 +647,8 @@ async def handle_aggregation_query(
     
     cache_key = _cache_key({
         **entities,
-        **{f"_qf_{k}": str(v) for k, v in query_filters.items()}
+        **{f"_qf_{k}": str(v) for k, v in query_filters.items()},
+        "_metric": entities.get("metric_target", "sekolah"),   
     })
     cached = await get_cache(cache_key)
     if cached:
@@ -738,8 +745,13 @@ async def handle_aggregation_query(
     if use_nested:
         # Jalankan nested + drilldown secara concurrent untuk efisiensi
         import asyncio as _asyncio
+            # Ekstrak metric_target dari normalized (sudah di-inject dari intent)
+        _metric_target = normalized.pop("metric_target", None) or \
+                        entities.get("metric_target")
 
-        nested_task   = execute_nested_aggregation_query(es_client, normalized)
+        nested_task = execute_nested_aggregation_query(
+            es_client, normalized, metric_target=_metric_target
+        )
         drilldown_task = (
             execute_drilldown_query(es_client, normalized, drilldown_field, size=3)
             if drilldown_field
@@ -751,32 +763,84 @@ async def handle_aggregation_query(
             return_exceptions=True
         )
 
-        # Handle jika salah satu gagal
-        if isinstance(nested_result, Exception) or nested_result is None:
-            logger.warning("Nested agg failed, falling back to count")
-            total = await execute_aggregation_query(es_client, normalized)
+    # Ambil metric_target sekali di awal fallback block
+    _metric_target = normalized.pop("metric_target", None) or entities.get("metric_target")
+
+    # Handle jika nested agg gagal
+    if isinstance(nested_result, Exception) or nested_result is None:
+        logger.warning("Nested agg failed, falling back to metric/count")
+
+        if _metric_target and _metric_target != "sekolah":
+            # Gunakan aggregation sum/value_count
+            _aggs = build_metric_aggs(_metric_target)
+            _body = {
+                "size": 0,
+                "query": {"bool": {"filter": build_filters(normalized)}},
+                "aggs": _aggs,
+            }
+
+            _resp = await es_client.search(
+                index=os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent"),
+                body=_body,
+                request_timeout=10,
+            )
+
+            _val = _resp.get("aggregations", {}).get("main_metric", {}).get("value", 0)
+
+            # Khusus tendik (L + P)
+            if _metric_target == "tendik":
+                _val += _resp.get("aggregations", {}).get("main_metric_p", {}).get("value", 0)
+
+            total = int(_val or 0)
+
         else:
-            total             = nested_result["total"]
-            breakdown_jenjang = nested_result["breakdown_jenjang"]
-            breakdown_status  = nested_result["breakdown_status"]
-            logger.info(
-                "NESTED AGG total=%s jenjang_keys=%s status_keys=%s",
-                total,
-                list(breakdown_jenjang.keys())[:5],
-                list(breakdown_status.keys()),
-            )
+            total = await execute_aggregation_query(es_client, normalized)
 
-        if isinstance(drilldown_top3, Exception):
-            drilldown_top3 = []
-
-        if drilldown_top3:
-            logger.info(
-                "DRILLDOWN top3 field=%s results=%s",
-                drilldown_field, drilldown_top3
-            )
-    
     else:
-        total = await execute_aggregation_query(es_client, normalized)
+        total             = nested_result["total"]
+        breakdown_jenjang = nested_result["breakdown_jenjang"]
+        breakdown_status  = nested_result["breakdown_status"]
+        logger.info(
+            "NESTED AGG total=%s jenjang_keys=%s status_keys=%s",
+            total,
+            list(breakdown_jenjang.keys())[:5],
+            list(breakdown_status.keys()),
+        )
+
+    if isinstance(drilldown_top3, Exception):
+        drilldown_top3 = []
+
+    if drilldown_top3:
+        logger.info(
+            "DRILLDOWN top3 field=%s results=%s",
+            drilldown_field, drilldown_top3
+        )
+
+    # ── Kecamatan/Desa (no nested agg dari awal) ─────────────────
+    else:
+        if _metric_target and _metric_target != "sekolah":
+            _aggs = build_metric_aggs(_metric_target)
+            _body = {
+                "size": 0,
+                "query": {"bool": {"filter": build_filters(normalized)}},
+                "aggs": _aggs,
+            }
+
+            _resp = await es_client.search(
+                index=os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent"),
+                body=_body,
+                request_timeout=10,
+            )
+
+            _val = _resp.get("aggregations", {}).get("main_metric", {}).get("value", 0)
+
+            if _metric_target == "tendik":
+                _val += _resp.get("aggregations", {}).get("main_metric_p", {}).get("value", 0)
+
+            total = int(_val or 0)
+
+        else:
+            total = await execute_aggregation_query(es_client, normalized)
 
     # ── Log result ─────────────────────────────────────────────────────────
     logger.info(f"AGG TOTAL = {total}")
@@ -786,6 +850,8 @@ async def handle_aggregation_query(
         return _error("ELASTICSEARCH_ERROR")
     
     # ── Hitung total_all untuk persentase ─────────────────────────────
+    _is_numeric_metric = _metric_target and _metric_target != "sekolah"
+
     has_operational_filter = bool(
         query_filters.get("akreditasi_gte") or
         query_filters.get("akreditasi_exact") or
@@ -795,7 +861,9 @@ async def handle_aggregation_query(
 
     total_all = None
     pct_of_total = None
-    if has_operational_filter and total is not None and total > 0:
+    # Jangan hitung pct jika metric adalah numerik (siswa/guru) —
+    # tidak bisa dibandingkan dengan count dokumen sebagai total_all
+    if has_operational_filter and total is not None and total > 0 and not _is_numeric_metric:
         location_only = {
             k: v for k, v in normalized.items()
             if k not in (
@@ -868,6 +936,7 @@ async def handle_aggregation_query(
         "status": ResultStatus.SUCCESS,
         "provider": "ELASTICSEARCH_AGGREGATION",
         "total": total,
+        "metric_target": _metric_target or "sekolah",
         "total_all": total_all,
         "pct_of_total": pct_of_total,
         "active_filters": query_filters,

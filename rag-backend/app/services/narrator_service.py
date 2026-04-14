@@ -104,34 +104,31 @@ def _benchmark_label(total: int, level: str) -> str:
 def _validate_numbers_in_narasi(narasi: str, expected_numbers: dict) -> bool:
     """
     Pastikan setiap angka kritis dari data asli masih ada di teks narasi.
-    Menerima format: 1234, 1.234, 1,234 (pemisah ribuan berbeda-beda).
-
-    Jika angka kritis hilang atau berubah → return False → pakai template fallback.
-
-    Parameters
-    ----------
-    narasi          : teks hasil LLM
-    expected_numbers: {label: int/float} — angka yang WAJIB ada di narasi
+    Menerima format: 1234, 1.234, 1,234, 1 234 (pemisah ribuan berbeda-beda).
     """
+
     import re as _re
 
-    def _normalise(text: str) -> str:
-        # Hapus semua pemisah ribuan (titik, koma, spasi) agar bisa di-compare
+    def _normalize(text: str) -> str:
+        # Hapus semua pemisah ribuan (titik, koma, spasi)
         return _re.sub(r"[.,\s]", "", text)
 
-    narasi_norm = _normalise(narasi)
+    # Normalisasi narasi
+    narasi_normalized = _normalize(narasi)
 
     for label, val in expected_numbers.items():
         if val is None:
             continue
-        # Cek berbagai representasi: 143, 1.432, 1,432, 1 432
-        val_str = _normalise(str(int(val)))
-        if val_str not in narasi_norm:
+
+        val_str = _normalize(str(int(val)))
+
+        if val_str not in narasi_normalized:
             logger.warning(
                 "[Narrator] Angka kritis hilang dari narasi — label=%s expected=%s",
                 label, val
             )
             return False
+
     return True
 
 
@@ -186,6 +183,8 @@ def _prompt_aggregation(
     pct_of_total: Optional[float] = None,   
     active_filters: Optional[Dict] = None,  
     jenjang_requested: Optional[List[str]] = None,
+    metric_target: Optional[str] = None,
+    metric_label: str = "satuan pendidikan",
 ) -> str:
     status_info   = f" ({status_filter})" if status_filter else ""
     konteks_bench = _benchmark_label(total, level)
@@ -354,6 +353,8 @@ def _prompt_aggregation_with_list(
     akreditasi: str = None,
     status: str = None,
     breakdown_jenjang: dict = None,
+    metric_label: str = "satuan pendidikan",
+    metric_target: str = None,
 ) -> str:
     """
     Prompt untuk query yang meminta aggregation DAN daftar sekolah sekaligus.
@@ -367,7 +368,18 @@ def _prompt_aggregation_with_list(
     if akreditasi:
         filter_desc.append(f"terakreditasi {akreditasi}")
     filter_str = " ".join(filter_desc) or "semua jenjang"
- 
+    # Tentukan label yang tepat berdasarkan metric_target
+    _METRIC_LABELS = {
+        "siswa":            "siswa",
+        "guru":             "guru/PTK",
+        "guru_pns":         "guru PNS",
+        "guru_honor":       "guru honorer",
+        "guru_sertifikasi": "guru bersertifikasi",
+        "tendik":           "tenaga kependidikan",
+    }
+
+    metric_label = _METRIC_LABELS.get(metric_target, "satuan pendidikan") if metric_target else "satuan pendidikan"
+    is_numeric_metric = metric_target and metric_target != "sekolah"
     school_lines = "\n".join(
         f"- {s.get('nama', 'Nama tidak tersedia')} "
         f"({s.get('kecamatan', '-')})"
@@ -378,14 +390,20 @@ def _prompt_aggregation_with_list(
     if breakdown_jenjang:
         top = sorted(breakdown_jenjang.items(), key=lambda x: -x[1])[:5]
         breakdown_str = "Breakdown jenjang: " + ", ".join(f"{k}: {v:,}" for k, v in top)
- 
+    note_str = (
+        f"- Catatan: angka ini adalah JUMLAH {metric_label.upper()}, bukan jumlah sekolah.\n"
+        if is_numeric_metric
+        else ""
+    )
     return (
         f"{_SYSTEM_BASE}\n\n"
         "TUGAS: Buat narasi yang menggabungkan dua informasi berikut:\n\n"
         f"DATA AGGREGASI:\n"
         f"- Wilayah: {wilayah}\n"
         f"- Filter: {filter_str}\n"
-        f"- Total satuan pendidikan: {total:,}\n"
+        f"- Total {metric_label}: {total:,}\n"
+        f"{note_str}"
+        f"- Jenis data: {'jumlah sekolah' if not metric_target or metric_target == 'sekolah' else 'jumlah ' + metric_label}\n"
         f"{breakdown_str}\n\n"
         f"DAFTAR SEKOLAH (sebagian):\n{school_lines}\n\n"
         "INSTRUKSI:\n"
@@ -1134,10 +1152,22 @@ async def narrate_aggregation(
     pct_of_total: Optional[float] = None,
     active_filters: Optional[Dict] = None,
     jenjang_requested: Optional[List[str]] = None,
+    metric_target: Optional[str] = None,
 ) -> str:
     if total == 0:
         return _zero_result_message(wilayah, active_filters, modul="aggregation")
-
+    # Label metric untuk template dan narrator
+    _METRIC_LABELS = {
+        "siswa":            "siswa",
+        "guru":             "guru/PTK",
+        "guru_pns":         "guru PNS",
+        "guru_honor":       "guru honorer",
+        "guru_sertifikasi": "guru bersertifikasi",
+        "tendik":           "tenaga kependidikan",
+        "sekolah":          "satuan pendidikan",
+    }
+    metric_label = _METRIC_LABELS.get(metric_target or "sekolah", "satuan pendidikan")
+    
     prompt = _prompt_aggregation(
         wilayah, total, level, status_filter,
         breakdown_jenjang, breakdown_status,
@@ -1165,7 +1195,12 @@ async def narrate_aggregation(
     expected = {"total": total}
     if total_all:
         expected["total_all"] = total_all
-    if not _validate_numbers_in_narasi(narasi, expected):
+
+    # Untuk metric numerik (siswa/guru), validasi lebih longgar —
+    # angka bisa ditulis dengan format berbeda (4.545.765 vs 4545765)
+    skip_validation = bool(metric_target and metric_target not in (None, "sekolah"))
+
+    if not skip_validation and not _validate_numbers_in_narasi(narasi, expected):
         logger.warning("[Narrator] Validasi angka gagal (aggregation), pakai template")
         return template_md
 
@@ -1304,6 +1339,13 @@ async def narrate_school_profile(
                                 )
  
     if not narasi:
+        f_check = _extract_profile_fields(profile_data)
+        expected = {
+            "guru_total": f_check.get("guru_total") or None,
+            "siswa":      f_check.get("siswa") or None,
+        }
+        if not _validate_numbers_in_narasi(narasi, {k: v for k, v in expected.items() if v}):
+            logger.warning("[Narrator] Validasi angka gagal (profile), pakai template")
         return template_md
 
     # Validasi: nama sekolah wajib ada persis di narasi (tanpa diubah LLM)

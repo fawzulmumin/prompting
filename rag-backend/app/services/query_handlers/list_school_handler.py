@@ -32,15 +32,21 @@ _SORT_SIZE_KEYWORDS = {
     "terbesar", "terbanyak siswa", "paling banyak siswa",
     "jumlah siswa terbanyak", "terbanyak murid",
 }
- 
+_SORT_GURU_KEYWORDS = {
+    "guru terbanyak", "paling banyak guru", "jumlah guru terbanyak",
+    "tenaga pengajar terbanyak",
+}
+
 def _detect_sort_mode(query: str) -> str:
     q = query.lower()
     if any(kw in q for kw in _SORT_QUALITY_KEYWORDS):
         return "quality"
+    if any(kw in q for kw in _SORT_GURU_KEYWORDS):
+        return "guru"          # ← mode baru
     if any(kw in q for kw in _SORT_SIZE_KEYWORDS):
         return "size"
     return "default"
- 
+
 _AKREDITASI_ORDER_SCRIPT = (
     "def v = doc.containsKey('akreditasi') && doc['akreditasi'].size() > 0"
     " ? doc['akreditasi'].value : 'Z';"
@@ -363,6 +369,12 @@ def _split_dan_query(query: str) -> Optional[List[str]]:
     Contoh: "cibunar parungpanjang dan lumpang parungpanjang"
             → ["paud di cibunar parungpanjang", "paud di lumpang parungpanjang"]
     """
+    # GUARD: jangan split jika "dan" ada di antara dua token akreditasi/jenjang
+    _AKRED_TOKENS = {"terakreditasi", "akreditasi", "tidak terakreditasi"}
+    q_low = query.lower()
+    # Deteksi pola: "terakreditasi X dan terakreditasi Y"
+    if re.search(r'terakreditasi\s+\w+\s+dan\s+terakreditasi', q_low):
+        return None
     q_clean = re.sub(r"[^\w\s]", " ", query.lower()).strip()
     # Split pada berbagai kata penghubung
     _SPLITTERS = r"\b(dan|serta|atau|dengan|beserta|maupun|juga|ataupun|sama)\b"
@@ -1127,16 +1139,20 @@ class ListSchoolHandler:
         total     = total_val["value"] if isinstance(total_val, dict) else total_val
         schools   = [self._format_hit(h) for h in hits]
         # ── POST-SORT siswa_total (karena index: false di ES) ─────────────
-        _sort_by = getattr(intent, 'sort_by', None) if intent else None
+        _sort_by    = getattr(intent, 'sort_by', None) if intent else None
         _sort_order = getattr(intent, 'sort_order', 'desc') if intent else 'desc'
+        _sort_mode  = _detect_sort_mode(query)   # deteksi dari teks query
 
-        if _sort_by == 'siswa_total' and schools:
+        # Tentukan field sort: intent.sort_by punya prioritas; fallback ke deteksi keyword
+        _effective_sort = _sort_by or ("guru_total" if _sort_mode == "guru" else None)
+
+        if _effective_sort in ("siswa_total", "guru_total") and schools:
             schools = sorted(
                 schools,
-                key=lambda s: s.get('siswa_total', 0),
+                key=lambda s: s.get(_effective_sort, 0) or 0,
                 reverse=(_sort_order == 'desc')
             )
-            logger.debug("[LIST] post-sort by siswa_total order=%s", _sort_order)
+            logger.debug("[LIST] post-sort by %s order=%s", _effective_sort, _sort_order)
         # Extract aggregation breakdown
         breakdown_jenjang, breakdown_status = extract_breakdowns(result)
         # Typo correction jika 0 hasil
@@ -1512,7 +1528,29 @@ class ListSchoolHandler:
             filters.append({"term": {"bentuk_pendidikan": bentuk}})
         if status:
             filters.append({"term": {"status_sekolah": status.upper()}})
-        if akreditasi:
+        akreditasi_in  = parsed.get("akreditasi_in")
+        akreditasi_gte = parsed.get("akreditasi_gte")
+        akreditasi_exc = parsed.get("akreditasi_exclude")
+
+        if akreditasi_in:
+            filters.append({"terms": {"akreditasi": akreditasi_in}})
+            logger.info("[LIST] akreditasi_in filter: %s", akreditasi_in)
+
+        elif akreditasi_gte:
+            filters.append({"terms": {"akreditasi": akreditasi_gte}})
+            logger.info("[LIST] akreditasi_gte filter: %s", akreditasi_gte)
+
+        elif akreditasi_exc:
+            filters.append({
+                "bool": {
+                    "must_not": [
+                        {"term": {"akreditasi": akreditasi_exc}}
+                    ]
+                }
+            })
+            logger.info("[LIST] akreditasi_exclude filter: %s", akreditasi_exc)
+
+        elif akreditasi:
             filters.append({"term": {"akreditasi": akreditasi}})
             logger.info("[LIST] akreditasi filter: %s", akreditasi)
             

@@ -1513,8 +1513,8 @@ async def resolve_entities(
         if requested_level == "kota":
             filtered = [
                 m for m in possible_matches
-                if m["level"] in ["kota", "kabupaten"]
-                and m["value"].lower().startswith("kota")
+                if m["level"] == "kabupaten"
+                and normalize_wilayah_value(m["value"]).startswith("kota ")
             ]
  
         elif requested_level == "kabupaten":
@@ -1523,7 +1523,7 @@ async def resolve_entities(
                 if m["level"] == "kabupaten"
                 and normalize_wilayah_value(m["value"]).startswith("kab.")
             ]
- 
+    
         else:
             filtered = [
                 m for m in possible_matches

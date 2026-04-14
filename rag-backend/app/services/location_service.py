@@ -57,7 +57,7 @@ async def load_location_mapping_from_es(
     field: str,
 ) -> Dict[str, str]:
  
-    index = os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent_v2")
+    index = os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent")
  
     try:
         res = await es_client.search(
@@ -105,7 +105,7 @@ async def load_location_hierarchy(es_client: AsyncElasticsearch):
     """
     global LOCATION_HIERARCHY
  
-    index = os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent_v2")
+    index = os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent")
  
     LOCATION_HIERARCHY = {
         "desa_kelurahan": {},

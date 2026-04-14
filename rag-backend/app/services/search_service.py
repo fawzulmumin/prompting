@@ -104,7 +104,7 @@ async def perform_search(
  
 async def fuzzy_search_all_locations(es_client: AsyncElasticsearch, query: str):
  
-    index = os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent_v2")
+    index = os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent")
  
     body = {
         "size": 5,
@@ -547,7 +547,7 @@ async def perform_geo_search(
     """
     import asyncio as _asyncio
 
-    index = os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent_v2")
+    index = os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent")
 
     filters = [
         {
