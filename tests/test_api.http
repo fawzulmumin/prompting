@@ -1,7 +1,0 @@
-POST http://localhost:3000/ask
-Content-Type: application/json
-
-{
-    "question": "sekolah apa saja yang terakreditasi a di kecamatan ciputat",
-    "user_id": "te_21"
-}
