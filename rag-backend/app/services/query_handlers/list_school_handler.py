@@ -58,6 +58,7 @@ _AKREDITASI_ORDER_SCRIPT = (
  
 def _build_sort_clause(sort_mode: str) -> List[Dict]:
     if sort_mode == "quality":
+        # Akreditasi terbaik (A→B→C) sebagai sort primer, relevansi sebagai tiebreaker
         return [
             {"_script": {"type": "number",
                 "script": {"lang": "painless", "source": _AKREDITASI_ORDER_SCRIPT},
@@ -65,10 +66,15 @@ def _build_sort_clause(sort_mode: str) -> List[Dict]:
             {"_score": {"order": "desc"}},
         ]
     if sort_mode == "size":
+        # Urutkan dari siswa terbanyak — field siswa_total dari es_structure.md
         return [
-            {"_script": {"type": "number",
-                "script": {"lang": "painless", "source": _AKREDITASI_ORDER_SCRIPT},
-                "order": "asc"}},
+            {"siswa_total": {"order": "desc", "missing": "_last"}},
+            {"_score": {"order": "desc"}},
+        ]
+    if sort_mode == "guru":
+        # Urutkan dari guru terbanyak — field guru_total dari es_structure.md
+        return [
+            {"guru_total": {"order": "desc", "missing": "_last"}},
             {"_score": {"order": "desc"}},
         ]
     return [{"_score": {"order": "desc"}}]

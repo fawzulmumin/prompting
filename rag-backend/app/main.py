@@ -623,8 +623,17 @@ async def ask_question(
             _q = query.lower()
             _has_edu_signal = any(
                 kw in _q for kw in (
+                    # Jenjang formal
                     "sekolah", "sd", "smp", "sma", "smk", "tk", "paud",
-                    "guru", "siswa", "akreditasi", "npsn",
+                    # Jenjang berbasis agama
+                    "mi", "mts", "ma", "madrasah", "ibtidaiyah", "tsanawiyah", "aliyah",
+                    "pesantren", "pondok",
+                    # Jenjang non-formal / khusus
+                    "pkbm", "slb", "skb", "kb", "tpa", "ra", "sps",
+                    # Identitas & pelaku pendidikan
+                    "guru", "siswa", "murid", "peserta didik", "tendik",
+                    "tenaga pendidik", "kepala sekolah",
+                    "akreditasi", "npsn",
                 )
             )
             if _has_edu_signal:
@@ -1277,9 +1286,11 @@ async def ask_question(
         return AskResponse(**cached)
  
     history = await get_chat_history(user_id) or []
-    history_context = "\n".join(
-        f"{m['role']}: {m['content']}" for m in history[-3:]
-    )
+    # Hanya sertakan pesan user (bukan asisten) untuk context retrieval.
+    # Respons asisten panjang dan tidak meningkatkan kualitas retrieval —
+    # hanya intent user yang dibutuhkan LLM untuk memahami riwayat percakapan.
+    _user_turns = [m for m in history if m.get("role") == "user"][-3:]
+    history_context = "\n".join(f"user: {m['content']}" for m in _user_turns)
     # Bangun location filter dari intent untuk RAG path
     _loc_filter: Dict[str, str] = {}
     if intent:
@@ -1309,10 +1320,29 @@ async def ask_question(
     )
  
     retrieval_score = compute_context_sufficiency_score(hits)
-    context_parts   = [
-        f"[SUMBER {i+1}]: {h.get('_source', {}).get('content', '')}"
-        for i, h in enumerate(hits)
-    ]
+    # Budget 4500 char (~1500 token) dibagi rata per dokumen.
+    # Field numerik penting (siswa_l/p, tendik, nilai_akhir, kode_pos) TIDAK ada
+    # di field `content` (hanya ringkasan teks) — ditambahkan secara eksplisit
+    # dari _source agar pertanyaan tentang field tersebut bisa dijawab LLM.
+    _CONTEXT_BUDGET = 4000  # sedikit lebih kecil karena ada extra fields
+    _per_doc_limit  = _CONTEXT_BUDGET // len(hits) if hits else 0
+    _EXTRA_SOURCE_FIELDS = (
+        "siswa_l", "siswa_p", "siswa_total",
+        "tendik_l", "tendik_p",
+        "nilai_akhir", "kode_pos",
+        "guru_total", "guru_pns", "guru_honor", "guru_sertifikasi",
+    )
+
+    def _build_doc_context(idx: int, hit: dict, char_limit: int) -> str:
+        src = hit.get("_source", {})
+        base_text = src.get("content", "")[:char_limit]
+        extras = {k: src[k] for k in _EXTRA_SOURCE_FIELDS if src.get(k) is not None}
+        if extras:
+            extra_str = " | ".join(f"{k}={v}" for k, v in extras.items())
+            base_text = f"{base_text} [{extra_str}]"
+        return f"[SUMBER {idx + 1}]: {base_text}"
+
+    context_parts = [_build_doc_context(i, h, _per_doc_limit) for i, h in enumerate(hits)]
     context = "\n\n".join(context_parts) if hits else "Tidak ada data relevan."
  
     if retrieval_score < 0.3:
@@ -1337,7 +1367,7 @@ async def ask_question(
             "Data yang tersedia belum cukup kuat untuk memberikan jawaban yang akurat. "
             "Silakan perjelas pertanyaan atau lokasi yang dimaksud.",
             "SYSTEM_LOW_CONTEXT",
-            context_sufficiency_score=float(llm_score),
+            context_sufficiency_score=round(float(llm_score) / 100, 3),
             num_docs=len(hits),
         )
  
@@ -1356,7 +1386,9 @@ async def ask_question(
         "from_cache":                False,
         "duration_ms":               _ms(start_time),
         "context_used":              [],
-        "context_sufficiency_score": float(llm_score),
+        # Normalisasi ke skala 0-1 (konsisten dengan semua path lain).
+        # llm_score dari DeepSeek adalah 0-100, dibagi 100 agar sebanding.
+        "context_sufficiency_score": round(float(llm_score) / 100, 3),
         "answer_confident":          answer_confident,
         "confidence_score":          confidence_score,
         "user_id":                   user_id,

@@ -63,7 +63,7 @@ class CognitiveIntent:
     siswa_max:    Optional[int]   = None   # filter "kurang dari X siswa"
     sort_by:      Optional[str]   = None   # "siswa_total" | "guru_total" | "akreditasi"
     sort_order:   Optional[str]   = None   # "asc" | "desc"
-    metric_target: Optional[str]  = None   # "sekolah"|"siswa"|"guru"|"guru_pns"|"guru_honor"|"guru_sertifikasi"|"tendik"
+    metric_target: Optional[str]  = None   # "sekolah"|"siswa"|"siswa_l"|"siswa_p"|"guru"|"guru_pns"|"guru_honor"|"guru_sertifikasi"|"tendik"
     # OOT
     is_oot:    bool = False
     oot_reason: Optional[str] = None
@@ -145,7 +145,7 @@ SCHEMA OUTPUT:
     "siswa_max": "<angka maksimum siswa atau null — untuk 'di bawah X', 'kurang dari X'>",
     "sort_by":   "<siswa_total|guru_total|akreditasi|null>",
     "sort_order":"<asc|desc|null>",
-    "metric_target": "<sekolah|siswa|guru|guru_pns|guru_honor|guru_sertifikasi|tendik|null>"
+    "metric_target": "<sekolah|siswa|siswa_l|siswa_p|guru|guru_pns|guru_honor|guru_sertifikasi|tendik|null>"
     "nama_sekolah": "<nama sekolah spesifik atau null>",
     "npsn": "<8 digit atau null>",
     "wilayah": {
@@ -296,6 +296,10 @@ SORTING:
   METRIC_TARGET — Apa yang ingin dihitung/dijumlah:
   "berapa siswa" / "jumlah murid" / "total peserta didik" / "jumlah siswa"
     → metric_target: "siswa"
+  "berapa siswa laki-laki" / "jumlah siswa putra" / "siswa pria" / "murid laki"
+    → metric_target: "siswa_l"
+  "berapa siswa perempuan" / "jumlah siswi" / "siswa putri" / "murid perempuan" / "siswa wanita"
+    → metric_target: "siswa_p"
   "berapa guru" / "jumlah PTK" / "jumlah tenaga pendidik" / "total guru"
     → metric_target: "guru"
   "guru PNS" / "jumlah guru PNS" / "PNS saja"
@@ -308,7 +312,7 @@ SORTING:
     → metric_target: "tendik"
   "berapa sekolah" / "jumlah sekolah" / tidak ada target spesifik
     → metric_target: null   ← default, berarti hitung sekolah
-  
+
   PENTING: metric_target HANYA diisi saat module=aggregation atau module=comparison.
   Untuk module=profile, metric_target selalu null.
 ═══════════════════════════════════════════════════════════
@@ -644,14 +648,19 @@ def _keyword_fallback(query: str) -> CognitiveIntent:
  
     # ── Routing utama ────────────────────────────────────────────────────────
     # Prioritas 1: nama sekolah spesifik (SMPN 5, SDN 02, ...) atau NPSN
-    _has_named_school = bool(npsn or re.search(r'\b(?:sd|smp|sma|smk|mi|mts|ma|tk)n?\s*\d+\b', q))
+    # Pola jenjang untuk deteksi nama sekolah bernomor (SDN 5, PKBM 02, SLB 1, ...)
+    _NAMED_SCHOOL_RE = re.compile(
+        r'\b(?:sd|smp|sma|smk|mi|mts|ma|tk|slb|pkbm|smtk|smak|sps|skb|ra|kb|tpa|paud)n?\s*\d+\b',
+        re.IGNORECASE,
+    )
+    _has_named_school = bool(npsn or _NAMED_SCHOOL_RE.search(q))
  
     # Prioritas 2: query dengan nama sekolah non-numbered + kata profil/alamat/lokasi
     _PROFILE_SIGNALS = ("profil ", "profile ", "alamat ", "lokasi", "lokasinya", "di mana", "dimana", "terakreditasi", "akreditasi?")
     _has_profile_signal = any(sig in q for sig in _PROFILE_SIGNALS)
  
     # Dua nama sekolah bernomor + vs → profile (school vs school)
-    _named_school_count = len(re.findall(r'\b(?:sd|smp|sma|smk|mi|mts|ma|tk)n?\s*\d+\b', q))
+    _named_school_count = len(_NAMED_SCHOOL_RE.findall(q))
  
     if _has_named_school:
         module = "profile"
@@ -695,7 +704,7 @@ def _keyword_fallback(query: str) -> CognitiveIntent:
  
  
 _GENERIC_AFTER_JENJANG = re.compile(
-    r'\b(?:sd|smp|sma|smk|mi|mts|ma|tk)\s+'
+    r'\b(?:sd|smp|sma|smk|mi|mts|ma|tk|slb|pkbm|smtk|smak|sps|skb|ra|kb|tpa|paud)\s+'
     r'(?:negeri|swasta|akreditasi|dan|atau|di|yang|apa|ini|itu|dengan|dalam|untuk|dari|vs|versus)\b',
     re.IGNORECASE
 )
@@ -709,7 +718,7 @@ def nama_sekolah_hint(q: str) -> bool:
         return False
     # Jenjang diikuti huruf (nama proper)
     return bool(re.search(
-        r'\b(?:sd|smp|sma|smk|mi|mts|ma|tk)\s+[A-Za-z]',
+        r'\b(?:sd|smp|sma|smk|mi|mts|ma|tk|slb|pkbm|smtk|smak|sps|skb|ra|kb|tpa|paud)\s+[A-Za-z]',
         q, re.IGNORECASE
     ))
  

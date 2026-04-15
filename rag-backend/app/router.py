@@ -298,8 +298,11 @@ async def route_with_fallback(
     es_client=None,           # retained for signature compatibility, not used here
 ) -> RouterResponse:
  
-    # Cache check
-    cache_key = hash_key(query, initial_context, history_context)
+    # Cache key hanya dari query + initial_context.
+    # history_context sengaja dikecualikan: setiap sesi konversasi menghasilkan
+    # key unik sehingga cache tidak pernah hit untuk query yang sama. Jawaban
+    # faktual (data sekolah) tidak berubah signifikan karena riwayat percakapan.
+    cache_key = hash_key(query, initial_context)
     cached = await get_cache(cache_key)
     if cached:
         logger.info("[Router] Cache hit")

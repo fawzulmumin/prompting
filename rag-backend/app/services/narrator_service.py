@@ -234,7 +234,7 @@ def _prompt_aggregation(
         }.get(drilldown_field, drilldown_field.title())
 
         drilldown_lines = "\n".join(
-            f"  {i+1}. {item['name'].title()}: {item['count']:,} sekolah"
+            f"  {i+1}. {item['name'].title()}: {item['count']:,} {metric_label}"
             for i, item in enumerate(drilldown_top3[:3])
         )
         drilldown_section = (
@@ -249,7 +249,7 @@ def _prompt_aggregation(
         if drilldown_section:
             drilldown_instruksi = (
                 "\n\n## Distribusi Wilayah\n"
-                f"Sebutkan top 3 {drilldown_label} dengan jumlah sekolah "
+                f"Sebutkan top 3 {drilldown_label} dengan jumlah {metric_label} "
                 "terbanyak beserta angkanya — gunakan PERSIS data yang disuplai."
             )
 
@@ -296,12 +296,12 @@ def _prompt_aggregation(
     else:
         instruksi = (
             "INSTRUKSI NARASI (3 kalimat tepat, TANPA bullet point, TANPA heading):\n"
-            f"Kalimat 1: Sebutkan PERSIS angka {total:,} sekolah di {wilayah} "
+            f"Kalimat 1: Sebutkan PERSIS angka {total:,} {metric_label} di {wilayah} "
             f"({level_label}). Jangan bulatkan atau ubah angka ini.\n"
             "Kalimat 2: Bandingkan dengan benchmark — gunakan label konteks yang "
             "sudah disediakan (banyak/sedang/sedikit).\n"
             "Kalimat 3: Satu implikasi praktis bagi perencanaan pendidikan di wilayah ini.\n"
-            f"LARANGAN KERAS: Jangan tulis angka selain {total:,} untuk jumlah sekolah."
+            f"LARANGAN KERAS: Jangan tulis angka selain {total:,} untuk jumlah {metric_label}."
         )
 
     # ── Filter aktif & persentase ────────────────────────────────────────────
@@ -327,12 +327,17 @@ def _prompt_aggregation(
             f"\n- Persentase yang memenuhi filter: {pct_of_total}%"
         )
 
+    # Label subjek dinamis: "sekolah" untuk count biasa, "siswa laki-laki" dll untuk metric
+    _is_school_count = not metric_target or metric_target == "sekolah"
+    subyek = "sekolah" if _is_school_count else metric_label
+
     return f"""{_SYSTEM_BASE}
 
 DATA AGREGASI:
-- Wilayah: {wilayah} (level: {level_label})
-- Jumlah sekolah{status_info}: {total:,}{filter_section}{pct_section}
-- Konteks: jumlah ini {konteks_bench}{breakdown_section}{drilldown_section}
+- Wilayah      : {wilayah} (level: {level_label})
+- Metrik       : {metric_label}
+- Jumlah {subyek}{status_info}: {total:,}{filter_section}{pct_section}
+- Konteks      : jumlah ini {konteks_bench}{breakdown_section}{drilldown_section}
 
 {instruksi}
 
@@ -368,9 +373,11 @@ def _prompt_aggregation_with_list(
     if akreditasi:
         filter_desc.append(f"terakreditasi {akreditasi}")
     filter_str = " ".join(filter_desc) or "semua jenjang"
-    # Tentukan label yang tepat berdasarkan metric_target
+    # Label metric untuk semua metric_target yang didukung (lihat aggregation_core.py)
     _METRIC_LABELS = {
         "siswa":            "siswa",
+        "siswa_l":          "siswa laki-laki",
+        "siswa_p":          "siswa perempuan",
         "guru":             "guru/PTK",
         "guru_pns":         "guru PNS",
         "guru_honor":       "guru honorer",
@@ -848,27 +855,17 @@ NARASI:"""
  
 def _extract_profile_fields(profile_data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Normalisasi profile_data ke field flat.
- 
-    Format aktual yang datang dari profile_formatter.py (terkonfirmasi via debug log):
-        keys = ['identitas', 'lokasi', 'sarana_prasarana',
-                'tenaga_pendidik', 'peserta_didik', 'legalitas']
- 
-    Sub-dict 'tenaga_pendidik' berisi: total_ptk, ptk_laki_laki, ptk_perempuan,
-        guru_pns, guru_honor, guru_sertifikasi
-    Sub-dict 'peserta_didik'   berisi: total_siswa
-    Sub-dict 'identitas'       berisi: nama_sekolah, npsn, status_sekolah,
-        akreditasi, bentuk_pendidikan
-    Sub-dict 'lokasi'          berisi: alamat_jalan, kecamatan, kabupaten_kota, provinsi
-    Sub-dict 'sarana_prasarana' berisi: akses_internet, sumber_listrik, sumber_air
- 
-    Juga mendukung format flat ES langsung (fallback).
+    Normalisasi profile_data ke field flat untuk prompt narrator.
+
+    Struktur dari profile_builder.py::build_profile() (lihat es_structure.md):
+      identitas.{nama, npsn, status, akreditasi, bentuk_pendidikan, nilai_akhir}
+      lokasi.{alamat, kecamatan, kabupaten, provinsi, kode_pos}
+      tenaga_pendidik.{total_guru, laki_laki, perempuan, guru_pns, guru_honor, guru_sertifikasi}
+      tenaga_kependidikan.{total_tendik, laki_laki, perempuan}
+      peserta_didik.{total_siswa, laki_laki, perempuan}
+      sarana_prasarana.{akses_internet, sumber_listrik, sumber_air}
     """
     def _get(keys: list, default=None):
-        """
-        Coba key satu per satu.
-        Format "sub_dict.field" → profile_data[sub_dict][field]
-        """
         for k in keys:
             if "." in k:
                 parts = k.split(".", 1)
@@ -876,116 +873,102 @@ def _extract_profile_fields(profile_data: Dict[str, Any]) -> Dict[str, Any]:
                 v = sub.get(parts[1]) if isinstance(sub, dict) else None
             else:
                 v = profile_data.get(k)
-            # Nilai kosong / dash / None dianggap tidak ada
             if v is not None and v != "" and v != "-":
                 return v
         return default
- 
+
     def _int(keys: list) -> int:
         v = _get(keys, 0)
         try:
             return int(v or 0)
         except (ValueError, TypeError):
             return 0
- 
-    # ── PTK — prioritas: nested formatter → flat ES → fallback ───────────────
-    guru_total = _int([
-        "tenaga_pendidik.total_ptk",
-        "jumlah_ptk", "total_ptk", "total_guru",
-    ])
-    guru_pns = _int([
-        "tenaga_pendidik.guru_pns",
-        "jumlah_guru_pns", "guru_pns",
-    ])
-    guru_honor = _int([
-        "tenaga_pendidik.guru_honor",
-        "jumlah_guru_honor", "guru_honor",
-    ])
-    guru_serti = _int([
-        "tenaga_pendidik.guru_sertifikasi",
-        "jumlah_guru_sertifikasi", "guru_sertifikasi",
-    ])
-    siswa_total = _int([
-        "peserta_didik.total_siswa",
-        "jumlah_siswa_total", "total_siswa", "jumlah_siswa",
-    ])
- 
-    # Fallback: jika total_ptk=0 tapi pns+honor ada → pakai sum
+
+    def _float_or_none(keys: list):
+        v = _get(keys)
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except (ValueError, TypeError):
+            return None
+
+    # ── Guru ──────────────────────────────────────────────────────────────────
+    # Field dari profile_builder: tenaga_pendidik.total_guru (bukan total_ptk)
+    guru_total = _int(["tenaga_pendidik.total_guru", "jumlah_ptk", "total_ptk", "total_guru"])
+    guru_l     = _int(["tenaga_pendidik.laki_laki",  "guru_l"])
+    guru_p     = _int(["tenaga_pendidik.perempuan",  "guru_p"])
+    guru_pns   = _int(["tenaga_pendidik.guru_pns",   "guru_pns"])
+    guru_honor = _int(["tenaga_pendidik.guru_honor", "guru_honor"])
+    guru_serti = _int(["tenaga_pendidik.guru_sertifikasi", "guru_sertifikasi"])
+
     if guru_total == 0 and (guru_pns + guru_honor) > 0:
         guru_total = guru_pns + guru_honor
- 
+
+    # ── Tendik ────────────────────────────────────────────────────────────────
+    tendik_total = _int(["tenaga_kependidikan.total_tendik", "tendik_total"])
+    tendik_l     = _int(["tenaga_kependidikan.laki_laki",    "tendik_l"])
+    tendik_p     = _int(["tenaga_kependidikan.perempuan",    "tendik_p"])
+    if tendik_total == 0 and (tendik_l + tendik_p) > 0:
+        tendik_total = tendik_l + tendik_p
+
+    # ── Siswa ─────────────────────────────────────────────────────────────────
+    siswa_total = _int(["peserta_didik.total_siswa", "total_siswa", "jumlah_siswa"])
+    siswa_l     = _int(["peserta_didik.laki_laki",   "siswa_l"])
+    siswa_p     = _int(["peserta_didik.perempuan",   "siswa_p"])
+
     return {
-        "nama": _get([
-            "identitas.nama",           # ← BENAR
-            "identitas.nama_sekolah",
-            "nama", "nama_sekolah",
-        ], "Tidak diketahui"),
-        "npsn": str(_get([
-            "identitas.npsn", "npsn",
-        ], "-")),
-        "bentuk": _get([
-            "identitas.bentuk_pendidikan",
-            "bentuk_pendidikan", "bentuk",
-        ], "-"),
-        "status": _get([
-            "identitas.status",         # ← BENAR
-            "identitas.status_sekolah",
-            "status_sekolah", "status",
-        ], "-"),
-        "akreditasi": _get([
-            "identitas.akreditasi", "akreditasi",
-        ], "-"),
-        "alamat": _get([
-            "lokasi.alamat",            # ← BENAR
-            "lokasi.alamat_jalan",
-            "alamat", "alamat_jalan",
-        ], ""),
-        "kec": _get([
-            "lokasi.kecamatan",         # ← sudah benar
-            "kecamatan",
-        ], ""),
-        "kab": _get([
-            "lokasi.kabupaten",         # ← BENAR (bukan kabupaten_kota)
-            "lokasi.kabupaten_kota",
-            "kabupaten", "kabupaten_kota",
-        ], ""),
-        "prov": _get([
-            "lokasi.provinsi", "provinsi",
-        ], ""),
+        "nama":       _get(["identitas.nama", "identitas.nama_sekolah", "nama"], "Tidak diketahui"),
+        "npsn":       str(_get(["identitas.npsn", "npsn"], "-")),
+        "bentuk":     _get(["identitas.bentuk_pendidikan", "bentuk_pendidikan"], "-"),
+        "status":     _get(["identitas.status", "identitas.status_sekolah", "status_sekolah"], "-"),
+        "akreditasi": _get(["identitas.akreditasi", "akreditasi"], "-"),
+        "nilai_akhir": _float_or_none(["identitas.nilai_akhir", "nilai_akhir"]),
+        "alamat":     _get(["lokasi.alamat", "lokasi.alamat_jalan", "alamat_jalan"], ""),
+        "kec":        _get(["lokasi.kecamatan",  "kecamatan"], ""),
+        "kab":        _get(["lokasi.kabupaten",  "lokasi.kabupaten_kota", "kabupaten"], ""),
+        "prov":       _get(["lokasi.provinsi",   "provinsi"], ""),
+        "kode_pos":   _get(["lokasi.kode_pos",   "kode_pos"], "-"),
         "guru_total": guru_total,
+        "guru_l":     guru_l,
+        "guru_p":     guru_p,
         "guru_pns":   guru_pns,
         "guru_honor": guru_honor,
         "guru_serti": guru_serti,
+        "tendik_total": tendik_total,
+        "tendik_l":     tendik_l,
+        "tendik_p":     tendik_p,
         "siswa":      siswa_total,
-        "internet": _get([
-            "sarana_prasarana.akses_internet",   # ← sudah benar
-            "akses_internet", "internet",
-        ], "-"),
-        "listrik": _get([
-            "sarana_prasarana.sumber_listrik",   # ← sudah benar
-            "sumber_listrik", "listrik",
-        ], "-"),
-        "air": _get([
-            "sarana_prasarana.sumber_air",       # ← sudah benar
-            "sumber_air", "air",
-        ], "-"),
+        "siswa_l":    siswa_l,
+        "siswa_p":    siswa_p,
+        "internet":   _get(["sarana_prasarana.akses_internet", "akses_internet"], "-"),
+        "listrik":    _get(["sarana_prasarana.sumber_listrik",  "sumber_listrik"], "-"),
+        "air":        _get(["sarana_prasarana.sumber_air",      "sumber_air"], "-"),
     }
  
  
 def _prompt_school_profile(profile_data: Dict[str, Any]) -> str:
     f          = _extract_profile_fields(profile_data)
     nama       = f["nama"]
-    npsn       = f["npsn"]
     bentuk     = f["bentuk"]
     status     = f["status"]
     akreditasi = f["akreditasi"]
+    nilai_akhir = f["nilai_akhir"]
     lokasi_str = ", ".join(filter(None, [f["kec"], f["kab"], f["prov"]])) or "-"
+    kode_pos   = f["kode_pos"]
 
     guru_total  = f["guru_total"]
     guru_pns    = f["guru_pns"]
     guru_honor  = f["guru_honor"]
     guru_serti  = f["guru_serti"]
+
+    tendik_total = f["tendik_total"]
+    tendik_l     = f["tendik_l"]
+    tendik_p     = f["tendik_p"]
+
     siswa_total = f["siswa"]
+    siswa_l     = f["siswa_l"]
+    siswa_p     = f["siswa_p"]
     internet    = f["internet"]
     listrik     = f["listrik"]
     air         = f["air"]
@@ -999,7 +982,7 @@ def _prompt_school_profile(profile_data: Dict[str, Any]) -> str:
         if guru_total else "-"
     )
 
-    # Benchmark nasional (pendekatan)
+    # Benchmark nasional
     RASIO_IDEAL = {"SD": 17, "SMP": 20, "SMA": 20, "SMK": 15}
     rasio_ideal = RASIO_IDEAL.get(bentuk, 20)
     rasio_angka = round(siswa_total / guru_total) if guru_total and siswa_total else None
@@ -1009,11 +992,18 @@ def _prompt_school_profile(profile_data: Dict[str, Any]) -> str:
         elif rasio_angka <= rasio_ideal * 1.5:
             rasio_konteks = f"sedikit di atas rata-rata nasional {bentuk} (~1:{rasio_ideal})"
         else:
-            rasio_konteks = f"jauh di atas rata-rata nasional {bentuk} (~1:{rasio_ideal}), menunjukkan beban mengajar yang tinggi"
+            rasio_konteks = f"jauh di atas rata-rata nasional {bentuk} (~1:{rasio_ideal}), beban mengajar tinggi"
     else:
         rasio_konteks = ""
 
-    # Identifikasi kondisi kritis
+    # Komposisi siswa per gender
+    if siswa_total and siswa_l + siswa_p > 0:
+        pct_p = round(siswa_p / siswa_total * 100) if siswa_total else 0
+        siswa_gender_str = f"L: {siswa_l}, P: {siswa_p} ({pct_p}% perempuan)"
+    else:
+        siswa_gender_str = "data gender tidak tersedia"
+
+    # Catatan kritis
     catatan_kritis = []
     if guru_total == 0:
         catatan_kritis.append("DATA PTK BELUM DILAPORKAN — jangan simpulkan tidak ada guru")
@@ -1023,25 +1013,34 @@ def _prompt_school_profile(profile_data: Dict[str, Any]) -> str:
         catatan_kritis.append("sumber listrik tidak tercatat")
     if air in ("Air hujan", ""):
         catatan_kritis.append(f"sumber air: {air} (perlu perhatian)")
-
     catatan_str = "; ".join(catatan_kritis) if catatan_kritis else "tidak ada catatan kritis"
 
-    # Konteks akreditasi
     akred_konteks = {
-        "A": "akreditasi terbaik — menunjukkan standar mutu yang tinggi",
+        "A": "akreditasi terbaik — standar mutu tinggi",
         "B": "akreditasi baik — masih ada ruang peningkatan menuju A",
         "C": "akreditasi cukup — perlu peningkatan di beberapa aspek",
         "-": "belum terakreditasi atau data tidak tersedia",
     }.get(akreditasi, "")
 
+    nilai_akhir_str = (
+        f"\n- Nilai Akhir Akreditasi: {nilai_akhir}"
+        if nilai_akhir is not None else ""
+    )
+    tendik_str = (
+        f"{tendik_total} (L: {tendik_l}, P: {tendik_p})"
+        if tendik_total > 0 else "tidak tercatat"
+    )
+    kode_pos_str = kode_pos if kode_pos not in (None, "-", "") else "tidak tersedia"
+
     return f"""{_SYSTEM_BASE}
 
 DATA SEKOLAH:
 - Nama       : {nama}
-- Jenjang    : {bentuk} | Status: {status} | Akreditasi: {akreditasi} ({akred_konteks})
-- Lokasi     : {lokasi_str}
-- Total PTK  : {guru_total} (PNS: {guru_pns}, Honor: {guru_honor}, Sertifikasi: {guru_serti} / {pct_serti})
-- Total Siswa: {siswa_total:,} | Rasio guru:siswa ≈ {rasio_str} — {rasio_konteks}
+- Jenjang    : {bentuk} | Status: {status} | Akreditasi: {akreditasi} ({akred_konteks}){nilai_akhir_str}
+- Lokasi     : {lokasi_str} | Kode Pos: {kode_pos_str}
+- Guru (PTK) : {guru_total} (PNS: {guru_pns}, Honor: {guru_honor}, Sertifikasi: {guru_serti} / {pct_serti})
+- Tendik     : {tendik_str}
+- Siswa      : {siswa_total:,} | {siswa_gender_str} | Rasio guru:siswa ≈ {rasio_str} — {rasio_konteks}
 - Internet   : {internet} | Listrik: {listrik} | Air: {air}
 - Catatan    : {catatan_str}
 
@@ -1049,25 +1048,26 @@ INSTRUKSI NARASI (4 paragraf pendek dengan ## heading, TANPA bullet):
 
 ## Identitas & Posisi
 Sebutkan nama sekolah PERSIS "{nama}" (jangan diubah sama sekali).
-Sebutkan bahwa ini adalah {bentuk} berstatus {status} yang berlokasi di {lokasi_str}.
-Jika status="-": tulis "status belum tercatat". Jangan menebak.
+Sebutkan jenjang {bentuk}, status {status}, lokasi {lokasi_str}.
 Interpretasikan akreditasi {akreditasi}: {akred_konteks}.
+Jika nilai_akhir tersedia: sebutkan sebagai skor akreditasi numerik.
 
-## Kapasitas & Tenaga Pengajar
-Sebutkan jumlah siswa. Lalu bahas PTK:
+## Kapasitas Siswa & Pengajar
+Sebutkan total siswa beserta breakdown gender ({siswa_gender_str}).
+Lalu bahas PTK dan tendik:
 - Jika PTK=0: sampaikan data belum tercatat, JANGAN simpulkan tidak ada guru.
-- Jika PTK>0: interpretasikan rasio guru:siswa dengan konteks benchmark nasional
-  yang sudah dihitung di atas. Sebutkan persentase sertifikasi dan apa artinya.
+- Jika PTK>0: interpretasikan rasio guru:siswa, persentase sertifikasi.
+- Jika tendik>0: sebutkan jumlah tenaga kependidikan.
 
-## Komposisi & Stabilitas Guru
+## Komposisi & Stabilitas SDM
 (Hanya jika PTK>0) Interpretasikan proporsi PNS vs honorer.
-Jika honorer > PNS: sorot potensi dampak pada stabilitas jangka panjang.
+Jika honorer > PNS: sorot potensi dampak stabilitas jangka panjang.
 Jika PNS dominan: sorot stabilitas yang baik.
 
 ## Sarana & Rekomendasi
 Komentari kondisi internet, listrik, air secara jujur.
-Jika ada kondisi kritis (dari catatan di atas): SOROT sebagai temuan penting,
-bukan sekadar disebutkan. Tutup dengan satu kalimat insight keseluruhan.
+Jika ada kondisi kritis (dari catatan): SOROT sebagai temuan penting.
+Tutup dengan satu kalimat insight keseluruhan.
 
 PENTING: Gunakan nama "{nama}" PERSIS. JANGAN tulis "Sekolah dengan NPSN X" atau "Sekolah ini".
 PENTING: Jangan ulang angka yang sudah ada di tabel — fokus pada INTERPRETASI.
@@ -1156,9 +1156,11 @@ async def narrate_aggregation(
 ) -> str:
     if total == 0:
         return _zero_result_message(wilayah, active_filters, modul="aggregation")
-    # Label metric untuk template dan narrator
+    # Label metric untuk semua metric_target yang didukung (lihat aggregation_core.py)
     _METRIC_LABELS = {
         "siswa":            "siswa",
+        "siswa_l":          "siswa laki-laki",
+        "siswa_p":          "siswa perempuan",
         "guru":             "guru/PTK",
         "guru_pns":         "guru PNS",
         "guru_honor":       "guru honorer",
@@ -1172,10 +1174,12 @@ async def narrate_aggregation(
         wilayah, total, level, status_filter,
         breakdown_jenjang, breakdown_status,
         drilldown_top3, drilldown_field,
-        total_all=total_all,           
-        pct_of_total=pct_of_total,     
-        active_filters=active_filters, 
+        total_all=total_all,
+        pct_of_total=pct_of_total,
+        active_filters=active_filters,
         jenjang_requested=jenjang_requested,
+        metric_target=metric_target,
+        metric_label=metric_label,
     )
 
     has_breakdown = bool(breakdown_jenjang or breakdown_status or drilldown_top3)
