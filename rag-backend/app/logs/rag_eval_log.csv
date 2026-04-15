@@ -1,0 +1,1 @@
+timestamp,query,provider,duration_ms,context_score,answer_confident,num_docs,answer_length,answer_preview,context_used,from_cache,cost_usd,input_tokens,output_tokens

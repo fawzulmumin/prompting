@@ -1,0 +1,50 @@
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+ENV/
+*.env
+
+# Node.js artifacts (hapus setelah migrasi)
+node_modules/
+package.json
+package-lock.json
+
+# Environment files
+.env
+.env.production
+.env.local
+
+# Git
+.git
+.gitignore
+
+# Docker
+Dockerfile
+docker-compose.yml
+docker-compose.override.yml
+.deploy/
+deploy.sh
+
+# Logs & cache
+logs/
+logs/*.csv
+logs/*.log
+.cache/
+model_cache/
+models/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
