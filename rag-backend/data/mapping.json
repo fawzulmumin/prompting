@@ -1,0 +1,90 @@
+{
+  "settings": {
+    "number_of_shards": 3,
+    "number_of_replicas": 1,
+    "refresh_interval": "30s",
+
+    "analysis": {
+      "normalizer": {
+        "lowercase_normalizer": {
+          "type": "custom",
+          "filter": ["lowercase"]
+        }
+      }
+    }
+  },
+  "mappings": {
+    "dynamic": true,
+    "properties": {
+
+      "npsn": { "type": "keyword" },
+      "nama": { "type": "text" },
+
+      "provinsi": {
+        "type": "keyword",
+        "normalizer": "lowercase_normalizer",
+        "eager_global_ordinals": true,
+        "fields": {
+          "text": {
+            "type": "text"
+          }
+        }
+      },
+      "kabupaten": {
+        "type": "keyword",
+        "normalizer": "lowercase_normalizer",
+        "eager_global_ordinals": true,
+        "fields": {
+          "text": {
+            "type": "text"
+          }
+        }
+      },
+      "kecamatan": {
+        "type": "keyword",
+        "normalizer": "lowercase_normalizer",
+        "eager_global_ordinals": true,
+        "fields": {
+          "text": {
+            "type": "text"
+          }
+        }
+      },
+      "desa_kelurahan": {
+        "type": "keyword",
+        "normalizer": "lowercase_normalizer",
+        "eager_global_ordinals": true,
+        "fields": {
+          "text": {
+            "type": "text"
+          }
+        }
+      },
+
+      "wilayah_key": {
+        "type": "keyword"
+      },
+
+      "lintang": { "type": "float" },
+      "bujur": { "type": "float" },
+
+      "lokasi": {
+        "type": "geo_point"
+      },
+
+      "tahun": { "type": "integer" },
+      "status_sekolah": { "type": "keyword" },
+
+      "akreditasi": {"type": "keyword"},
+      "bentuk_pendidikan": {"type": "keyword"},
+
+      "content": { "type": "text" },
+      "content_vector": {
+        "type": "dense_vector",
+        "dims": 384,
+        "index": true,
+        "similarity": "cosine"
+      }
+    }
+  }
+}
