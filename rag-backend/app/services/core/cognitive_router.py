@@ -22,7 +22,9 @@ from app.services.core.oot_response_templates import get_oot_response
 logger = logging.getLogger(__name__)
  
 _CACHE_TTL = 86_400  # 24 jam
-_LLM_TIMEOUT = 21.0   # detik
+# Harus LEBIH BESAR dari DeepSeek read_timeout supaya httpx yang timeout lebih dulu
+# (error message lebih informatif dari asyncio.CancelledError yang generik)
+_LLM_TIMEOUT = 65.0
  
  
 # ════════════════════════════════════════════════════════════════
@@ -43,7 +45,8 @@ class CognitiveIntent:
     module:    str = "out_of_context"
     secondary: List[str] = field(default_factory=list)
     scope:     str = "nasional"
- 
+    sub_queries: Dict[str, str] = field(default_factory=dict)
+
     # Entities
     jenjang:          Optional[str] = None
     jenjang_list:     List[str] = field(default_factory=list)
@@ -59,15 +62,31 @@ class CognitiveIntent:
     yayasan:          Optional[str] = None
     koordinat_user:   bool = False
     radius_km:        Optional[float] = None
-    siswa_min:    Optional[int]   = None   # filter "lebih dari X siswa"
-    siswa_max:    Optional[int]   = None   # filter "kurang dari X siswa"
-    sort_by:      Optional[str]   = None   # "siswa_total" | "guru_total" | "akreditasi"
-    sort_order:   Optional[str]   = None   # "asc" | "desc"
-    metric_target: Optional[str]  = None   # "sekolah"|"siswa"|"siswa_l"|"siswa_p"|"guru"|"guru_pns"|"guru_honor"|"guru_sertifikasi"|"tendik"
+    metric_target: Optional[str]  = None   # "sekolah"|null — hanya hitung sekolah di index baru
+
+    # QC filters
+    qc_masalah_only:  bool = False          # hanya sekolah dengan total_masalah > 0
+    qc_field:         Optional[int] = None  # kolom QC spesifik (1-13)
+    qc_min_masalah:   Optional[int] = None  # filter minimum jumlah masalah
+    sort_by:    Optional[str] = None   # "total_masalah" | "persen_bersih" | "akreditasi" | null
+    sort_order: Optional[str] = None   # "asc" | "desc" | null
+    qc_persen_min: Optional[float] = None  # filter persen_bersih >= nilai ini
+    qc_persen_max: Optional[float] = None  # filter persen_bersih <= nilai ini
+    qc_field_list: List[int] = field(default_factory=list)  # multi kondisi QC sekaligus
+    qc_persen_query: bool = False  # flag: user minta perhitungan % sekolah bersih/bermasalah
+
+    # Atribut sekolah (idx_sekolah_qc)
+    keaktifan:         Optional[str]  = None  # "A" (aktif) atau "T" (tidak aktif)
+    wilayah_terpencil: Optional[bool] = None
+    wilayah_perbatasan: Optional[bool] = None
+
     # OOT
     is_oot:    bool = False
     oot_reason: Optional[str] = None
- 
+
+    # Dependency-aware orchestration
+    dependencies: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
     # Debug
     raw_label: Optional[str] = None
     @property
@@ -134,6 +153,15 @@ SCHEMA OUTPUT:
   "module": "<label_utama>",
   "secondary": ["<label_pendukung>"],
   "scope": "<nasional|provinsi|kabupaten|kecamatan|desa|geo_radius>",
+  "sub_queries": {
+    "<module_name>": "<reformulated query for that specific module>"
+  },
+  "dependencies": {
+    "<dependent_module>": {
+      "depends_on": "<parent_module>",
+      "inject_from_result": {"<intent_field>": "<result_key>"}
+    }
+  },
   "entities": {
     "jenjang": "<jenjang tunggal jika hanya satu jenis, atau null jika lebih dari satu>",
     "jenjang_list": "<array jenjang jika user minta lebih dari satu, contoh [\"SD\",\"SMP\"], atau [] jika hanya satu>",
@@ -141,11 +169,7 @@ SCHEMA OUTPUT:
     "akreditasi": "<A|B|C|TT|BELUM|null — jika tunggal atau gte/exclude>",
     "akreditasi_mode": "<exact|gte|exclude|in|null>",
     "akreditasi_list": "<array misal [\"A\",\"B\"] jika mode=in, atau [] jika tidak>",
-    "siswa_min": "<angka minimum siswa atau null — untuk 'di atas X', 'lebih dari X'>",
-    "siswa_max": "<angka maksimum siswa atau null — untuk 'di bawah X', 'kurang dari X'>",
-    "sort_by":   "<siswa_total|guru_total|akreditasi|null>",
-    "sort_order":"<asc|desc|null>",
-    "metric_target": "<sekolah|siswa|siswa_l|siswa_p|guru|guru_pns|guru_honor|guru_sertifikasi|tendik|null>"
+    "metric_target": "<sekolah|null>",
     "nama_sekolah": "<nama sekolah spesifik atau null>",
     "npsn": "<8 digit atau null>",
     "wilayah": {
@@ -158,7 +182,19 @@ SCHEMA OUTPUT:
     "wilayah_bandingkan": "<nama wilayah kedua untuk comparison atau null>",
     "yayasan": "<nama yayasan/penyelenggara atau null>",
     "koordinat_user": false,
-    "radius_km": "<angka atau null>"
+    "radius_km": "<angka atau null>",
+    "keaktifan": "<A|T|null — A=aktif, T=tidak aktif>",
+    "wilayah_terpencil": "<true|false|null>",
+    "wilayah_perbatasan": "<true|false|null>",
+    "qc_masalah_only": "<true|false — true jika user minta sekolah yang datanya bermasalah>",
+    "qc_field": "<1-13 atau null — nomor kolom QC spesifik yang bermasalah>",
+    "qc_min_masalah": "<angka atau null — minimum jumlah kolom bermasalah>",
+    "sort_by": "<total_masalah|persen_bersih|akreditasi|null>",
+    "sort_order": "<asc|desc|null — asc=terkecil dulu, desc=terbesar dulu>",
+    "qc_persen_min": "<angka 0-100 atau null — filter sekolah dengan persen_bersih >= nilai ini>",
+    "qc_persen_max": "<angka 0-100 atau null — filter sekolah dengan persen_bersih <= nilai ini>",
+    "qc_field_list": "<array int 1-13 jika ada lebih dari satu kondisi QC spesifik, atau []>",
+    "qc_persen_query": "<true jika user minta persentase/proporsi sekolah bersih atau bermasalah>"
   },
   "is_oot": false,
   "oot_reason": null
@@ -182,7 +218,8 @@ ATURAN 1 — OOT Gatekeeper (cek PERTAMA):
   Jika query tidak mengandung unsur APAPUN dari daftar berikut → is_oot: true
   Domain pendidikan mencakup: sekolah, siswa, guru/PTK, akreditasi, npsn, ppdb,
   zonasi, kurikulum, jenjang (SD/SMP/SMA/SMK/dll), tenaga pendidik, honorer,
-  kepala sekolah, peserta didik, satuan pendidikan, dapodik, emis
+  kepala sekolah, peserta didik, satuan pendidikan, dapodik, emis,
+  infrastruktur sekolah (jamban/toilet/sanitasi/air bersih/listrik/internet/komputer/kode pos)
   PENGECUALIAN: jika query campuran (OOT + pendidikan) → abaikan bagian OOT, proses bagian pendidikan
  
 ATURAN 1B — LIST vs AGGREGATION (Prioritas setelah OOT):
@@ -244,6 +281,14 @@ WILAYAH — Selalu strip prefix administratif:
   Input: "tangsel" → kabupaten: "tangerang selatan"   (alias umum)
   Input: "jaksel" → kabupaten: "jakarta selatan"
   Input: "jakpus" → kabupaten: "jakarta pusat"
+  Input: "NTT" → provinsi: "nusa tenggara timur"
+  Input: "NTB" → provinsi: "nusa tenggara barat"
+  Input: "DIY" → provinsi: "yogyakarta"
+  Input: "Jabar" → provinsi: "jawa barat"
+  Input: "Jatim" → provinsi: "jawa timur"
+  Input: "Jateng" → provinsi: "jawa tengah"
+  Input: "Kaltim" → provinsi: "kalimantan timur"
+  Input: "Sulsel" → provinsi: "sulawesi selatan"
  
 JENJANG — Expand singkatan:
   SMAN/SMPN/SDN/SMKN/MAN/MTSN/MIN → otomatis set status: "NEGERI" + jenjang yang tepat
@@ -257,7 +302,8 @@ JENJANG — Expand singkatan:
   SPK TIDAK PERNAH menjadi bagian dari wilayah.
   Jika ada kata "SPK", selalu interpretasikan sebagai jenjang, bukan nama lokasi.
   Jenjang valid tambahan (gunakan persis seperti ini):
-  "Kursus", "PKBM", "SKB"           → jenjang non-formal, gunakan apa adanya
+  "Kursus", "PKBM", "SKB", "LKP"    → jenjang non-formal, gunakan apa adanya
+  "LKP" = Lembaga Kursus dan Pelatihan — jenjang, BUKAN nama yayasan
   "Pondok Pesantren"                 → jenjang: "Pondok Pesantren"
   "SPK SD/SMP/SMA/SMK/TK/KB"       → tulis dengan spasi: "SPK SMA", "SPK TK", dst.
   "SMTK", "SMPTK", "SMAK"          → jenjang Kristen, gunakan apa adanya
@@ -282,49 +328,142 @@ NAMA SEKOLAH — Ekstrak HANYA jika ada nama spesifik:
 YAYASAN/PENYELENGGARA:
   "milik yayasan Al-Azhar" → yayasan: "Al-Azhar"
   "sekolah penyelenggara Muhammadiyah" → yayasan: "Muhammadiyah"
+  "dikelola oleh Yayasan Harapan" → yayasan: "Harapan"
   "sekolah Kristen" / "sekolah Katolik" → yayasan: "Kristen" / "Katolik"
+  "dikelola oleh lkp" → jenjang: "LKP", yayasan: null  (lkp = jenjang, bukan nama yayasan)
+  "dikelola oleh lkp yayasan" → jenjang: "LKP", yayasan: null  (tanpa nama yayasan spesifik)
   Jika tidak disebutkan → yayasan: null
   
-FILTER NUMERIK:
-  "di atas 500 orang" / "lebih dari 500 siswa" → siswa_min: 500
-  "di bawah 200 siswa" / "kurang dari 200 orang" → siswa_max: 200
-  "antara 300 dan 600 siswa" → siswa_min: 300, siswa_max: 600
- 
-SORTING:
-  "urutkan dari terbanyak siswa" / "dari yang paling banyak siswanya" → sort_by: "siswa_total", sort_order: "desc"
-  "urutkan dari paling sedikit" → sort_by: "siswa_total", sort_order: "asc"
-  METRIC_TARGET — Apa yang ingin dihitung/dijumlah:
-  "berapa siswa" / "jumlah murid" / "total peserta didik" / "jumlah siswa"
-    → metric_target: "siswa"
-  "berapa siswa laki-laki" / "jumlah siswa putra" / "siswa pria" / "murid laki"
-    → metric_target: "siswa_l"
-  "berapa siswa perempuan" / "jumlah siswi" / "siswa putri" / "murid perempuan" / "siswa wanita"
-    → metric_target: "siswa_p"
-  "berapa guru" / "jumlah PTK" / "jumlah tenaga pendidik" / "total guru"
-    → metric_target: "guru"
-  "guru PNS" / "jumlah guru PNS" / "PNS saja"
-    → metric_target: "guru_pns"
-  "guru honorer" / "guru honor" / "tenaga honor"
-    → metric_target: "guru_honor"
-  "guru bersertifikasi" / "guru sertifikasi"
-    → metric_target: "guru_sertifikasi"
-  "tenaga kependidikan" / "tendik"
-    → metric_target: "tendik"
-  "berapa sekolah" / "jumlah sekolah" / tidak ada target spesifik
-    → metric_target: null   ← default, berarti hitung sekolah
-
+METRIC_TARGET:
+  "berapa sekolah" / "jumlah sekolah" / tidak ada target spesifik → metric_target: null
+  Index ini tidak memiliki field siswa/guru — jangan isi metric_target dengan nilai lain.
   PENTING: metric_target HANYA diisi saat module=aggregation atau module=comparison.
-  Untuk module=profile, metric_target selalu null.
+
+KEAKTIFAN:
+  "sekolah aktif" / "sekolah yang masih aktif" → keaktifan: "A"
+  "sekolah tidak aktif" / "sudah ditutup" / "non-aktif" → keaktifan: "T"
+  Jika tidak disebutkan → keaktifan: null
+
+WILAYAH KHUSUS:
+  "wilayah terpencil" / "daerah terpencil" / "sekolah terpencil" → wilayah_terpencil: true
+  "wilayah perbatasan" / "daerah perbatasan" / "sekolah perbatasan" → wilayah_perbatasan: true
+
+FILTER QC — Kualitas Data:
+TRIGGER qc_masalah_only: true — gunakan jika query mengandung salah satu dari:
+  "bermasalah", "data bermasalah", "ada masalah", "tidak lengkap",
+  "residu", "residu sekolah", "residu data", "data kotor", "data jelek",
+  "kualitas data buruk", "data tidak valid", "belum lengkap"
+  → qc_masalah_only: true (wajib set jika ada salah satu trigger di atas)
+TRIGGER qc_field — gunakan jika query menyebut masalah SPESIFIK SATU kondisi:
+  "koordinatnya kosong" / "lintang kosong" / "koordinat tidak ada" → qc_field: 6, qc_masalah_only: true
+  "titik lokasinya kosong" / "lokasinya gak ada" → qc_field: 6, qc_masalah_only: true
+  "bujur kosong" / "koordinat bujur bermasalah" → qc_field: 7, qc_masalah_only: true
+  "NPSN ganda" / "NPSN tidak unik" / "format NPSN" → qc_field: 2, qc_masalah_only: true
+  "foto sekolah belum ada" / "tidak ada foto" / "foto belum diunggah" → qc_field: 12, qc_masalah_only: true
+  "fotonya gak ada" / "foto belum diupload" / "ga ada fotonya" / "fotonya belum ada" / "belum ada foto sekolahnya" → qc_field: 12, qc_masalah_only: true
+  "SK izin operasional kosong" / "belum ada SK izin" → qc_field: 8, qc_masalah_only: true
+  "SK pendirian bermasalah" / "tanggal SK pendirian kosong" → qc_field: 10, qc_masalah_only: true
+  "yayasan tidak terdaftar" / "data yayasan bermasalah" → qc_field: 13, qc_masalah_only: true
+  "nama sekolah bermasalah" / "nama tidak valid" / "namanya aneh" / "nama sekolahnya tidak wajar" → qc_field: 3, qc_masalah_only: true
+  "alamat kosong" / "alamat tidak ada" / "alamatnya tidak ada" / "alamatnya kosong" → qc_field: 4, qc_masalah_only: true
+  "kode wilayah salah" / "kode wilayah bermasalah" → qc_field: 5, qc_masalah_only: true
+  CATATAN: "koordinat salah" ≠ kosong → qc_masalah_only: true saja, JANGAN set qc_field
+  CATATAN: "data acak-acakan" / "datanya kacau" / "data berantakan" → qc_masalah_only: true saja
+TRIGGER qc_min_masalah — gunakan jika query menyebut jumlah masalah minimum:
+  "minimal X kolom bermasalah" / "lebih dari X masalah" / "punya X masalah atau lebih"
+  → qc_min_masalah: X, qc_masalah_only: true
+TRIGGER sort_by — gunakan jika query menyebut urutan/ranking:
+  "urutkan dari terbanyak masalah" / "paling banyak masalah dulu" → sort_by: "total_masalah", sort_order: "desc"
+  "urutkan dari paling sedikit masalah" / "terbaik dulu" → sort_by: "total_masalah", sort_order: "asc"
+  "urutkan dari persen bersih terendah" / "data paling kotor dulu" → sort_by: "persen_bersih", sort_order: "asc"
+  "urutkan dari persen bersih tertinggi" / "data terbersih dulu" → sort_by: "persen_bersih", sort_order: "desc"
+  "paling buruk" / "terburuk" → sort_by: "total_masalah", sort_order: "desc"
+  "terbaik" (konteks QC) → sort_by: "persen_bersih", sort_order: "desc"
+TRIGGER qc_persen_min / qc_persen_max:
+  "persen bersih di bawah 70%" / "kurang dari 70% bersih" → qc_persen_max: 70, qc_masalah_only: true
+  "persen bersih di atas 90%" / "lebih dari 90% bersih" → qc_persen_min: 90
+  "persen bersih antara 50 dan 80" → qc_persen_min: 50, qc_persen_max: 80
+TRIGGER qc_field_list — gunakan jika user menyebut DUA ATAU LEBIH kondisi QC spesifik:
+  "koordinatnya kosong dan foto belum ada" → qc_field_list: [6, 12], qc_field: null, qc_masalah_only: true
+  "NPSN ganda dan alamat kosong" → qc_field_list: [2, 4], qc_field: null, qc_masalah_only: true
+  "nama bermasalah dan yayasan tidak terdaftar" → qc_field_list: [3, 13], qc_field: null, qc_masalah_only: true
+  ATURAN: jika ada dua atau lebih kondisi QC spesifik → pakai qc_field_list (bukan qc_field)
+          jika hanya satu kondisi QC spesifik → pakai qc_field (bukan qc_field_list)
+          qc_field_list: [] (kosong) jika tidak ada dua+ kondisi QC spesifik
+TRIGGER qc_persen_query — gunakan jika user minta PERHITUNGAN persentase, bukan filter:
+  "berapa persen sekolah yang bersih" → qc_persen_query: true, qc_masalah_only: false, module: aggregation
+  "berapa persen sekolah yang bermasalah" → qc_persen_query: true, qc_masalah_only: true, module: aggregation
+  "persentase sekolah data bersih" / "proporsi sekolah bersih" → qc_persen_query: true, module: aggregation
+  PENTING: qc_persen_query true → JANGAN set qc_masalah_only true jika tanya tentang "yang bersih"
+           karena kita butuh TOTAL semua sekolah sebagai denominator
+  BERBEDA dari qc_persen_max: qc_persen_max adalah filter (sekolah yg persen_bersih-nya <= X)
+                               qc_persen_query adalah perhitungan (berapa % dari total yang bersih)
+ATURAN MODULE untuk query residu:
+  Jika ada filter QC + tidak ada nama sekolah spesifik → module: "list"
+  Jika ada filter QC + kata "berapa" / "jumlah" / "total" → module: "aggregation"
+  Jika ada filter QC + kata "tampilkan" / "urutkan" / "ranking" → module: "list"
+  Jika ada filter QC + nama sekolah spesifik → module: "profile"
+  Peta qc_field → nama kolom (1-15):
+    1=Keunikan sekolah, 2=Format NPSN, 3=Nama sekolah, 4=Alamat jalan,
+    5=Kode wilayah, 6=Lintang/koordinat, 7=Bujur/koordinat,
+    8=SK izin operasional, 9=Tanggal SK izin, 10=SK pendirian,
+    11=Tanggal SK pendirian, 12=Foto sekolah, 13=Data yayasan (swasta),
+    14=Reserved/belum aktif, 15=Reserved/belum aktif
 ═══════════════════════════════════════════════════════════
-SCOPE NASIONAL — Aturan Deteksi:
+ATURAN SCOPE (sangat ketat):
 ═══════════════════════════════════════════════════════════
- 
-  scope: "nasional" JIKA:
-  - Tidak ada nama wilayah apapun di query
-  - Ada kata: "nasional", "seluruh indonesia", "se-indonesia", "indonesia"
-  - Query: "berapa total SMK di Indonesia?" → nasional
-  - Query: "berapa SMK akreditasi A?" (tanpa wilayah) → nasional
-  scope bukan nasional jika ada nama kota/kab/prov/kec/desa apapun
+
+1. scope = "nasional" HANYA JIKA:
+   - Query eksplisit menyebut: "nasional", "seluruh indonesia", "se-indonesia",
+     "indonesia", "nusantara", "se-nusantara"
+   - ATAU query sama sekali TIDAK menyebut nama wilayah apapun
+     (tidak ada nama provinsi, kabupaten, kota, kecamatan, desa, atau landmark)
+
+2. scope = "provinsi" JIKA ada nama provinsi:
+   - "jawa barat", "jawa timur", "jawa tengah", "dki jakarta", "aceh",
+     "sumatera utara/barat/selatan", "sulawesi utara/tengah/selatan/tenggara/barat",
+     "kalimantan timur/barat/tengah/selatan/utara", "bali", "ntb", "ntt",
+     "papua", "papua barat", "riau", "kepulauan riau", "jambi", "bengkulu",
+     "lampung", "banten", "bangka belitung", "gorontalo", "maluku", "maluku utara",
+     "sulawesi barat", "d.i. yogyakarta", "yogyakarta", dll
+   - Prefix "provinsi"/"prov." opsional — "di jawa barat" = provinsi
+
+3. scope = "kabupaten" JIKA ada nama kota/kabupaten:
+   - Ada prefix eksplisit: "kota X", "kab. X", "kabupaten X"
+   - ATAU nama kota tanpa prefix yang umum dikenal: "bandung", "surabaya",
+     "malang", "jakarta", "medan", "semarang", "makassar", "palembang",
+     "denpasar", "bogor", "bekasi", "depok", "tangerang", "surakarta", dll
+   - ATURAN PENTING: JIKA ADA NAMA KOTA TANPA PREFIX, TETAP scope=kabupaten
+     (BUKAN nasional) — resolver akan handle disambiguation
+
+4. scope = "kecamatan" JIKA ada prefix "kecamatan"/"kec." + nama
+
+5. scope = "desa" JIKA ada prefix "desa"/"kelurahan"/"kel." + nama
+
+PRIORITAS: desa > kecamatan > kabupaten > provinsi > nasional
+(paling specific menang)
+
+═══════════════════════════════════════════════════════════
+CONTOH BENAR (MUST FOLLOW):
+═══════════════════════════════════════════════════════════
+
+  "berapa total SD di Indonesia"           → scope="nasional"
+  "total SMK nasional"                     → scope="nasional"
+  "berapa sekolah SD"                      → scope="nasional" (tanpa wilayah)
+  "berapa SMK di Bandung"                  → scope="kabupaten", kabupaten="bandung"
+  "berapa SMK di Bandung dan tampilkan"    → scope="kabupaten", kabupaten="bandung"
+  "SMA di Surabaya vs Malang"              → scope="kabupaten", kabupaten="surabaya"
+  "total SMA di kota Bandung"              → scope="kabupaten", kabupaten="bandung"
+  "berapa SMK di Jawa Barat"              → scope="provinsi", provinsi="jawa barat"
+  "jumlah SD di kecamatan Lowokwaru"       → scope="kecamatan", kecamatan="lowokwaru"
+
+═══════════════════════════════════════════════════════════
+CONTOH SALAH (NEVER DO THIS):
+═══════════════════════════════════════════════════════════
+
+  ❌ "berapa SMK di Bandung" → scope="nasional"   (SALAH: Bandung = kota, bukan Indonesia)
+  ❌ "SMA Surabaya"          → scope="nasional"   (SALAH: Surabaya = kota)
+  ❌ "sekolah di Jakarta"    → scope="nasional"   (SALAH: Jakarta = kota, bukan kata ganti Indonesia)
   
 ═══════════════════════════════════════════════════════════
 ATURAN KRITIS — NAMA SEKOLAH vs WILAYAH (ANTI-KONFUSI):
@@ -376,7 +515,7 @@ CONTOH:
 ═══════════════════════════════════════════════════════════
  
 Query: "bandingkan jumlah SMK di Bandung dan Bogor, tampilkan juga daftarnya"
-{"module":"comparison","secondary":["list"],"scope":"kabupaten","entities":{"jenjang":"SMK","status":null,"akreditasi":null,"akreditasi_mode":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":"bandung","kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":"bogor","yayasan":null,"koordinat_user":false,"radius_km":null},"is_oot":false,"oot_reason":null}
+{"module":"comparison","secondary":["list"],"scope":"kabupaten","sub_queries":{"comparison":"bandingkan jumlah SMK di Bandung dan Bogor","list":"daftar SMK di Bandung dan Bogor"},"entities":{"jenjang":"SMK","status":null,"akreditasi":null,"akreditasi_mode":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":"bandung","kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":"bogor","yayasan":null,"koordinat_user":false,"radius_km":null},"is_oot":false,"oot_reason":null}
  
 Query: "profil SMAN 3 Bandung"
 {"module":"profile","secondary":[],"scope":"kabupaten","entities":{"jenjang":"SMA","status":"NEGERI","akreditasi":null,"akreditasi_mode":null,"nama_sekolah":"SMAN 3 Bandung","npsn":null,"wilayah":{"provinsi":null,"kabupaten":"bandung","kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null},"is_oot":false,"oot_reason":null}
@@ -412,16 +551,95 @@ Query: "sekolah akreditasi a dan b di kabupaten sleman ada berapa"
 {"module":"aggregation","secondary":[],"scope":"kabupaten","entities":{"jenjang":null,"status":null,"akreditasi":"B","akreditasi_mode":"gte","nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":"sleman","kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null},"is_oot":false,"oot_reason":null}
 
 Query: "berapa pondok pesantren di Jawa Timur"
-{"module":"aggregation","secondary":[],"scope":"provinsi","entities":{"jenjang":"Pondok Pesantren","status":null,"akreditasi":null,"akreditasi_mode":null,"siswa_min":null,"siswa_max":null,"sort_by":null,"sort_order":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":"jawa timur","kabupaten":null,"kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null},"is_oot":false,"oot_reason":null}
+{"module":"aggregation","secondary":[],"scope":"provinsi","entities":{"jenjang":"Pondok Pesantren","status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":"jawa timur","kabupaten":null,"kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null},"is_oot":false,"oot_reason":null}
 
 Query: "daftar PKBM di Bandung"
-{"module":"list","secondary":[],"scope":"kabupaten","entities":{"jenjang":"PKBM","status":null,"akreditasi":null,"akreditasi_mode":null,"siswa_min":null,"siswa_max":null,"sort_by":null,"sort_order":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":"bandung","kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null},"is_oot":false,"oot_reason":null}
+{"module":"list","secondary":[],"scope":"kabupaten","entities":{"jenjang":"PKBM","status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":"bandung","kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null},"is_oot":false,"oot_reason":null}
 
 Query: "berapa total sd smp sma smk di kabupaten sleman terakreditasi b ke atas"
-{"module":"aggregation","secondary":[],"scope":"kabupaten","entities":{"jenjang":null,"jenjang_list":["SD","SMP","SMA","SMK"],"status":null,"akreditasi":"B","akreditasi_mode":"gte","siswa_min":null,"siswa_max":null,"sort_by":null,"sort_order":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":"sleman","kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null},"is_oot":false,"oot_reason":null}
+{"module":"aggregation","secondary":[],"scope":"kabupaten","entities":{"jenjang":null,"jenjang_list":["SD","SMP","SMA","SMK"],"status":null,"akreditasi":"B","akreditasi_mode":"gte","metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":"sleman","kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null},"is_oot":false,"oot_reason":null}
 
 Query: "daftar sd dan smp negeri di kecamatan lowokwaru"
-{"module":"list","secondary":[],"scope":"kecamatan","entities":{"jenjang":null,"jenjang_list":["SD","SMP"],"status":"NEGERI","akreditasi":null,"akreditasi_mode":null,"siswa_min":null,"siswa_max":null,"sort_by":null,"sort_order":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":null,"kecamatan":"lowokwaru","desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null},"is_oot":false,"oot_reason":null}
+{"module":"list","secondary":[],"scope":"kecamatan","entities":{"jenjang":null,"jenjang_list":["SD","SMP"],"status":"NEGERI","akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":null,"kecamatan":"lowokwaru","desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null},"is_oot":false,"oot_reason":null}
+
+Query: "sekolah yang koordinatnya kosong di Jawa Barat"
+{"module":"list","secondary":[],"scope":"provinsi","entities":{"jenjang":null,"jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":"jawa barat","kabupaten":null,"kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":true,"qc_field":6,"qc_min_masalah":null},"is_oot":false,"oot_reason":null}
+
+Query: "sekolah bermasalah di Jawa Barat"
+{"module":"list","secondary":[],"scope":"provinsi","entities":{"jenjang":null,"jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":"jawa barat","kabupaten":null,"kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":true,"qc_field":null,"qc_min_masalah":null},"is_oot":false,"oot_reason":null}
+
+Query: "berapa sekolah di wilayah terpencil"
+{"module":"aggregation","secondary":[],"scope":"nasional","entities":{"jenjang":null,"jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":null,"kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":true,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null},"is_oot":false,"oot_reason":null}
+
+Query: "berapa SMK di bandung"
+{"module":"aggregation","secondary":[],"scope":"kabupaten","sub_queries":{},"entities":{"jenjang":"SMK","status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":"bandung","kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null},"is_oot":false,"oot_reason":null}
+
+Query: "berapa SMK di Bandung dan tampilkan daftarnya"
+{"module":"aggregation","secondary":["list"],"scope":"kabupaten","sub_queries":{"aggregation":"berapa SMK di Bandung","list":"tampilkan daftar SMK di Bandung"},"entities":{"jenjang":"SMK","status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":"bandung","kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null},"is_oot":false,"oot_reason":null}
+
+Query: "residu sekolah SMP di Jawa Barat"
+{"module":"list","secondary":[],"scope":"provinsi","sub_queries":{},"entities":{"jenjang":"SMP","jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":"jawa barat","kabupaten":null,"kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":true,"qc_field":null,"qc_min_masalah":null},"is_oot":false,"oot_reason":null}
+
+Query: "sekolah yang koordinatnya kosong di Bandung"
+{"module":"list","secondary":[],"scope":"kabupaten","sub_queries":{},"entities":{"jenjang":null,"jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":"bandung","kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":true,"qc_field":6,"qc_min_masalah":null},"is_oot":false,"oot_reason":null}
+
+Query: "daftar sekolah dengan foto yang belum ada di Surabaya"
+{"module":"list","secondary":[],"scope":"kabupaten","sub_queries":{},"entities":{"jenjang":null,"jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":"surabaya","kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":true,"qc_field":12,"qc_min_masalah":null},"is_oot":false,"oot_reason":null}
+
+Query: "sekolah dengan lebih dari 3 masalah data di Jakarta"
+{"module":"list","secondary":[],"scope":"kabupaten","sub_queries":{},"entities":{"jenjang":null,"jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":"jakarta","kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":true,"qc_field":null,"qc_min_masalah":3},"is_oot":false,"oot_reason":null}
+
+Query: "berapa SMK yang datanya bermasalah di Jawa Timur"
+{"module":"aggregation","secondary":[],"scope":"provinsi","sub_queries":{},"entities":{"jenjang":"SMK","jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":"jawa timur","kabupaten":null,"kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":true,"qc_field":null,"qc_min_masalah":null},"is_oot":false,"oot_reason":null}
+
+Query: "tampilkan sekolah data bermasalah urutkan paling banyak masalah"
+{"module":"list","secondary":[],"scope":"nasional","sub_queries":{},"entities":{"jenjang":null,"jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":null,"kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":true,"qc_field":null,"qc_min_masalah":null},"is_oot":false,"oot_reason":null}
+
+Query: "sekolah yayasan tidak terdaftar di kecamatan Cisauk"
+{"module":"list","secondary":[],"scope":"kecamatan","sub_queries":{},"entities":{"jenjang":null,"jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":null,"kecamatan":"cisauk","desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":true,"qc_field":13,"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null},"is_oot":false,"oot_reason":null}
+
+Query: "Tampilkan 10 SMP negeri terbanyak masalah di Kalimantan Barat, urutkan dari yang terburuk"
+{"module":"list","secondary":[],"scope":"provinsi","sub_queries":{},"entities":{"jenjang":"SMP","jenjang_list":[],"status":"NEGERI","akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":"kalimantan barat","kabupaten":null,"kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":true,"qc_field":null,"qc_min_masalah":null,"sort_by":"total_masalah","sort_order":"desc","qc_persen_min":null,"qc_persen_max":null},"is_oot":false,"oot_reason":null}
+
+Query: "sekolah dengan persen bersih di bawah 50% di Jawa Timur"
+{"module":"list","secondary":[],"scope":"provinsi","sub_queries":{},"entities":{"jenjang":null,"jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":"jawa timur","kabupaten":null,"kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":true,"qc_field":null,"qc_min_masalah":null,"sort_by":"persen_bersih","sort_order":"asc","qc_persen_min":null,"qc_persen_max":50},"is_oot":false,"oot_reason":null}
+
+Query: "Total sekolah dengan persen bersih di bawah 70% di Bali"
+{"module":"aggregation","secondary":[],"scope":"provinsi","sub_queries":{},"entities":{"jenjang":null,"jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":"bali","kabupaten":null,"kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":true,"qc_field":null,"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":70},"is_oot":false,"oot_reason":null}
+
+Query: "Sekolah mana yang datanya paling kotor di Indonesia?"
+{"module":"list","secondary":[],"scope":"nasional","sub_queries":{},"entities":{"jenjang":null,"jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":null,"kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":true,"qc_field":null,"qc_min_masalah":null,"sort_by":"total_masalah","sort_order":"desc","qc_persen_min":null,"qc_persen_max":null},"is_oot":false,"oot_reason":null}
+
+Query: "sekolah dengan nama bermasalah di NTT"
+{"module":"list","secondary":[],"scope":"provinsi","sub_queries":{},"entities":{"jenjang":null,"jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":"nusa tenggara timur","kabupaten":null,"kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":true,"qc_field":3,"qc_field_list":[],"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null,"qc_persen_query":false},"is_oot":false,"oot_reason":null}
+
+Query: "SMK swasta di Jawa Barat yang koordinatnya kosong dan foto belum ada"
+{"module":"list","secondary":[],"scope":"provinsi","sub_queries":{},"entities":{"jenjang":"SMK","jenjang_list":[],"status":"SWASTA","akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":"jawa barat","kabupaten":null,"kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":true,"qc_field":null,"qc_field_list":[6,12],"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null,"qc_persen_query":false},"is_oot":false,"oot_reason":null}
+
+Query: "Berapa persen sekolah yang sudah data bersih di seluruh Indonesia?"
+{"module":"aggregation","secondary":[],"scope":"nasional","sub_queries":{},"entities":{"jenjang":null,"jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":null,"kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_field_list":[],"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null,"qc_persen_query":true},"is_oot":false,"oot_reason":null}
+
+═══════════════════════════════════════════════════════════
+ATURAN sub_queries:
+═══════════════════════════════════════════════════════════
+- WAJIB diisi kalau secondary != []
+- Kalau secondary kosong, sub_queries harus {}
+- Setiap modul (primary + tiap secondary) harus punya entry
+- Reformulate query untuk fokus pada intent modul tersebut
+- JANGAN ubah/hilangkan filter (jenjang, status, akreditasi, wilayah)
+- Pertahankan bahasa Indonesia natural
+
+CONTOH 1:
+Query: "bandingkan SMK akreditasi A di Bandung dan Bogor, tampilkan daftarnya"
+sub_queries: {"comparison":"bandingkan jumlah SMK akreditasi A di Bandung dan Bogor","list":"daftar SMK akreditasi A di Bandung dan Bogor"}
+
+CONTOH 2:
+Query: "berapa SMK di Surabaya dan tampilkan profil sekolah negerinya"
+sub_queries: {"aggregation":"jumlah SMK di Surabaya","list":"daftar SMK negeri di Surabaya"}
+
+CONTOH 3 (single intent, secondary=[]):
+Query: "berapa total SD se-Indonesia"
+sub_queries: {}
 
 Balas HANYA dengan JSON valid. Tanpa markdown, tanpa penjelasan.
 """
@@ -444,17 +662,58 @@ _SCHOOL_SIGNALS = {
     "sd", "smp", "sma", "smk", "mi", "mts", "ma", "tk", "paud", "slb",
     "sman", "smpn", "sdn", "smkn", "man", "mtsn", "min",
     "npsn", "akreditasi", "ppdb", "zonasi", "honorer",
+    # Infrastruktur satuan pendidikan
+    "jamban", "toilet", "sanitasi", "air bersih", "sumber air",
+    "listrik", "internet", "komputer", "kode pos",
+    # Kualitas data & atribut index baru
+    "kualitas data", "data bermasalah", "koordinat", "npsn ganda",
+    "sk izin", "sk pendirian", "foto sekolah",
+    "wilayah terpencil", "wilayah perbatasan", "bos", "keaktifan sekolah",
+    # Kualitas data / residu
+    "residu", "koordinat kosong",
+    "npsn ganda", "persen bersih", "total masalah", "masalah data",
+    "yayasan tidak terdaftar",
 }
  
 _WILAYAH_ALIAS = {
-    "tangsel": "tangerang selatan",
-    "jaksel": "jakarta selatan",
-    "jakbar": "jakarta barat",
-    "jakpus": "jakarta pusat",
-    "jakut": "jakarta utara",
-    "jakti": "jakarta timur",
-    "jogja": "yogyakarta",
-    "solo": "surakarta",
+    # Jakarta
+    "tangsel":  "tangerang selatan",
+    "jaksel":   "jakarta selatan",
+    "jakbar":   "jakarta barat",
+    "jakpus":   "jakarta pusat",
+    "jakut":    "jakarta utara",
+    "jakti":    "jakarta timur",
+    # Yogyakarta
+    "jogja":    "yogyakarta",
+    "diy":      "yogyakarta",
+    "yogya":    "yogyakarta",
+    # Jawa
+    "jabar":    "jawa barat",
+    "jatim":    "jawa timur",
+    "jateng":   "jawa tengah",
+    # Kalimantan
+    "kaltim":   "kalimantan timur",
+    "kalbar":   "kalimantan barat",
+    "kalteng":  "kalimantan tengah",
+    "kalsel":   "kalimantan selatan",
+    "kaltara":  "kalimantan utara",
+    # Sulawesi
+    "sulsel":   "sulawesi selatan",
+    "sulut":    "sulawesi utara",
+    "sulteng":  "sulawesi tengah",
+    "sulbar":   "sulawesi barat",
+    "sultra":   "sulawesi tenggara",
+    # Nusa Tenggara
+    "ntt":      "nusa tenggara timur",
+    "ntb":      "nusa tenggara barat",
+    # Sumatera
+    "sumut":    "sumatera utara",
+    "sumbar":   "sumatera barat",
+    "sumsel":   "sumatera selatan",
+    # Lainnya
+    "solo":     "surakarta",
+    "bdg":      "bandung",
+    "sby":      "surabaya",
 }
  
 _AKRED_RE = re.compile(
@@ -463,7 +722,7 @@ _AKRED_RE = re.compile(
     re.I
 )
 _JENJANG_RE = re.compile(
-    r'\b(sd|smp|sma|smk|mi|mts|ma|tk|paud|kb|ra|sps|tpa|paudq|pkbm|skb|kursus|slb)\b'
+    r'\b(sd|smp|sma|smk|mi|mts|ma|tk|paud|kb|ra|sps|tpa|paudq|pkbm|skb|kursus|lkp|slb)\b'
     r'|(?:pondok\s+pesantren|pesantren|pondok|universitas|institut|politeknik|akademi|sekolah\s+tinggi)',
     re.I
 )
@@ -499,7 +758,7 @@ def _keyword_fallback(query: str) -> CognitiveIntent:
         "tk": "TK", "paud": "PAUD", "slb": "SLB",
         "kb": "KB", "ra": "RA", "sps": "SPS", "tpa": "TPA",
         "paudq": "PAUDQ", "pkbm": "PKBM", "skb": "SKB",
-        "kursus": "Kursus",
+        "kursus": "Kursus", "lkp": "LKP",
         "pesantren": "Pondok Pesantren",
         "pondok pesantren": "Pondok Pesantren",
         "pondok": "Pondok Pesantren",
@@ -647,52 +906,195 @@ def _keyword_fallback(query: str) -> CognitiveIntent:
             break
  
     # ── Routing utama ────────────────────────────────────────────────────────
+    # Prioritas infrastruktur: query tentang fasilitas sekolah (jamban, toilet, air, listrik, dst.)
+    # → profile jika ada indikasi nama sekolah, list jika tidak
+    _INFRA_SIGNALS = ("jamban", "toilet", "sanitasi", "air bersih", "sumber air",
+                      "listrik", "internet", "komputer")
+    _has_infra_signal = any(sig in q for sig in _INFRA_SIGNALS)
+
     # Prioritas 1: nama sekolah spesifik (SMPN 5, SDN 02, ...) atau NPSN
     # Pola jenjang untuk deteksi nama sekolah bernomor (SDN 5, PKBM 02, SLB 1, ...)
-    _NAMED_SCHOOL_RE = re.compile(
+    _NUMBERED_SCHOOL_RE = re.compile(
         r'\b(?:sd|smp|sma|smk|mi|mts|ma|tk|slb|pkbm|smtk|smak|sps|skb|ra|kb|tpa|paud)n?\s*\d+\b',
         re.IGNORECASE,
     )
-    _has_named_school = bool(npsn or _NAMED_SCHOOL_RE.search(q))
- 
+    _has_named_school = bool(npsn or _NUMBERED_SCHOOL_RE.search(q))
+
     # Prioritas 2: query dengan nama sekolah non-numbered + kata profil/alamat/lokasi
     _PROFILE_SIGNALS = ("profil ", "profile ", "alamat ", "lokasi", "lokasinya", "di mana", "dimana", "terakreditasi", "akreditasi?")
     _has_profile_signal = any(sig in q for sig in _PROFILE_SIGNALS)
- 
+
     # Dua nama sekolah bernomor + vs → profile (school vs school)
-    _named_school_count = len(_NAMED_SCHOOL_RE.findall(q))
+    _named_school_count = len(_NUMBERED_SCHOOL_RE.findall(q))
  
     if _has_named_school:
         module = "profile"
+
+    elif _has_infra_signal and (_has_named_school or (jenjang and nama_sekolah_hint(q))):
+        # Query infrastruktur sekolah dengan nama spesifik → profile
+        module = "profile"
+
+    elif _has_infra_signal and wilayah_hint(q):
+        # Query infra tanpa nama sekolah tapi ada wilayah → list dengan field infra
+        module = "list"
+
     elif _has_profile_signal and jenjang and nama_sekolah_hint(q):
         # Ada jenjang + sinyal profil + nama sekolah non-numbered → profile
         module = "profile"
-    elif any(w in q for w in ("bandingkan", "versus", "dibanding", "perbandingan", "perbedaan", "selisih", "mana yang lebih", "mana lebih", "lebih banyak")):
+
+    elif any(w in q for w in (
+        "bandingkan", "versus", "dibanding", "perbandingan",
+        "perbedaan", "selisih", "mana yang lebih",
+        "mana lebih", "lebih banyak"
+    )):
         module = "comparison"
+
     elif "vs" in q.split():
         # "vs" standalone — cek apakah dua nama sekolah spesifik
         module = "comparison"
+
     elif any(w in q for w in ("berapa", "jumlah", "total")) or any(
         abbr in q for abbr in ("jmlh", "jml ", "jml.")
     ) or re.search(r'\bpaling\s+banyak\b', q) or re.search(r'\bbanyak\s+sekolah\b', q):
         module = "aggregation"
-    elif any(w in q for w in ("terdekat dari sini", "dari sini", "posisi saya", "posisi saya sekarang", "koordinat_user")) or \
-         re.search(r'\bradius\b', q) or \
-         re.search(r'\bkoordinat\b', q):
+
+    elif any(w in q for w in (
+        "terdekat dari sini", "dari sini",
+        "posisi saya", "posisi saya sekarang",
+        "koordinat_user",
+        "dari rumah saya", "dari rumah",
+        "dari tempat saya",
+    )) or re.search(r'\bradius\b', q) or re.search(r'\bkoordinat\b', q):
         module = "geo"
+
     elif any(w in q for w in ("daftar", "list", "tampilkan", "cari", "apa saja")):
         module = "list"
+
     elif has_school:
         module = "list"
+
     else:
         return CognitiveIntent(module="out_of_context", is_oot=True)
  
     # Hapus secondary yang sama dengan primary
     secondary = [s for s in secondary if s != module]
- 
+
+    # ═══════════════════════════════════════════════════════════════
+    # SCOPE DETECTION — heuristik berdasarkan keyword wilayah
+    # ═══════════════════════════════════════════════════════════════
+    _scope = "nasional"
+
+    _DESA_PATTERNS    = [r'\bdesa\s+\w+', r'\bkelurahan\s+\w+', r'\bkel\.\s*\w+']
+    _KEC_PATTERNS     = [r'\bkecamatan\s+\w+', r'\bkec\.\s*\w+']
+    _KAB_PATTERNS     = [r'\bkabupaten\s+\w+', r'\bkab\.\s*\w+', r'\bkota\s+\w+']
+    _PROV_PATTERNS    = [r'\bprovinsi\s+\w+', r'\bprov\.\s*\w+']
+    _NASIONAL_PATTERNS = [
+        r'\bindonesia\b', r'\bnasional\b',
+        r'\bse-?indonesia\b', r'\bseluruh\s+indonesia\b', r'\bnusantara\b',
+    ]
+
+    if any(_re.search(p, q) for p in _DESA_PATTERNS):
+        _scope = "desa"
+    elif any(_re.search(p, q) for p in _KEC_PATTERNS):
+        _scope = "kecamatan"
+    elif any(_re.search(p, q) for p in _KAB_PATTERNS):
+        _scope = "kabupaten"
+    elif any(_re.search(p, q) for p in _PROV_PATTERNS):
+        _scope = "provinsi"
+    elif any(_re.search(p, q) for p in _NASIONAL_PATTERNS):
+        _scope = "nasional"
+    else:
+        # Fallback: ada " di <kata>" tapi tidak ada prefix administratif
+        # → kemungkinan wilayah yang tidak dikenali, default ke kabupaten
+        # agar TIDAK di-treat nasional oleh aggregation handler.
+        _di_match = _re.search(r'\bdi\s+([a-z][a-z\s]+?)(?:\s|$|,|\.)', q)
+        if _di_match:
+            _possible_loc = _di_match.group(1).strip()
+            _LOC_STOPWORDS = {
+                "atas", "bawah", "dalam", "luar", "sini", "sana",
+                "indonesia", "nusantara",
+            }
+            if _possible_loc and _possible_loc not in _LOC_STOPWORDS:
+                _scope = "kabupaten"
+
+    logger.debug("[KeywordFallback] scope=%s", _scope)
+
+    # ═══════════════════════════════════════════════════════════════
+    # SUB-QUERIES untuk multi-intent — splitting heuristik
+    # ═══════════════════════════════════════════════════════════════
+    _sub_queries: Dict[str, str] = {}
+
+    if secondary:
+        _CONNECTOR_PATTERN = _re.compile(
+            r'\s*(?:,?\s*(?:dan|lalu|kemudian|serta|juga)\s+'
+            r'(?=tampilkan|daftar|list|cari|sebutkan|tunjukkan|'
+            r'bandingkan|berapa|jumlah|total|profil))',
+            _re.IGNORECASE,
+        )
+
+        _parts = _CONNECTOR_PATTERN.split(query)
+        _parts = [p.strip(" ,.") for p in _parts if p.strip()]
+
+        _INTENT_KEYWORDS: Dict[str, list] = {
+            "aggregation": ["berapa", "jumlah", "total", "banyak"],
+            "list":        ["tampilkan", "daftar", "list", "cari",
+                            "sebutkan", "tunjukkan"],
+            "comparison":  ["bandingkan", "versus", "vs", "perbandingan",
+                            "dibanding", "selisih"],
+            "profile":     ["profil", "informasi tentang", "tentang sekolah",
+                            "info sekolah"],
+            "geo":         ["terdekat", "radius", "sekitar", "dari sini"],
+        }
+
+        if len(_parts) >= 2:
+            _unassigned = [module] + list(secondary)
+            for part in _parts:
+                part_lower = part.lower()
+                for mod in list(_unassigned):
+                    if any(kw in part_lower for kw in _INTENT_KEYWORDS.get(mod, [])):
+                        _sub_queries[mod] = part
+                        _unassigned.remove(mod)
+                        break
+            # Modul yang tidak ter-assign fallback ke query asli
+            for mod in _unassigned:
+                _sub_queries[mod] = query
+        else:
+            # Tidak bisa split — semua modul pakai query asli
+            _sub_queries[module] = query
+            for sec in secondary:
+                _sub_queries[sec] = query
+
+        logger.debug("[KeywordFallback] sub_queries=%s", _sub_queries)
+
+    # ═══════════════════════════════════════════════════════════════
+    # DEPENDENCY DETECTION — ranking query that also requests a list
+    # Pattern: terbanyak/tertinggi/terbesar/ranking + tampilkan/daftar/list/sekolahnya
+    # → aggregation feeds list via top_location injection
+    # ═══════════════════════════════════════════════════════════════
+    _RANKING_DEP = {"terbanyak", "tertinggi", "terbesar"}
+    _LIST_DEP    = {"tampilkan", "daftar", "list", "sekolahnya", "sebutkan"}
+    _has_ranking_dep = any(w in q for w in _RANKING_DEP) or bool(_re.search(r'\branking\b', q))
+    _has_list_dep    = any(w in q for w in _LIST_DEP)
+
+    dependencies: Dict[str, Dict[str, Any]] = {}
+    if _has_ranking_dep and _has_list_dep:
+        module = "aggregation"
+        if "list" not in secondary:
+            secondary.append("list")
+        dependencies = {
+            "list": {
+                "depends_on": "aggregation",
+                "inject_from_result": {"provinsi": "top_location"},
+            }
+        }
+        if not _sub_queries:
+            _sub_queries = {"aggregation": query, "list": query}
+
     return CognitiveIntent(
         module=module,
         secondary=secondary,
+        scope=_scope,
+        sub_queries=_sub_queries,
         akreditasi=akreditasi,
         akreditasi_mode=_akred_mode,
         jenjang=jenjang,
@@ -700,6 +1102,7 @@ def _keyword_fallback(query: str) -> CognitiveIntent:
         status=status,
         npsn=npsn,
         yayasan=yayasan,
+        dependencies=dependencies,
     )
  
  
@@ -709,6 +1112,20 @@ _GENERIC_AFTER_JENJANG = re.compile(
     re.IGNORECASE
 )
  
+def wilayah_hint(q: str) -> bool:
+    """Cek apakah ada indikasi wilayah/lokasi dalam query.
+
+    Digunakan untuk membedakan query infra yang menyebut lokasi (→ list)
+    dari query infra tanpa lokasi (→ fallback/profile).
+    """
+    _WILAYAH_MARKERS = (
+        "kecamatan", "kabupaten", "provinsi", "desa ",
+        "kelurahan", "kotamadya", " di ",
+    )
+    q_lower = q.lower() if not q.islower() else q
+    return any(marker in q_lower for marker in _WILAYAH_MARKERS)
+
+
 def nama_sekolah_hint(q: str) -> bool:
     """Cek apakah ada indikasi nama sekolah non-numbered (misal 'SMK Pelita Harapan').
     Jenjang harus diikuti nama proper, bukan kata umum/filter.
@@ -743,7 +1160,7 @@ def _safe_int(v) -> Optional[int]:
 # LLM OUTPUT PARSER
 # ════════════════════════════════════════════════════════════════
 
-def _parse_llm_output(raw: str) -> Optional[CognitiveIntent]:
+def _parse_llm_output(raw: str, query: str = "") -> Optional[CognitiveIntent]:
     if not raw:
         return None
     try:
@@ -767,6 +1184,39 @@ def _parse_llm_output(raw: str) -> Optional[CognitiveIntent]:
             if isinstance(s, str) and s.lower() in VALID_MODULES
         ]
 
+        # Parse sub_queries dengan validasi
+        _sub_queries_raw = obj.get("sub_queries") or {}
+        sub_queries: Dict[str, str] = {}
+        if isinstance(_sub_queries_raw, dict):
+            for mod_name, sub_q in _sub_queries_raw.items():
+                if mod_name in VALID_MODULES and isinstance(sub_q, str) and sub_q.strip():
+                    sub_queries[mod_name] = sub_q.strip()
+
+        # Defensive fallback: secondary ada tapi sub_queries kosong/incomplete
+        if secondary and not sub_queries:
+            logger.warning(
+                "[CognitiveRouter] secondary=%s tapi sub_queries kosong → fallback ke query asli",
+                secondary,
+            )
+        elif secondary and query:
+            if module not in sub_queries:
+                sub_queries[module] = query
+            for sec in secondary:
+                if sec not in sub_queries:
+                    logger.warning(
+                        "[CognitiveRouter] missing sub_query for secondary=%s → fallback",
+                        sec,
+                    )
+                    sub_queries[sec] = query
+
+        # Parse dependencies
+        _deps_raw = obj.get("dependencies") or {}
+        dependencies: Dict[str, Dict[str, Any]] = {}
+        if isinstance(_deps_raw, dict):
+            for _dep_mod, _dep_cfg in _deps_raw.items():
+                if _dep_mod in VALID_MODULES and isinstance(_dep_cfg, dict):
+                    dependencies[_dep_mod] = _dep_cfg
+
         ent = obj.get("entities", {}) or {}
         wil = ent.get("wilayah", {}) or {}
 
@@ -782,10 +1232,20 @@ def _parse_llm_output(raw: str) -> Optional[CognitiveIntent]:
         else:
             akreditasi_list = []
 
+        def _safe_bool_field(v) -> Optional[bool]:
+            if v in (None, "null", "", "None"):
+                return None
+            if isinstance(v, bool):
+                return v
+            if isinstance(v, str):
+                return v.lower() == "true"
+            return bool(v)
+
         return CognitiveIntent(
             module=module,
             secondary=secondary,
             scope=scope,
+            sub_queries=sub_queries,
             jenjang=_norm(ent.get("jenjang")),
             jenjang_list=[
                 j for j in (ent.get("jenjang_list") or [])
@@ -794,10 +1254,7 @@ def _parse_llm_output(raw: str) -> Optional[CognitiveIntent]:
             status=_norm(ent.get("status")),
             akreditasi=_norm(ent.get("akreditasi")),
             akreditasi_mode=_norm(ent.get("akreditasi_mode")),
-
-            # TAMBAHAN FIELD BARU
             akreditasi_list=akreditasi_list,
-
             nama_sekolah=_norm(ent.get("nama_sekolah")),
             npsn=_norm(ent.get("npsn")),
             wilayah=WilayahEntities(
@@ -812,12 +1269,24 @@ def _parse_llm_output(raw: str) -> Optional[CognitiveIntent]:
             koordinat_user=bool(ent.get("koordinat_user", False)),
             radius_km=_safe_float(ent.get("radius_km")),
             metric_target=_norm(ent.get("metric_target")),
-            siswa_min=_safe_int(ent.get("siswa_min")),
-            siswa_max=_safe_int(ent.get("siswa_max")),
+            keaktifan=_norm(ent.get("keaktifan")),
+            wilayah_terpencil=_safe_bool_field(ent.get("wilayah_terpencil")),
+            wilayah_perbatasan=_safe_bool_field(ent.get("wilayah_perbatasan")),
+            qc_masalah_only=bool(ent.get("qc_masalah_only", False)),
+            qc_field=_safe_int(ent.get("qc_field")),
+            qc_min_masalah=_safe_int(ent.get("qc_min_masalah")),
             sort_by=_norm(ent.get("sort_by")),
             sort_order=_norm(ent.get("sort_order")),
+            qc_persen_min=_safe_float(ent.get("qc_persen_min")),
+            qc_persen_max=_safe_float(ent.get("qc_persen_max")),
+            qc_field_list=[
+                x for x in (ent.get("qc_field_list") or [])
+                if isinstance(x, int) and 1 <= x <= 13
+            ],
+            qc_persen_query=bool(ent.get("qc_persen_query", False)),
             is_oot=bool(obj.get("is_oot", False)),
             oot_reason=_norm(obj.get("oot_reason")),
+            dependencies=dependencies,
             raw_label=raw[:80],
         )
     except Exception as e:
@@ -856,7 +1325,7 @@ def _canonical_query(q: str) -> str:
 
 def _cache_key(q: str) -> str:
     h = hashlib.md5(_canonical_query(q).encode()).hexdigest()
-    return f"cognitive_router:v2:{h}"
+    return f"cognitive_router:v5:{h}"
 # ════════════════════════════════════════════════════════════════
 # MAIN CLASSIFIER
 # ═══════════════════════════════════════════════════════════════
@@ -880,6 +1349,12 @@ async def classify_and_extract(
             if cached:
                 cached_copy = dict(cached)
                 wil_data = cached_copy.pop("wilayah", {})
+                cached_copy.setdefault("sort_by", None)
+                cached_copy.setdefault("sort_order", None)
+                cached_copy.setdefault("qc_persen_min", None)
+                cached_copy.setdefault("qc_persen_max", None)
+                cached_copy.setdefault("qc_field_list", [])
+                cached_copy.setdefault("qc_persen_query", False)
                 intent = CognitiveIntent(**cached_copy)
                 intent.wilayah = WilayahEntities(**wil_data)
                 return intent
@@ -894,9 +1369,28 @@ async def classify_and_extract(
             call_deepseek(prompt, max_tokens=500, temperature=0.0),
             timeout,
         )
-        intent = _parse_llm_output(raw)
+        intent = _parse_llm_output(raw, query=query)
+        if intent is not None:
+            logger.info(
+                "[CognitiveRouter] Parsed intent: module=%s secondary=%s scope=%s "
+                "wilayah={prov=%s, kab=%s, kec=%s, desa=%s} "
+                "jenjang=%s status=%s sub_queries_keys=%s",
+                intent.module,
+                intent.secondary,
+                intent.scope,
+                intent.wilayah.provinsi,
+                intent.wilayah.kabupaten,
+                intent.wilayah.kecamatan,
+                intent.wilayah.desa,
+                intent.jenjang,
+                intent.status,
+                list(intent.sub_queries.keys()),
+            )
     except Exception as e:
-        logger.warning("[CognitiveRouter] LLM call failed: %s", e)
+        logger.warning(
+            "[CognitiveRouter] LLM call failed: %s: %s",
+            type(e).__name__, e or "(no message)",
+        )
  
     # Keyword fallback
     if intent is None:

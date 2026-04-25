@@ -3,6 +3,7 @@
 # Enterprise-grade Query Rewrite Engine
 
 import csv
+import hashlib
 import re
 import logging
 import asyncio
@@ -214,7 +215,7 @@ async def rewrite_query(
 # =============================================================================
 
 def _cache_key(q: str) -> str:
-    return f"rewrite:{hash(q.lower().strip())}"
+    return f"rewrite:{hashlib.md5(q.lower().strip().encode()).hexdigest()}"
 
 async def get_cached_rewrite(original_query: str) -> Optional[str]:
     try:

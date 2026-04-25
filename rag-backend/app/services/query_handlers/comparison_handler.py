@@ -2,6 +2,7 @@
  
 import logging
 import re
+import os
 import asyncio as _asyncio
 from typing import Dict, Any, Optional, List, Tuple
 from elasticsearch import AsyncElasticsearch
@@ -243,15 +244,38 @@ def _build_comparison_agg_query(entities: dict, jenjang: str = None) -> dict:
         "query": {"bool": {"filter": filters}},
         "aggs": {
             "total_sekolah": {"value_count": {"field": count_field}},
-            "total_siswa": {"sum": {"field": "siswa_total"}},
-            "avg_siswa": {"avg": {"field": "siswa_total"}},
-            "max_siswa": {"max": {"field": "siswa_total"}},
         }
     }
 # =====================================================
 # MAIN HANDLER
 # =====================================================
- 
+
+def _extract_wilayah_from_intent(intent) -> dict:
+    """
+    Extract wilayah_1, wilayah_2, scope from intent for comparison short-circuit.
+    Returns {"wilayah_1": str|None, "wilayah_2": str|None, "scope": str|None}.
+    """
+    result = {"wilayah_1": None, "wilayah_2": None, "scope": None}
+    if intent is None:
+        return result
+    w = getattr(intent, "wilayah", None)
+    if w is None:
+        return result
+    if getattr(w, "kecamatan", None):
+        result["wilayah_1"] = w.kecamatan.lower().strip()
+        result["scope"] = "kecamatan"
+    elif getattr(w, "kabupaten", None):
+        result["wilayah_1"] = w.kabupaten.lower().strip()
+        result["scope"] = "kabupaten"
+    elif getattr(w, "provinsi", None):
+        result["wilayah_1"] = w.provinsi.lower().strip()
+        result["scope"] = "provinsi"
+    w2 = getattr(intent, "wilayah_bandingkan", None)
+    if w2:
+        result["wilayah_2"] = w2.lower().strip()
+    return result
+
+
 async def handle_comparison_query(
     query: str,
     es_client: AsyncElasticsearch,
@@ -321,8 +345,12 @@ async def handle_comparison_query(
                     query
                 )
                 
+    # ── INTENT SHORT-CIRCUIT: trust classifier when both locations known ──────
+    _iw = _extract_wilayah_from_intent(intent)
+    _intent_has_both = bool(_iw["wilayah_1"] and _iw["wilayah_2"] and _iw["scope"])
+
     # ── FAST PATH: VS query → split & resolve independen ─────
-    vs_result = await _resolve_vs_query(query, es_client)
+    vs_result = None if _intent_has_both else await _resolve_vs_query(query, es_client)
  
     # ── Cek ambiguous ─────────────────────────────────────────
     if isinstance(vs_result, dict) and vs_result.get("ambiguous"):
@@ -365,7 +393,13 @@ async def handle_comparison_query(
             jenjang_list=vs_result["jenjang_list"],
         )
  
-    if vs_result and isinstance(vs_result, list) and len(vs_result) >= 2:
+    if _intent_has_both:
+        logger.info(
+            "[COMPARISON] intent.wilayah trusted: w1=%s w2=%s scope=%s → skip resolver",
+            _iw["wilayah_1"], _iw["wilayah_2"], _iw["scope"],
+        )
+        locations = [{_iw["scope"]: _iw["wilayah_1"]}, {_iw["scope"]: _iw["wilayah_2"]}]
+    elif vs_result and isinstance(vs_result, list) and len(vs_result) >= 2:
         locations = vs_result
     else:
         # ── SLOW PATH: resolve normal (untuk koma, dll) ───────
@@ -446,32 +480,20 @@ async def handle_comparison_query(
         agg_query = _build_comparison_agg_query(entities, jenjang)
 
         es_result = await es_client.search(
-            index="idx_prompting_agent",
+            index=os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc"),
             body=agg_query
         )
 
         aggs = es_result.get("aggregations", {})
 
         total_sekolah = aggs.get("total_sekolah", {}).get("value", 0)
-        total_siswa   = aggs.get("total_siswa", {}).get("value", 0)
-        avg_siswa     = aggs.get("avg_siswa", {}).get("value", 0)
-        max_siswa     = aggs.get("max_siswa", {}).get("value", 0)
-
-        # fallback jika avg kosong
-        if not avg_siswa and total_sekolah > 0:
-            avg_siswa = total_siswa / total_sekolah
 
         display_value = get_display_value(entities)
 
         return {
             "value": display_value,
-            "count": total_sekolah,   # tetap ada untuk fallback
+            "count": total_sekolah,
             "entities": entities,
-
-            # DATA BARU untuk narrator
-            "total_siswa": total_siswa,
-            "avg_siswa": avg_siswa,
-            "max_siswa": max_siswa,
         }
  
     for loc_data in locations:
@@ -676,7 +698,7 @@ async def _handle_jenjang_comparison(
     results.sort(key=lambda x: x["count"], reverse=True)
  
     # ── Bangun wilayah label ──────────────────────────────────
-    from app.services.response_formatter import build_location_label
+    from app.services.formatters.response_formatter import build_location_label
     wilayah = build_location_label(entities)
  
     # ── Bangun markdown ───────────────────────────────────────
@@ -815,18 +837,18 @@ async def _resolve_vs_query(
  
         elif sub["status"] == ResultStatus.AMBIGUOUS:
             candidates = sub.get("data", {}).get("candidates", [])
-
-            message = _format_disambiguation_message(corrected_text, candidates)
+            # `pseudo` adalah nama lokasi yang diekstrak dari query di Case A
+            message = _format_disambiguation_message(pseudo, candidates)
 
             return {
                 "ambiguous": True,
-                "ambiguous_part": corrected_text,
+                "ambiguous_part": pseudo,
                 "candidates": candidates,
                 "message": message
             }
- 
+
         return None
- 
+
     # ── Case B: Perbandingan STATUS implisit (satu sisi punya status) ──
     # Contoh: "cisauk negeri vs swasta" → left=cisauk negeri, right=swasta
     # Artinya: user mau negeri vs swasta di cisauk

@@ -27,3 +27,13 @@ def build_result(
         "metadata": metadata or {},
         "confidence": confidence,
     }
+
+
+def build_ambiguous_message(candidates: list) -> str:
+    if not candidates:
+        return "Wilayah yang Anda maksud ambigu. Silakan sebutkan lebih spesifik."
+    lines = ["Wilayah yang Anda maksud memiliki beberapa kemungkinan:"]
+    for i, c in enumerate(candidates, 1):
+        lines.append(f"{i}. {c.get('label', '').title()}")
+    lines.append("\nSilakan sebutkan lebih spesifik.")
+    return "\n".join(lines)

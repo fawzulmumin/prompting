@@ -4,7 +4,9 @@ import re
 import logging
 from typing import Dict, List, Optional, Tuple, Set
 from elasticsearch import AsyncElasticsearch
-from app.services.core.es_query_builder import extract_filters_from_intent
+from app.services.core.es_query_builder import extract_filters_from_intent, build_qc_filter
+from app.services.core.jenjang_constants import JENJANG_MAP
+from app.services.entity_service import strip_loc_prefix
 
 logger = logging.getLogger(__name__)
  
@@ -27,24 +29,32 @@ _NON_STANDALONE_LOCATION_WORDS = {
 _SORT_QUALITY_KEYWORDS = {
     "terbaik", "unggulan", "favorit", "terfavorit", "top", "berkualitas",
     "terakreditasi a", "akreditasi a", "terbaik akreditasi",
+    "data terbersih", "paling bersih", "kualitas data terbaik",
 }
-_SORT_SIZE_KEYWORDS = {
-    "terbesar", "terbanyak siswa", "paling banyak siswa",
-    "jumlah siswa terbanyak", "terbanyak murid",
-}
-_SORT_GURU_KEYWORDS = {
-    "guru terbanyak", "paling banyak guru", "jumlah guru terbanyak",
-    "tenaga pengajar terbanyak",
+_SORT_MASALAH_KEYWORDS = {
+    "paling bermasalah", "data paling kotor", "paling banyak masalah",
+    "masalah terbanyak", "kualitas data terburuk",
 }
 
-def _detect_sort_mode(query: str) -> str:
+def _detect_sort_mode(query: str, intent=None) -> str:
+    # Prioritas: jika intent punya sort_by eksplisit dari LLM, gunakan itu
+    if intent is not None:
+        sort_by = getattr(intent, "sort_by", None)
+        sort_order = getattr(intent, "sort_order", None)
+        if sort_by == "total_masalah" and sort_order == "desc":
+            return "bermasalah"
+        if sort_by == "total_masalah" and sort_order == "asc":
+            return "quality"
+        if sort_by == "persen_bersih" and sort_order == "asc":
+            return "bermasalah"
+        if sort_by == "persen_bersih" and sort_order == "desc":
+            return "quality"
+    # fallback ke keyword detection
     q = query.lower()
+    if any(kw in q for kw in _SORT_MASALAH_KEYWORDS):
+        return "bermasalah"
     if any(kw in q for kw in _SORT_QUALITY_KEYWORDS):
         return "quality"
-    if any(kw in q for kw in _SORT_GURU_KEYWORDS):
-        return "guru"          # ← mode baru
-    if any(kw in q for kw in _SORT_SIZE_KEYWORDS):
-        return "size"
     return "default"
 
 _AKREDITASI_ORDER_SCRIPT = (
@@ -56,25 +66,34 @@ _AKREDITASI_ORDER_SCRIPT = (
     "return 4;"
 )
  
-def _build_sort_clause(sort_mode: str) -> List[Dict]:
+def _build_sort_clause(sort_mode: str, intent=None) -> List[Dict]:
+    # Prioritas: jika intent punya sort_by eksplisit, gunakan field/order langsung
+    if intent is not None:
+        sort_by = getattr(intent, "sort_by", None)
+        sort_order = getattr(intent, "sort_order", None)
+        if sort_by == "persen_bersih" and sort_order in ("asc", "desc"):
+            return [
+                {"qc_score.persen_bersih": {"order": sort_order, "missing": "_last"}},
+                {"_score": {"order": "desc"}},
+            ]
+        if sort_by == "total_masalah" and sort_order in ("asc", "desc"):
+            return [
+                {"qc_score.total_masalah": {"order": sort_order, "missing": "_last"}},
+                {"_score": {"order": "desc"}},
+            ]
     if sort_mode == "quality":
-        # Akreditasi terbaik (A→B→C) sebagai sort primer, relevansi sebagai tiebreaker
+        # Data terbersih: persen_bersih tertinggi dulu, tiebreaker akreditasi
         return [
+            {"qc_score.persen_bersih": {"order": "desc", "missing": "_last"}},
             {"_script": {"type": "number",
                 "script": {"lang": "painless", "source": _AKREDITASI_ORDER_SCRIPT},
                 "order": "asc"}},
             {"_score": {"order": "desc"}},
         ]
-    if sort_mode == "size":
-        # Urutkan dari siswa terbanyak — field siswa_total dari es_structure.md
+    if sort_mode == "bermasalah":
+        # Sekolah dengan data paling bermasalah (total_masalah terbanyak) dulu
         return [
-            {"siswa_total": {"order": "desc", "missing": "_last"}},
-            {"_score": {"order": "desc"}},
-        ]
-    if sort_mode == "guru":
-        # Urutkan dari guru terbanyak — field guru_total dari es_structure.md
-        return [
-            {"guru_total": {"order": "desc", "missing": "_last"}},
+            {"qc_score.total_masalah": {"order": "desc", "missing": "_last"}},
             {"_score": {"order": "desc"}},
         ]
     return [{"_score": {"order": "desc"}}]
@@ -138,7 +157,7 @@ def _fuzzy_match_keyword(keyword: str) -> Optional[Tuple[str, str]]:
     for level in ["kecamatan", "kabupaten", "provinsi"]:
         lookup = LOCATION_INDEX.get(level, {})
         for key in lookup:
-            key_clean = re.sub(r"^(prov\.|kab\.|kota|kec\.)\s*", "", key).strip()
+            key_clean = strip_loc_prefix(key)
             key_norm  = re.sub(r"[^\w\s]", " ", key_clean.lower()).strip()
             if not key_norm or len(key_norm) < 3:
                 continue
@@ -598,8 +617,7 @@ def _fallback_detect_wilayah(query: str) -> Optional[Tuple[str, str]]:
         # "sri raharja" (10 char) harus ditemukan sebelum "raharja" (7 char)
         def key_clean_len(item):
             key = item[0]
-            clean = re.sub(r"^(prov\.|kab\.|kota|kec\.)\s*", "", key).strip()
-            return len(clean)
+            return len(strip_loc_prefix(key))
  
         sorted_keys = sorted(lookup.items(), key=key_clean_len, reverse=True)
  
@@ -749,6 +767,36 @@ def _inject_intent_filters(parsed, intent):
 
     return parsed
 
+def _inject_intent_wilayah(parsed: dict, intent) -> None:
+    """
+    Inject intent.wilayah into parsed["wilayah"] + parsed["wilayah_level"]
+    only when parsed["wilayah"] is still empty. Does NOT override existing value.
+    """
+    if intent is None or parsed.get("wilayah"):
+        return
+    w = getattr(intent, "wilayah", None)
+    if w is None:
+        return
+    wilayah_val = None
+    wilayah_level = None
+    if getattr(w, "desa", None):
+        wilayah_val = w.desa.lower().strip()
+        wilayah_level = "desa_kelurahan"
+    elif getattr(w, "kecamatan", None):
+        wilayah_val = w.kecamatan.lower().strip()
+        wilayah_level = "kecamatan"
+    elif getattr(w, "kabupaten", None):
+        wilayah_val = w.kabupaten.lower().strip()
+        wilayah_level = "kabupaten"
+    elif getattr(w, "provinsi", None):
+        wilayah_val = w.provinsi.lower().strip()
+        wilayah_level = "provinsi"
+    if wilayah_val:
+        parsed["wilayah"] = wilayah_val
+        parsed["wilayah_level"] = wilayah_level
+        logger.info("[LIST] injecting wilayah from intent: %s (level=%s)", wilayah_val, wilayah_level)
+
+
 def _intent_to_legacy_parsed(filters: dict) -> dict:
     parsed = {}
     if not filters:
@@ -838,8 +886,116 @@ class ListSchoolHandler:
             logger.info("[LIST] Multi-wilayah detected: %s", multi)
             logger.info("[LIST] parsed akreditasi=%s", parsed.get("akreditasi"))
             parsed = _inject_intent_filters(parsed, intent)
-            return await self._handle_multi_wilayah(query, parsed, multi)
- 
+            return await self._handle_multi_wilayah(query, parsed, multi, intent=intent)
+
+        # ── Step 1b: Trust intent.wilayah dari CognitiveRouter jika scope jelas ──
+        # Jika CognitiveRouter sudah memberikan wilayah dengan scope provinsi/kabupaten/
+        # kecamatan yang jelas, langsung inject dan skip multikata detection.
+        # Ini mencegah nama provinsi (mis. "Jawa Tengah") salah dideteksi sebagai desa.
+        _intent_scope = getattr(intent, "scope", None)
+        _intent_wil   = getattr(intent, "wilayah", None)
+
+        # ── Step 1b-nasional: scope nasional → skip wilayah detection, langsung execute ──
+        if _intent_scope == "nasional":
+            parsed = _inject_intent_filters(parsed, intent)
+            logger.info("[LIST] Trusted intent scope=nasional → no wilayah filter, QC only")
+            qc_filters_nas = build_qc_filter(intent)
+
+            _es_filters_nasional = []
+            _bentuk_nas    = parsed.get("bentuk")
+            _bentuk_in_nas = parsed.get("bentuk_pendidikan_in")
+            _status_nas    = parsed.get("status")
+            _akred_nas     = parsed.get("akreditasi")
+
+            if _bentuk_in_nas:
+                _es_filters_nasional.append({"terms": {"bentuk_pendidikan": _bentuk_in_nas}})
+            elif _bentuk_nas:
+                _es_filters_nasional.append({"term": {"bentuk_pendidikan": _bentuk_nas}})
+            if _status_nas:
+                _es_filters_nasional.append({"term": {"status_sekolah": _status_nas.upper()}})
+            if _akred_nas:
+                _es_filters_nasional.append({"term": {"akreditasi": _akred_nas}})
+            _es_filters_nasional.extend(qc_filters_nas)
+
+            _sort_mode_nas = _detect_sort_mode(query, intent=intent)
+            _query_body_nasional = {
+                "size": 10,
+                "track_total_hits": True,
+                "query": {
+                    "bool": {
+                        "filter": _es_filters_nasional if _es_filters_nasional
+                                  else [{"match_all": {}}],
+                    }
+                },
+                "collapse": {"field": "npsn"},
+                "sort": _build_sort_clause(_sort_mode_nas, intent=intent),
+            }
+            _query_body_nasional.update(LIST_AGGS_SNIPPET)
+            logger.info("[LIST] Nasional ES QUERY: %s", _query_body_nasional)
+
+            _result_nas    = await self.es.search(
+                index=self.index, body=_query_body_nasional, request_timeout=5
+            )
+            _hits_nas      = _result_nas["hits"]["hits"]
+            _total_val_nas = _result_nas["hits"]["total"]
+            _total_nas     = _total_val_nas["value"] if isinstance(_total_val_nas, dict) else _total_val_nas
+            _schools_nas   = [self._format_hit(h) for h in _hits_nas]
+            _bdj_nas, _bds_nas = extract_breakdowns(_result_nas)
+
+            _qc_masalah_flag = getattr(intent, "qc_masalah_only", False)
+            return {
+                "status": "success",
+                "intent": "school_list",
+                "total": _total_nas,
+                "schools": _schools_nas,
+                "parsed": {
+                    **parsed,
+                    "wilayah": "nasional",
+                    **({"qc_masalah_only": True} if _qc_masalah_flag else {}),
+                },
+                "wilayah_level": "nasional",
+                "is_ambiguous": False,
+                "candidates": [],
+                "breakdown_jenjang": _bdj_nas,
+                "breakdown_status": _bds_nas,
+            }
+
+        _TRUSTED_SCOPES = {"provinsi", "kabupaten", "kecamatan", "desa"}
+        if (
+            _intent_scope in _TRUSTED_SCOPES
+            and _intent_wil is not None
+            and not parsed.get("wilayah")
+        ):
+            _wil_val   = None
+            _wil_level = None
+            if _intent_scope == "provinsi" and getattr(_intent_wil, "provinsi", None):
+                _wil_val   = _intent_wil.provinsi.lower().strip()
+                _wil_level = "provinsi"
+            elif _intent_scope == "kabupaten" and getattr(_intent_wil, "kabupaten", None):
+                _wil_val   = _intent_wil.kabupaten.lower().strip()
+                _wil_level = "kabupaten"
+            elif _intent_scope == "kecamatan" and getattr(_intent_wil, "kecamatan", None):
+                _wil_val   = _intent_wil.kecamatan.lower().strip()
+                _wil_level = "kecamatan"
+            elif _intent_scope == "desa" and getattr(_intent_wil, "desa", None):
+                _wil_val   = _intent_wil.desa.lower().strip()
+                _wil_level = "desa_kelurahan"
+
+            if _wil_val and _wil_level:
+                parsed["wilayah"]       = _wil_val
+                parsed["wilayah_level"] = _wil_level
+                parsed = _inject_intent_filters(parsed, intent)
+                logger.info(
+                    "[LIST] Trusted intent scope=%s → wilayah='%s' level=%s, skip multikata",
+                    _intent_scope, _wil_val, _wil_level,
+                )
+                return await self._query_single_wilayah(
+                    query, parsed, _wil_level,
+                    has_level_hint=True,
+                    is_from_multikata=True,
+                    intent=intent,
+                )
+
         # ── Step 2: Cek nama multi-kata ───────────────────────────
         has_level_hint = bool(re.search(
             r"\b(desa|kelurahan|kecamatan|kec|kabupaten|kab|"
@@ -862,9 +1018,9 @@ class ListSchoolHandler:
                 if mk_result:
                     mk_name_level, mk_extra = mk_result
                     if mk_extra and len(mk_extra) >= 2:
-                        logger.info("[LIST] Multi-kata+context → multi-wilayah: %s", mk_extra) 
-                        parsed = _inject_intent_filters(parsed, intent) 
-                        return await self._handle_multi_wilayah(query, parsed, mk_extra)
+                        logger.info("[LIST] Multi-kata+context → multi-wilayah: %s", mk_extra)
+                        parsed = _inject_intent_filters(parsed, intent)
+                        return await self._handle_multi_wilayah(query, parsed, mk_extra, intent=intent)
                     else:
                         detected_multikata = mk_name_level
                         logger.info("[LIST] Multi-kata location early: '%s' level=%s",
@@ -874,9 +1030,9 @@ class ListSchoolHandler:
         if not detected_multikata and not has_level_hint:
             implicit = _detect_implicit_multi_wilayah(query)
             if implicit and len(implicit) >= 2:
-                logger.info("[LIST] Implicit multi-wilayah: %s", implicit)   
-                parsed = _inject_intent_filters(parsed, intent)          
-                return await self._handle_multi_wilayah(query, parsed, implicit)
+                logger.info("[LIST] Implicit multi-wilayah: %s", implicit)
+                parsed = _inject_intent_filters(parsed, intent)
+                return await self._handle_multi_wilayah(query, parsed, implicit, intent=intent)
  
         # ── Step 2b2: Reversed token order ───────────────────────
         # "barat jawa" → coba reversed "jawa barat" sebagai multi-kata
@@ -913,9 +1069,9 @@ class ListSchoolHandler:
                 if mk_result2:
                     mk_name_level2, mk_extra2 = mk_result2
                     if mk_extra2 and len(mk_extra2) >= 2:
-                        logger.info("[LIST] Hint+multi-kata+context → multi-wilayah: %s", mk_extra2) 
-                        parsed = _inject_intent_filters(parsed, intent)                   
-                        return await self._handle_multi_wilayah(query, parsed, mk_extra2)
+                        logger.info("[LIST] Hint+multi-kata+context → multi-wilayah: %s", mk_extra2)
+                        parsed = _inject_intent_filters(parsed, intent)
+                        return await self._handle_multi_wilayah(query, parsed, mk_extra2, intent=intent)
  
         # ── Step 3: Single wilayah ────────────────────────────────
         if detected_multikata:
@@ -941,6 +1097,8 @@ class ListSchoolHandler:
         # Fallback normal
         wilayah_level = "kabupaten"
         if not parsed.get("wilayah"):
+            _inject_intent_wilayah(parsed, intent)
+        if not parsed.get("wilayah"):
             result = _fallback_detect_wilayah(query)
             logger.debug(
                 "[LIST_DEBUG] fallback result=%s parsed_before_inject=%s intent_jenjang=%s",
@@ -951,7 +1109,9 @@ class ListSchoolHandler:
                 parsed["wilayah"] = wilayah_name
                 parsed = _inject_intent_filters(parsed, intent)
         else:
-            if re.search(r"\b(desa|kelurahan)\b", q_low):
+            if parsed.get("wilayah_level"):
+                wilayah_level = parsed["wilayah_level"]
+            elif re.search(r"\b(desa|kelurahan)\b", q_low):
                 wilayah_level = "desa_kelurahan"
             elif re.search(r"\bprovinsi\b", q_low):
                 wilayah_level = "provinsi"
@@ -1096,31 +1256,51 @@ class ListSchoolHandler:
                     )
                     # Lanjutkan ke _build_query
                 else:
-                    # ── SAME-LOCATION CHECK ──────────────────────────────
-                    # Jika semua candidates menunjuk ke kabupaten+kecamatan
-                    # yang sama (mis. desa Cisauk + kec. Cisauk di Kab. Tangerang)
-                    # → auto-resolve ke kecamatan (lebih luas = lebih useful)
-                    kab_vals = set(c.get("kabupaten", "").lower() for c in candidates if c.get("kabupaten"))
-                    kec_vals = set(c.get("kecamatan", "").lower() for c in candidates if c.get("kecamatan"))
-                    if len(kab_vals) == 1 and len(kec_vals) == 1:
-                        kec_name = list(kec_vals)[0]
-                        kec_clean = re.sub(r"^kec\.\s*", "", kec_name).strip()
-                        parsed["wilayah"] = kec_clean
-                        wilayah_level = "kecamatan"
+                    # ── GUARD: jika intent sudah punya wilayah jelas, skip same-location ──
+                    _intent_wil_check = getattr(intent, "wilayah", None) if intent else None
+                    _intent_kab = getattr(_intent_wil_check, "kabupaten", None) if _intent_wil_check else None
+                    _intent_prov = getattr(_intent_wil_check, "provinsi", None) if _intent_wil_check else None
+                    if _intent_kab and _intent_kab.lower().strip() == wilayah_kw:
+                        # Intent sudah benar di level kabupaten, gunakan itu
                         logger.info(
-                            "[LIST] Same-location auto-resolve: all candidates → kec '%s'",
-                            kec_clean
+                            "[LIST] same-location guard: intent.kabupaten='%s' matches wilayah_kw, skip",
+                            _intent_kab,
                         )
-                        # Lanjutkan ke _build_query
+                        # wilayah_kw dan wilayah_level sudah benar, lanjutkan ke _build_query
+                    elif _intent_prov and _intent_prov.lower().strip() in wilayah_kw:
+                        # Intent di level provinsi (mis. "jakarta" → provinsi DKI Jakarta)
+                        parsed["wilayah"] = _intent_prov.lower().strip()
+                        wilayah_level = "provinsi"
+                        logger.info(
+                            "[LIST] same-location guard: intent.provinsi='%s', override ke provinsi",
+                            _intent_prov,
+                        )
                     else:
-                        logger.info("[LIST] Multi-level clarification: wilayah=%s candidates=%d",
-                                    wilayah_kw, len(candidates))
-                        return {
-                            "status": "clarification", "intent": "school_list",
-                            "total": 0, "schools": [], "parsed": parsed,
-                            "wilayah_level": wilayah_level, "is_ambiguous": True,
-                            "keyword": wilayah_kw, "candidates": candidates,
-                        }
+                        # ── SAME-LOCATION CHECK (logic lama) ─────────────
+                        # Jika semua candidates menunjuk ke kabupaten+kecamatan
+                        # yang sama (mis. desa Cisauk + kec. Cisauk di Kab. Tangerang)
+                        # → auto-resolve ke kecamatan (lebih luas = lebih useful)
+                        kab_vals = set(c.get("kabupaten", "").lower() for c in candidates if c.get("kabupaten"))
+                        kec_vals = set(c.get("kecamatan", "").lower() for c in candidates if c.get("kecamatan"))
+                        if len(kab_vals) == 1 and len(kec_vals) == 1:
+                            kec_name = list(kec_vals)[0]
+                            kec_clean = re.sub(r"^kec\.\s*", "", kec_name).strip()
+                            parsed["wilayah"] = kec_clean
+                            wilayah_level = "kecamatan"
+                            logger.info(
+                                "[LIST] Same-location auto-resolve: all candidates → kec '%s'",
+                                kec_clean
+                            )
+                            # Lanjutkan ke _build_query
+                        else:
+                            logger.info("[LIST] Multi-level clarification: wilayah=%s candidates=%d",
+                                        wilayah_kw, len(candidates))
+                            return {
+                                "status": "clarification", "intent": "school_list",
+                                "total": 0, "schools": [], "parsed": parsed,
+                                "wilayah_level": wilayah_level, "is_ambiguous": True,
+                                "keyword": wilayah_kw, "candidates": candidates,
+                            }
 
         from app.services.core.es_query_builder import extract_filters_from_intent
         _intent_filters = extract_filters_from_intent(intent)
@@ -1144,21 +1324,8 @@ class ListSchoolHandler:
         total_val = result["hits"]["total"]
         total     = total_val["value"] if isinstance(total_val, dict) else total_val
         schools   = [self._format_hit(h) for h in hits]
-        # ── POST-SORT siswa_total (karena index: false di ES) ─────────────
-        _sort_by    = getattr(intent, 'sort_by', None) if intent else None
-        _sort_order = getattr(intent, 'sort_order', 'desc') if intent else 'desc'
-        _sort_mode  = _detect_sort_mode(query)   # deteksi dari teks query
-
-        # Tentukan field sort: intent.sort_by punya prioritas; fallback ke deteksi keyword
-        _effective_sort = _sort_by or ("guru_total" if _sort_mode == "guru" else None)
-
-        if _effective_sort in ("siswa_total", "guru_total") and schools:
-            schools = sorted(
-                schools,
-                key=lambda s: s.get(_effective_sort, 0) or 0,
-                reverse=(_sort_order == 'desc')
-            )
-            logger.debug("[LIST] post-sort by %s order=%s", _effective_sort, _sort_order)
+        # ── Deteksi sort mode dari query ─────────────────────────────────
+        _sort_mode = _detect_sort_mode(query, intent=intent)
         # Extract aggregation breakdown
         breakdown_jenjang, breakdown_status = extract_breakdowns(result)
         # Typo correction jika 0 hasil
@@ -1215,6 +1382,14 @@ class ListSchoolHandler:
                 "keyword": kw, "candidates": candidates,
             }
  
+        # Tambahkan flag QC ke parsed agar narrator tahu ini query residu
+        _qc_masalah_only = getattr(intent, "qc_masalah_only", False) if intent else False
+        _qc_field        = getattr(intent, "qc_field", None) if intent else None
+        if _qc_masalah_only:
+            parsed = {**parsed, "qc_masalah_only": True}
+            if _qc_field:
+                parsed["qc_field"] = _qc_field
+
         response = {
             "status": "success", "intent": "school_list",
             "total": total,
@@ -1230,7 +1405,7 @@ class ListSchoolHandler:
             response["typo_corrected"] = {"original": original_kw, "corrected": corrected_kw}
         return response
  
-    async def _handle_multi_wilayah(self, query: str, parsed: Dict, multi: Dict) -> Dict:
+    async def _handle_multi_wilayah(self, query: str, parsed: Dict, multi: Dict, intent=None) -> Dict:
         desa      = multi.get("desa") or multi.get("kelurahan") or ""
         kecamatan = multi.get("kecamatan") or ""
         kabupaten = multi.get("kabupaten") or ""
@@ -1328,15 +1503,21 @@ class ListSchoolHandler:
                     }
                 })
 
+        # ── QC Filter — inject dari intent jika ada ──────────────────────────────
+        if intent is not None:
+            qc_filters = build_qc_filter(intent)
+            if qc_filters:
+                filters.extend(qc_filters)
+                logger.info("[LIST] Multi-wilayah QC filters injected: %s", qc_filters)
+
         query_body = {
             "size": 10, "track_total_hits": True,
             "query": {"bool": {"filter": filters, "should": should,
                                **({"minimum_should_match": 1} if should else {})}},
-            "collapse": {"field": "npsn",
-                         "inner_hits": {"name": "latest_year", "size": 1, "sort": [{"tahun": "desc"}]}},
-            "sort": _build_sort_clause(_detect_sort_mode(query)),
+            "collapse": {"field": "npsn"},
+            "sort": _build_sort_clause(_detect_sort_mode(query, intent=intent), intent=intent),
         }
- 
+
         logger.info("[LIST] Multi-wilayah ES QUERY: %s", query_body)
         result    = await self.es.search(index=self.index, body=query_body, request_timeout=5)
         hits      = result["hits"]["hits"]
@@ -1382,9 +1563,8 @@ class ListSchoolHandler:
                         ],
                         "minimum_should_match": 1,
                     }},
-                    "collapse": {"field": "npsn",
-                                 "inner_hits": {"name": "latest_year", "size": 1, "sort": [{"tahun": "desc"}]}},
-                    "sort": _build_sort_clause(_detect_sort_mode(query)),
+                    "collapse": {"field": "npsn"},
+                    "sort": _build_sort_clause(_detect_sort_mode(query, intent=intent), intent=intent),
                 }
                 fb_result = await self.es.search(index=self.index, body=fallback_body, request_timeout=5)
                 fb_total_val = fb_result["hits"]["total"]
@@ -1429,9 +1609,8 @@ class ListSchoolHandler:
                     ],
                     "minimum_should_match": 1,
                 }},
-                "collapse": {"field": "npsn",
-                             "inner_hits": {"name": "latest_year", "size": 1, "sort": [{"tahun": "desc"}]}},
-                "sort": _build_sort_clause(_detect_sort_mode(query)),
+                "collapse": {"field": "npsn"},
+                "sort": _build_sort_clause(_detect_sort_mode(query, intent=intent), intent=intent),
             }
             d2_result = await self.es.search(index=self.index, body=desa_only_body, request_timeout=5)
             d2_total_val = d2_result["hits"]["total"]
@@ -1464,7 +1643,11 @@ class ListSchoolHandler:
         display_parts  = [p for p in [desa, kecamatan, kab_name, provinsi] if p]
         parsed_display = dict(parsed)
         parsed_display["wilayah"] = " ".join(display_parts)
- 
+
+        _qc_flag = getattr(intent, "qc_masalah_only", False) if intent else False
+        if _qc_flag:
+            parsed_display = {**parsed_display, "qc_masalah_only": True}
+
         return {
             "status": "success", "intent": "school_list",
             "total": total, "schools": schools, "parsed": parsed_display,
@@ -1496,17 +1679,7 @@ class ListSchoolHandler:
                 status = "NEGERI"
  
         # Deteksi multi-jenjang dari query: "sd, smp, sma di X" atau "sma dan sd di X"
-        _JENJANG_MAP = {
-            "sd": "SD", "smp": "SMP", "sma": "SMA", "smk": "SMK",
-            "ma": "MA", "mts": "MTs", "mi": "MI", "tk": "TK",
-            "paud": "PAUD", "kb": "KB", "ra": "RA", "sps": "SPS", "tpa": "TPA",
-            "spk":    "SPK SMA",     
-            "spk sd": "SPK SD",
-            "spk smp": "SPK SMP",
-            "spk sma": "SPK SMA",
-            "spk smk": "SPK SMK",
-            "spk tk":  "SPK TK",
-        }
+        # JENJANG_MAP diimport dari jenjang_constants — single source of truth
         if query_raw:
             _qr = query_raw.lower()
             _multi_jenjang = re.findall(
@@ -1559,24 +1732,14 @@ class ListSchoolHandler:
         elif akreditasi:
             filters.append({"term": {"akreditasi": akreditasi}})
             logger.info("[LIST] akreditasi filter: %s", akreditasi)
-            
-        # ── Filter siswa_total (range query) ────────────────────────────
-        _siswa_min = intent.get('siswa_min') if isinstance(intent, dict) else getattr(intent, 'siswa_min', None)
-        _siswa_max = intent.get('siswa_max') if isinstance(intent, dict) else getattr(intent, 'siswa_max', None)
 
-        if _siswa_min is not None or _siswa_max is not None:
-            range_filter = {"range": {"siswa_total": {}}}
+        # ── QC Filter — inject dari intent jika ada ──────────────────────────────
+        if intent is not None:
+            qc_filters = build_qc_filter(intent)
+            if qc_filters:
+                filters.extend(qc_filters)
+                logger.info("[LIST] QC filters injected: %s", qc_filters)
 
-            if _siswa_min is not None:
-                range_filter["range"]["siswa_total"]["gte"] = int(_siswa_min)
-
-            if _siswa_max is not None:
-                range_filter["range"]["siswa_total"]["lte"] = int(_siswa_max)
-
-            filters.append(range_filter)
-
-            logger.debug("[LIST] siswa_total range filter: %s", range_filter)
-            
         should = []
  
         if wilayah:
@@ -1698,11 +1861,10 @@ class ListSchoolHandler:
             "size": 10, "track_total_hits": True,
             "query": {"bool": {"filter": filters, "should": should,
                                **({"minimum_should_match": 1} if should else {})}},
-            "collapse": {"field": "npsn",
-                         "inner_hits": {"name": "latest_year", "size": 1, "sort": [{"tahun": "desc"}]}},
-            "sort": _build_sort_clause(_detect_sort_mode(query_raw)),
+            "collapse": {"field": "npsn"},
+            "sort": _build_sort_clause(_detect_sort_mode(query_raw, intent=intent), intent=intent),
         }
- 
+
         logger.info("LIST ES QUERY: %s", query_body)
         print("LIST ES QUERY:", query_body)
         return query_body
@@ -1716,12 +1878,9 @@ class ListSchoolHandler:
         ).strip()
  
     def _format_hit(self, hit: Dict) -> Dict:
-        if "inner_hits" in hit:
-            inner = hit["inner_hits"]["latest_year"]["hits"]["hits"]
-            src   = inner[0]["_source"] if inner else hit["_source"]
-        else:
-            src = hit["_source"]
-        return {
+        src = hit["_source"]
+        qc_score = src.get("qc_score") or {}
+        result = {
             "nama":           src.get("nama"),
             "npsn":           src.get("npsn"),
             "bentuk":         src.get("bentuk_pendidikan"),
@@ -1732,4 +1891,30 @@ class ListSchoolHandler:
             "kecamatan":      src.get("kecamatan"),
             "kabupaten":      src.get("kabupaten"),
             "provinsi":       src.get("provinsi"),
+            # QC fields — selalu include, None jika tidak ada
+            "total_masalah":  qc_score.get("total_masalah"),
+            "persen_bersih":  qc_score.get("persen_bersih"),
+            "masalah_detail": src.get("content"),
         }
+        return result
+
+    @staticmethod
+    def _extract_masalah_from_content(content: str) -> List[str]:
+        """
+        Ekstrak daftar masalah dari field content ES.
+
+        Field content berformat:
+        "... Masalah data: koordinat lintang kosong, foto sekolah belum diunggah."
+        atau "Data lengkap." jika tidak ada masalah.
+
+        Mengembalikan list masalah, atau list kosong jika tidak ada masalah.
+        """
+        if not content:
+            return []
+        import re
+        m = re.search(r"Masalah data:\s*(.+?)\.?\s*$", content, re.IGNORECASE | re.DOTALL)
+        if not m:
+            return []
+        masalah_str = m.group(1).strip()
+        masalah_list = [m.strip() for m in masalah_str.split(",") if m.strip()]
+        return masalah_list

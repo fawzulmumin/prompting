@@ -24,8 +24,15 @@ PREFIXES = (
     "prov. ", "kab. ", "kabupaten ", "kota ",
     "kec. ", "kecamatan ", "desa ", "kelurahan ",
 )
+
+_FIELD_TERM_SIZE = {
+    "provinsi": 50,
+    "kabupaten": 600,
+    "kecamatan": 8000,
+    "desa_kelurahan": 90000,
+}
  
-CACHE_FILE = "location_hierarchy_cache.json"
+CACHE_FILE = "cache/location_hierarchy_cache.json"
  
 # =========================================================
 # GLOBAL CACHE
@@ -57,20 +64,26 @@ async def load_location_mapping_from_es(
     field: str,
 ) -> Dict[str, str]:
  
-    index = os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent")
- 
+    index = os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc")
+    term_size = _FIELD_TERM_SIZE.get(field, 20000)
+
     try:
         res = await es_client.search(
             index=index,
             size=0,
-            body={"aggs": {"list": {"terms": {"field": field, "size": 20000}}}},
+            body={"aggs": {"list": {"terms": {"field": field, "size": term_size}}}},
             request_timeout=30,
         )
     except Exception as e:
         logger.error("[LOCATION] Failed loading field=%s: %s", field, e)
         return {}
- 
+
     buckets = res.get("aggregations", {}).get("list", {}).get("buckets", [])
+    if len(buckets) >= term_size:
+        logger.warning(
+            "[LOCATION] field=%s hit term size limit (%d) — data mungkin terpotong",
+            field, term_size,
+        )
     lookup: Dict[str, str] = {}
  
     for bucket in buckets:
@@ -105,7 +118,7 @@ async def load_location_hierarchy(es_client: AsyncElasticsearch):
     """
     global LOCATION_HIERARCHY
  
-    index = os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent")
+    index = os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc")
  
     LOCATION_HIERARCHY = {
         "desa_kelurahan": {},

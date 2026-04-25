@@ -11,18 +11,25 @@ Prinsip:
 - Timeout pendek (8 detik) agar latency terjaga
 """
  
+import asyncio
 import logging
 import os
 from typing import Dict, Any, List, Optional
- 
+
 from app.providers.deepseek import call_deepseek, DeepSeekUnavailableError
  
 logger = logging.getLogger(__name__)
  
-# Timeout khusus narasi — lebih pendek dari RAG flow
+# Timeout khusus narasi — lebih pendek dari total request budget (~30s)
+# Dengan retry_strategy di deepseek.py (2 attempts, 1s wait):
+#   worst-case = TIMEOUT * 2 + 1 ≈ 25s (simple) / 31s (aggregation with breakdown)
+# asyncio.wait_for di _call_narrator memastikan hard-cap tidak terlampaui.
+# Grace period +5s antara call_deepseek(timeout=T) dan wait_for(timeout=T+5)
+# mencegah race condition: asyncio membunuh coroutine SEBELUM tenacity sempat retry.
 # ── TIMEOUT CONFIG ──
-NARRATOR_TIMEOUT             = 25
-NARRATOR_TIMEOUT_AGGREGATION = 25
+NARRATOR_TIMEOUT             = 20   # simple narasi — hard cap 20s (naik dari 10s)
+NARRATOR_TIMEOUT_AGGREGATION = 25   # aggregation + breakdown — lebih longgar (naik dari 13s)
+_NARRATOR_WAIT_FOR_GRACE     = 5    # detik ekstra untuk asyncio.wait_for di atas timeout LLM
 
 # ── TOKEN CONFIG ──
 NARRATOR_TOKENS_PROFILE      = 900
@@ -52,7 +59,13 @@ _SYSTEM_BASE = (
     "- Format angka dengan titik sebagai pemisah ribuan: 1.234, bukan 1234 atau 1,234.\n"
     "- Hindari kata informal: 'yuk', 'oke', 'guys', 'so', 'well', 'basically'.\n"
     "- Akhiri respons dengan kalimat penutup yang mengundang pertanyaan lanjutan.\n\n"
- 
+    
+    "FIELD KHUSUS INFRASTRUKTUR:\n"
+    "- tipe_jamban: data sudah berupa label teks (mis. 'Leher Angsa', 'Tangki Septik'). Gunakan langsung.\n"
+    "- kecukupan_air: data sudah berupa label teks (mis. 'Cukup', 'Tidak Cukup'). Gunakan langsung.\n"
+    "- minum_siswa: jumlah unit air minum yang tersedia untuk siswa.\n"
+    "- Jika field bernilai null, '-', atau 'data tidak tersedia', nyatakan 'data tidak tersedia'.\n"
+    
     "PENANGANAN DATA:\n"
     "- Hanya bahas data yang tersedia dalam konteks yang diberikan.\n"
     "- Sertakan angka PERSIS seperti yang diberikan — dilarang membulatkan atau mengubah.\n"
@@ -101,10 +114,12 @@ def _benchmark_label(total: int, level: str) -> str:
 # VALIDATOR — Cek angka kritis tidak berubah setelah narasi LLM
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _validate_numbers_in_narasi(narasi: str, expected_numbers: dict) -> bool:
+def _validate_numbers_in_narasi(narasi: str, expected_numbers) -> Optional[str]:
     """
-    Pastikan setiap angka kritis dari data asli masih ada di teks narasi.
+    Return narasi jika semua angka kritis masih ada di teks.
+    Return None jika ada angka yang hilang — caller harus fallback ke template.
     Menerima format: 1234, 1.234, 1,234, 1 234 (pemisah ribuan berbeda-beda).
+    Menerima expected_numbers sebagai dict {label: value} atau list [value, ...].
     """
 
     import re as _re
@@ -116,7 +131,13 @@ def _validate_numbers_in_narasi(narasi: str, expected_numbers: dict) -> bool:
     # Normalisasi narasi
     narasi_normalized = _normalize(narasi)
 
-    for label, val in expected_numbers.items():
+    # Normalise ke list of (label, val) pairs agar bisa terima dict atau list
+    if isinstance(expected_numbers, dict):
+        items = list(expected_numbers.items())
+    else:
+        items = [(str(v), v) for v in expected_numbers]
+
+    for label, val in items:
         if val is None:
             continue
 
@@ -127,9 +148,97 @@ def _validate_numbers_in_narasi(narasi: str, expected_numbers: dict) -> bool:
                 "[Narrator] Angka kritis hilang dari narasi — label=%s expected=%s",
                 label, val
             )
-            return False
+            return None
 
-    return True
+    return narasi
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HALLUCINATION & NUMBER EXTRACTION HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+_HALLUCINATION_PATTERNS = [
+    r'\bberdasarkan (pengetahuan|pelatihan|data) saya\b',
+    r'\bmenurut (pengetahuan|pelatihan) saya\b',
+    r'\bsaya tidak (memiliki|punya) (akses|data)\b',
+    r'\bsebagai (ai|llm|model bahasa)\b',
+    r'\b(gpt|chatgpt|openai|gemini|llama)\b',
+]
+
+
+def _contains_hallucination(text: str) -> bool:
+    """Return True if text contains known LLM hallucination patterns (case-insensitive)."""
+    import re as _re
+    text_lower = text.lower()
+    return any(_re.search(p, text_lower) for p in _HALLUCINATION_PATTERNS)
+
+
+def _extract_numbers_from_text(text: str) -> list:
+    """Ekstrak semua angka signifikan (>= 10) dari teks. Handle format Indonesia (1.234)."""
+    import re as _re
+    pattern = r'\b\d{1,3}(?:[.,]\d{3})*|\b\d{2,}\b'
+    raw = _re.findall(pattern, text)
+    result = []
+    for r in raw:
+        normalized = r.replace('.', '').replace(',', '')
+        try:
+            val = int(normalized)
+            if val >= 10:
+                result.append(val)
+        except ValueError:
+            pass
+    return list(set(result))
+
+
+def _build_qc_summary_context(schools: list) -> str:
+    """
+    Bangun ringkasan konteks QC dari list sekolah untuk dikirim ke LLM narrator.
+
+    Digunakan ketika query adalah query residu (qc_masalah_only=True).
+    Menghasilkan teks terstruktur yang membantu LLM membuat narasi yang akurat
+    tentang masalah data sekolah tanpa halusinasi.
+
+    Args:
+        schools: list dict hasil dari _format_hit(), sudah mengandung
+                 total_masalah, persen_bersih, masalah_detail
+
+    Returns:
+        String ringkasan untuk dimasukkan ke context LLM.
+    """
+    if not schools:
+        return "Tidak ada sekolah ditemukan."
+
+    has_qc_data = any(s.get("total_masalah") is not None for s in schools)
+    if not has_qc_data:
+        return ""  # bukan query residu, kembalikan kosong
+
+    lines = []
+    for s in schools:
+        nama = s.get("nama", "Tidak diketahui")
+        npsn = s.get("npsn", "-")
+        total = s.get("total_masalah")
+        persen = s.get("persen_bersih")
+        detail = s.get("masalah_detail", "")
+
+        # Ekstrak daftar masalah dari content
+        masalah_list = []
+        if detail:
+            import re
+            m = re.search(r"Masalah data:\s*(.+?)\.?\s*$", detail, re.IGNORECASE | re.DOTALL)
+            if m:
+                masalah_list = [x.strip() for x in m.group(1).split(",") if x.strip()]
+
+        line = f"- {nama} (NPSN: {npsn})"
+        if total is not None:
+            line += f": {total} masalah"
+        if persen is not None:
+            line += f", {persen:.1f}% bersih"
+        if masalah_list:
+            line += f". Masalah: {', '.join(masalah_list)}"
+        lines.append(line)
+
+    header = f"Ditemukan {len(schools)} sekolah dengan masalah data:\n"
+    return header + "\n".join(lines)
 
 
 def _zero_result_message(
@@ -331,7 +440,15 @@ def _prompt_aggregation(
     _is_school_count = not metric_target or metric_target == "sekolah"
     subyek = "sekolah" if _is_school_count else metric_label
 
-    return f"""{_SYSTEM_BASE}
+    # Tambahkan catatan override jika metric bukan sekolah, agar LLM tidak terganggu
+    # oleh instruksi "gunakan kata sekolah" di _SYSTEM_BASE
+    metric_override = (
+        f"\nCATATAN: Topik narasi ini adalah {metric_label.upper()}, BUKAN sekolah. "
+        f"Gunakan kata '{metric_label}' sebagai subjek utama, bukan 'sekolah'."
+        if not _is_school_count else ""
+    )
+
+    return f"""{_SYSTEM_BASE}{metric_override}
 
 DATA AGREGASI:
 - Wilayah      : {wilayah} (level: {level_label})
@@ -606,8 +723,8 @@ def _prompt_school_vs_school(school_a: dict, school_b: dict, query: str) -> str:
         return (
             f"Nama: {s.get('nama','-')} | Jenjang: {s.get('bentuk_pendidikan','-')} | "
             f"Status: {s.get('status_sekolah','-')} | Akreditasi: {s.get('akreditasi','-')} | "
-            f"Kecamatan: {s.get('kecamatan','-')} | Siswa: {s.get('siswa_total',0):,} | "
-            f"Guru: {s.get('guru_total',0)}"
+            f"Kecamatan: {s.get('kecamatan','-')} | Siswa: data tidak tersedia | "
+            f"Guru: data tidak tersedia"
         )
 
     return f"""{_SYSTEM_BASE}
@@ -727,7 +844,7 @@ def _build_school_table(schools: list, max_rows: int = 20) -> str:
         nama     = s.get('nama', '-')
         jenjang  = s.get('bentuk_pendidikan', s.get('bentuk', '-'))
         akred    = s.get('akreditasi', '-')
-        siswa    = f"{s.get('siswa_total', 0):,}" if s.get('siswa_total') else '-'
+        siswa    = '-'
         kec      = s.get('kecamatan', '-')
         rows.append(f"| {i} | {nama} | {jenjang} | {akred} | {siswa} | {kec} |")
     
@@ -742,6 +859,7 @@ def _prompt_school_list(
     breakdown_status: Optional[Dict[str, int]] = None,
     active_filters: Optional[Dict[str, str]] = None,
     wilayah_level: str = "",
+    qc_summary: Optional[str] = None,
 ) -> str:
     _LEVEL_LABEL = {
         "provinsi": "Provinsi",
@@ -831,7 +949,22 @@ def _prompt_school_list(
     filter_desc = ", ".join(filter_parts) if filter_parts else "semua jenjang dan status"
     # Bangun tabel sekolah jika ada data
     school_table = _build_school_table(schools)
-    return f"""{_SYSTEM_BASE}
+
+    _qc_instruksi_str = ""
+    if qc_summary:
+        _qc_instruksi_str = (
+            "\n\nINSTRUKSI KHUSUS — QUERY RESIDU DATA:\n"
+            "User menanyakan sekolah yang datanya BERMASALAH. "
+            "Fokus narasi pada masalah data yang ditemukan, bukan pada akreditasi atau jenjang.\n"
+            "Sertakan dalam narasi:\n"
+            "- Jumlah total sekolah bermasalah yang ditemukan\n"
+            "- Nama-nama masalah yang paling sering muncul\n"
+            "- Contoh spesifik 2-3 sekolah beserta masalahnya\n"
+            "- Jangan sebutkan breakdown akreditasi kecuali diminta\n"
+            f"\nData masalah:\n{qc_summary}"
+        )
+
+    return f"""{_SYSTEM_BASE}{_qc_instruksi_str}
 
 DATA DAFTAR SEKOLAH:
 - Wilayah         : {wilayah_full}
@@ -944,6 +1077,13 @@ def _extract_profile_fields(profile_data: Dict[str, Any]) -> Dict[str, Any]:
         "internet":   _get(["sarana_prasarana.akses_internet", "akses_internet"], "-"),
         "listrik":    _get(["sarana_prasarana.sumber_listrik",  "sumber_listrik"], "-"),
         "air":        _get(["sarana_prasarana.sumber_air",      "sumber_air"], "-"),
+        "tipe_jamban":   _get(["sarana_prasarana.tipe_jamban",  "tipe_jamban"], "-"),
+        "kecukupan_air": _get(["sarana_prasarana.kecukupan_air","kecukupan_air"], "-"),
+        "minum_siswa":   _get(["sarana_prasarana.minum_siswa",  "minum_siswa"], 0),
+        "toilet_l":      _get(["sarana_prasarana.toilet_siswa_laki",    "toilet_siswa_laki"], 0),
+        "toilet_p":      _get(["sarana_prasarana.toilet_siswa_perempuan","toilet_siswa_perempuan"], 0),
+        "total_komputer":_get(["sarana_prasarana.total_komputer","total_komputer"], 0),
+        "tahun_data":    _get(["identitas.tahun_data", "tahun"], "-"),
     }
  
  
@@ -973,6 +1113,15 @@ def _prompt_school_profile(profile_data: Dict[str, Any]) -> str:
     listrik     = f["listrik"]
     air         = f["air"]
 
+    # PATCH BARU
+    jamban      = f.get("tipe_jamban", "-")
+    kec_air     = f.get("kecukupan_air", "-")
+    minum       = f.get("minum_siswa", 0)
+    toilet_l    = f.get("toilet_l", 0)
+    toilet_p    = f.get("toilet_p", 0)
+    komputer    = f.get("total_komputer", 0)
+    tahun_data  = f.get("tahun_data", "-")
+
     rasio_str = (
         f"1:{round(siswa_total / guru_total)}"
         if guru_total and siswa_total else "tidak dapat dihitung"
@@ -986,6 +1135,7 @@ def _prompt_school_profile(profile_data: Dict[str, Any]) -> str:
     RASIO_IDEAL = {"SD": 17, "SMP": 20, "SMA": 20, "SMK": 15}
     rasio_ideal = RASIO_IDEAL.get(bentuk, 20)
     rasio_angka = round(siswa_total / guru_total) if guru_total and siswa_total else None
+
     if rasio_angka:
         if rasio_angka <= rasio_ideal:
             rasio_konteks = f"lebih baik dari rata-rata nasional {bentuk} (~1:{rasio_ideal})"
@@ -1005,14 +1155,22 @@ def _prompt_school_profile(profile_data: Dict[str, Any]) -> str:
 
     # Catatan kritis
     catatan_kritis = []
-    if guru_total == 0:
-        catatan_kritis.append("DATA PTK BELUM DILAPORKAN — jangan simpulkan tidak ada guru")
+
     if internet in ("Tidak Ada", "-", "", None):
         catatan_kritis.append("tidak ada akses internet")
+
     if listrik in ("Tidak Ada", "-", "", None):
         catatan_kritis.append("sumber listrik tidak tercatat")
+
     if air in ("Air hujan", ""):
         catatan_kritis.append(f"sumber air: {air} (perlu perhatian)")
+    
+    if f.get("tipe_jamban") in (None, "-", "Tidak Ada"):
+        catatan_kritis.append("fasilitas jamban tidak tercatat atau tidak ada")
+    
+    if f.get("toilet_l", 0) == 0 and f.get("toilet_p", 0) == 0:
+        catatan_kritis.append("jumlah toilet siswa: tidak ada data (0)")
+
     catatan_str = "; ".join(catatan_kritis) if catatan_kritis else "tidak ada catatan kritis"
 
     akred_konteks = {
@@ -1026,10 +1184,12 @@ def _prompt_school_profile(profile_data: Dict[str, Any]) -> str:
         f"\n- Nilai Akhir Akreditasi: {nilai_akhir}"
         if nilai_akhir is not None else ""
     )
+
     tendik_str = (
         f"{tendik_total} (L: {tendik_l}, P: {tendik_p})"
         if tendik_total > 0 else "tidak tercatat"
     )
+
     kode_pos_str = kode_pos if kode_pos not in (None, "-", "") else "tidak tersedia"
 
     return f"""{_SYSTEM_BASE}
@@ -1038,10 +1198,14 @@ DATA SEKOLAH:
 - Nama       : {nama}
 - Jenjang    : {bentuk} | Status: {status} | Akreditasi: {akreditasi} ({akred_konteks}){nilai_akhir_str}
 - Lokasi     : {lokasi_str} | Kode Pos: {kode_pos_str}
-- Guru (PTK) : {guru_total} (PNS: {guru_pns}, Honor: {guru_honor}, Sertifikasi: {guru_serti} / {pct_serti})
+- Guru (PTK) : data tidak tersedia di indeks ini
 - Tendik     : {tendik_str}
-- Siswa      : {siswa_total:,} | {siswa_gender_str} | Rasio guru:siswa ≈ {rasio_str} — {rasio_konteks}
+- Siswa      : data tidak tersedia di indeks ini
 - Internet   : {internet} | Listrik: {listrik} | Air: {air}
+- Sanitasi   : Tipe Jamban: {jamban} | Kecukupan Air: {kec_air} | Air Minum Siswa: {minum} unit
+- Toilet     : Laki-laki {toilet_l} | Perempuan {toilet_p}
+- Komputer   : {komputer} unit
+- Tahun Data : {tahun_data}
 - Catatan    : {catatan_str}
 
 INSTRUKSI NARASI (4 paragraf pendek dengan ## heading, TANPA bullet):
@@ -1065,7 +1229,7 @@ Jika honorer > PNS: sorot potensi dampak stabilitas jangka panjang.
 Jika PNS dominan: sorot stabilitas yang baik.
 
 ## Sarana & Rekomendasi
-Komentari kondisi internet, listrik, air secara jujur.
+Komentari kondisi internet, listrik, air, sanitasi, toilet, komputer secara jujur.
 Jika ada kondisi kritis (dari catatan): SOROT sebagai temuan penting.
 Tutup dengan satu kalimat insight keseluruhan.
 
@@ -1092,11 +1256,18 @@ async def _call_narrator(
         return fallback
 
     try:
-        result = await call_deepseek(
-            prompt=prompt,
-            temperature=NARRATOR_TEMP,
-            max_tokens=max_tokens,
-            timeout=timeout,  # ✅ sekarang pakai parameter
+        # asyncio.wait_for memberikan hard-cap waktu total, termasuk retry internal.
+        # Grace period +5s memberi ruang tenacity untuk retry tanpa race condition:
+        # call_deepseek(timeout=T) menentukan batas per-attempt,
+        # wait_for(timeout=T+grace) menentukan batas seluruh coroutine termasuk retry.
+        result = await asyncio.wait_for(
+            call_deepseek(
+                prompt=prompt,
+                temperature=NARRATOR_TEMP,
+                max_tokens=max_tokens,
+                timeout=timeout,
+            ),
+            timeout=float(timeout) + _NARRATOR_WAIT_FOR_GRACE,
         )
         result = result.strip()
 
@@ -1106,8 +1277,18 @@ async def _call_narrator(
                 result = result[len(prefix):].strip()
                 break
 
+        if _contains_hallucination(result):
+            logger.warning(
+                "[Narrator] halusinasi terdeteksi, fallback ke template | len=%d",
+                len(result),
+            )
+            return fallback
+
         return result if result else fallback
 
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        logger.warning("[Narrator] Hard timeout (%ss), using template fallback", timeout)
+        return fallback
     except DeepSeekUnavailableError:
         logger.warning("[Narrator] DeepSeek unavailable, using template fallback")
         return fallback
@@ -1292,11 +1473,16 @@ async def narrate_school_list(
     if total == 0 or not schools:
         return _zero_result_message(wilayah, active_filters, modul="list")
  
+    # Deteksi QC mode dari active_filters — tambahkan qc_summary ke prompt
+    _qc_mode    = bool(active_filters and active_filters.get("qc_masalah_only"))
+    _qc_summary = _build_qc_summary_context(schools) if _qc_mode else None
+
     prompt = _prompt_school_list(
         wilayah, total, len(schools), schools,
         breakdown_jenjang, breakdown_status,
         active_filters,
         wilayah_level,
+        qc_summary=_qc_summary,
     )
     narasi = await _call_narrator(
                                 prompt, 
@@ -1343,13 +1529,16 @@ async def narrate_school_profile(
                                 )
  
     if not narasi:
-        f_check = _extract_profile_fields(profile_data)
-        expected = {
-            "guru_total": f_check.get("guru_total") or None,
-            "siswa":      f_check.get("siswa") or None,
-        }
-        if not _validate_numbers_in_narasi(narasi, {k: v for k, v in expected.items() if v}):
-            logger.warning("[Narrator] Validasi angka gagal (profile), pakai template")
+        return template_md
+
+    # Validasi angka kritis: guru dan siswa wajib ada di narasi
+    f_check = _extract_profile_fields(profile_data)
+    expected = {k: v for k, v in {
+        "guru_total": f_check.get("guru_total") or None,
+        "siswa":      f_check.get("siswa") or None,
+    }.items() if v}
+    if expected and not _validate_numbers_in_narasi(narasi, expected):
+        logger.warning("[Narrator] Validasi angka gagal (profile), pakai template")
         return template_md
 
     # Validasi: nama sekolah wajib ada persis di narasi (tanpa diubah LLM)
@@ -1362,6 +1551,32 @@ async def narrate_school_profile(
         return template_md
 
     return f"{template_md}\n\n---\n\n{narasi}"
+
+
+def narrate_qc_percentage(
+    total_sekolah: int,
+    total_bersih: int,
+    total_bermasalah: int,
+    persen_bersih: float,
+    persen_bermasalah: float,
+    wilayah_label: str = "seluruh Indonesia",
+) -> str:
+    """
+    Bangun narasi persentase kualitas data sekolah.
+    Menggunakan template statis (tidak perlu LLM — angkanya sudah pasti).
+    """
+    def _fmt(n: int) -> str:
+        return f"{n:,}".replace(",", ".")
+
+    persen_b = f"{persen_bersih:.1f}".replace(".", ",")
+    persen_m = f"{persen_bermasalah:.1f}".replace(".", ",")
+
+    return (
+        f"Dari total {_fmt(total_sekolah)} sekolah di {wilayah_label}, "
+        f"sebanyak {_fmt(total_bersih)} sekolah ({persen_b}%) memiliki data yang bersih. "
+        f"Sementara {_fmt(total_bermasalah)} sekolah ({persen_m}%) masih memiliki "
+        f"setidaknya satu masalah data yang perlu diperbaiki."
+    )
 
 
 async def narrate_out_of_context(query: str) -> str:
@@ -1394,43 +1609,20 @@ async def narrate_out_of_context(query: str) -> str:
 
 async def narrate_multi_module(
     query: str,
-    module_outputs: List[Dict[str, Any]],
-    template_md: str
+    merged_context: str,
+    intent=None,
 ) -> str:
     """
-    Menggabungkan output beberapa modul menjadi 1 narasi terpadu.
-    
-    module_outputs contoh:
-    [
-        {
-            "module": "aggregation",
-            "content_md": "### Jumlah Sekolah\n..."
-        },
-        {
-            "module": "school_list",
-            "content_md": "### Daftar Sekolah\n..."
-        }
-    ]
+    Menggabungkan merged_context string (dari orchestrator) menjadi 1 narasi terpadu.
+    merged_context sudah berformat markdown dengan section dividers.
     """
+    if not merged_context or not merged_context.strip():
+        return "Tidak ada data yang dapat disajikan."
 
-    # fallback jika kosong
-    if not module_outputs:
-        return template_md
+    # Kalau hanya 1 section (tidak ada "---" divider), skip LLM
+    if "\n\n---\n\n" not in merged_context:
+        return merged_context
 
-    # gabungkan markdown dasar
-    combined_sections = []
-    for mod in module_outputs:
-        content = mod.get("content_md") or mod.get("content") or ""
-        if content:
-            combined_sections.append(content.strip())
-
-    merged_md = "\n\n".join(combined_sections)
-
-    # jika hanya 1 modul, tidak perlu LLM
-    if len(module_outputs) == 1:
-        return merged_md
-
-    # prompt LLM untuk merapikan narasi gabungan
     prompt = f"""
 Gabungkan beberapa bagian informasi berikut menjadi jawaban yang ringkas, jelas, dan tidak berulang.
 
@@ -1440,7 +1632,7 @@ Pertanyaan user:
 {query}
 
 Konten:
-{merged_md}
+{merged_context}
 
 Instruksi:
 - jangan menambahkan data baru
@@ -1450,11 +1642,16 @@ Instruksi:
 - pertahankan struktur markdown
 """
 
-    fallback = merged_md
-
-    return await _call_narrator(
+    narasi = await _call_narrator(
         prompt,
-        fallback,
+        fallback=merged_context,
         max_tokens=900,
-        timeout=NARRATOR_TIMEOUT_AGGREGATION
     )
+
+    expected_numbers = _extract_numbers_from_text(merged_context)
+    if expected_numbers:
+        if not _validate_numbers_in_narasi(narasi, expected_numbers):
+            logger.warning("[Narrator] Validasi angka gagal (multi_module), pakai merged_context")
+            return merged_context
+
+    return narasi

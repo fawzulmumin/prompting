@@ -2,6 +2,7 @@
 
 import asyncio
 import csv
+import hashlib
 import logging
 from pathlib import Path
 from typing import Dict, Any, Optional, List
@@ -10,6 +11,8 @@ from datetime import datetime, timedelta
 from app.utils.cache import set_cache
 
 logger = logging.getLogger(__name__)
+
+_background_tasks: set = set()
 
 # ================= CONFIG =================
 BASE_DIR = Path(__file__).parent.parent
@@ -95,7 +98,7 @@ async def handle_low_score_case(
         await _async_csv_write(row)
 
         # cache low score event
-        cache_key = f"low_score:{hash(query)}:{int(datetime.now().timestamp())}"
+        cache_key = f"low_score:{hashlib.md5(query.encode()).hexdigest()}:{int(datetime.now().timestamp())}"
         await set_cache(cache_key, {
             "query": query,
             "score": score,
@@ -108,7 +111,9 @@ async def handle_low_score_case(
             rewrite_triggered = True
             try:
                 from app.background.rewrite_worker import rewrite_query
-                asyncio.create_task(_run_rewrite(query, payload))
+                task = asyncio.create_task(_run_rewrite(query, payload))
+                _background_tasks.add(task)
+                task.add_done_callback(_background_tasks.discard)
             except Exception as e:
                 error_msg = str(e)
 

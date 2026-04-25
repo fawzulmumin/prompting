@@ -4,116 +4,118 @@
 # Field source: profile_builder.py::build_profile()
 #
 # Struktur profile yang masuk:
-#   identitas  → nama, npsn, status, akreditasi, bentuk_pendidikan, nilai_akhir, tahun_data
-#   lokasi     → alamat, desa, kecamatan, kabupaten, provinsi, kode_pos, koordinat
-#   tenaga_pendidik     → total_guru, laki_laki, perempuan, guru_pns, guru_p3k,
-#                         guru_honor, guru_sertifikasi, guru_s1_keatas
-#   tenaga_kependidikan → total_tendik, laki_laki, perempuan
-#   peserta_didik       → total_siswa, laki_laki, perempuan,
-#                         siswa_baru{laki_laki, perempuan},
-#                         siswa_lulus{laki_laki, perempuan},
-#                         siswa_mengulang{laki_laki, perempuan}
-#   sarana_prasarana    → akses_internet, sumber_listrik, sumber_air, tipe_jamban,
-#                         toilet_siswa_laki, toilet_siswa_perempuan, total_komputer,
-#                         kecukupan_air, minum_siswa
-#   legalitas  → sk_penetapan, last_update
+#   identitas     → nama, npsn, bentuk_pendidikan, status_sekolah, keaktifan,
+#                   akreditasi, waktu_penyelenggaraan, sertifikasi_iso
+#   lokasi        → alamat_jalan, desa_kelurahan, kecamatan, kabupaten, provinsi,
+#                   kode_pos, kode_wilayah, lintang, bujur,
+#                   wilayah_terpencil, wilayah_perbatasan
+#   kontak        → nomor_telepon, email, website
+#   infrastruktur → sumber_listrik, akses_internet
+#   kepemilikan   → status_kepemilikan, yayasan, partisipasi_bos
+#   legalitas     → sk_pendirian_sekolah, tanggal_sk_pendirian,
+#                   sk_izin_operasional, tanggal_sk_izin_operasional
+#   kualitas_data → qc_labels{qc_1..qc_13}, total_masalah, persen_bersih
+
+_QC_NAMES = {
+    "qc_1":  "Keunikan sekolah",
+    "qc_2":  "Format NPSN",
+    "qc_3":  "Nama sekolah",
+    "qc_4":  "Alamat jalan",
+    "qc_5":  "Kode wilayah",
+    "qc_6":  "Lintang",
+    "qc_7":  "Bujur",
+    "qc_8":  "SK izin operasional",
+    "qc_9":  "Tanggal SK izin",
+    "qc_10": "SK pendirian",
+    "qc_11": "Tanggal SK pendirian",
+    "qc_12": "Foto sekolah",
+    "qc_13": "Data yayasan (swasta)",
+}
 
 
-def safe(value) -> str:
-    if value in (None, "", "null", 0):
+def safe_count(value) -> str:
+    """Untuk field numerik: 0 adalah nilai valid, bukan 'tidak ada data'."""
+    if value in (None, "", "null"):
         return "-"
     return str(value)
 
 
 def format_profile_markdown(profile: dict) -> str:
-    identitas = profile.get("identitas", {})
-    lokasi    = profile.get("lokasi", {})
-    guru      = profile.get("tenaga_pendidik", {})
-    tendik    = profile.get("tenaga_kependidikan", {})
-    siswa     = profile.get("peserta_didik", {})
-    sarana    = profile.get("sarana_prasarana", {})
-    legalitas = profile.get("legalitas", {})
+    identitas  = profile.get("identitas", {})
+    lokasi     = profile.get("lokasi", {})
+    kontak     = profile.get("kontak", {})
+    infra      = profile.get("infrastruktur", {})
+    kepemilikan = profile.get("kepemilikan", {})
+    legalitas  = profile.get("legalitas", {})
+    qc         = profile.get("kualitas_data", {})
 
     # ── Identitas ──────────────────────────────────────────────────────────────
-    nilai_akhir_str = (
-        f"\n- **Nilai Akhir Akreditasi:** {identitas['nilai_akhir']}"
-        if identitas.get("nilai_akhir") not in (None, "", "-")
-        else ""
-    )
-
     markdown = f"""### Profil Sekolah Lengkap
 
 ## Identitas
-- **Nama:** {safe(identitas.get("nama"))}
-- **NPSN:** {safe(identitas.get("npsn"))}
-- **Status:** {safe(identitas.get("status"))}
-- **Akreditasi:** {safe(identitas.get("akreditasi"))}{nilai_akhir_str}
-- **Bentuk Pendidikan:** {safe(identitas.get("bentuk_pendidikan"))}
-- **Tahun Data:** {safe(identitas.get("tahun_data"))}
+- **Nama:** {safe_count(identitas.get("nama"))}
+- **NPSN:** {safe_count(identitas.get("npsn"))}
+- **Bentuk Pendidikan:** {safe_count(identitas.get("bentuk_pendidikan"))}
+- **Status Sekolah:** {safe_count(identitas.get("status_sekolah"))}
+- **Keaktifan:** {safe_count(identitas.get("keaktifan"))}
+- **Akreditasi:** {safe_count(identitas.get("akreditasi"))}
+- **Waktu Penyelenggaraan:** {safe_count(identitas.get("waktu_penyelenggaraan"))}
+- **Sertifikasi ISO:** {safe_count(identitas.get("sertifikasi_iso"))}
 
 ---
 
 ## Lokasi
-- **Alamat:** {safe(lokasi.get("alamat"))}
-- **Desa/Kelurahan:** {safe(lokasi.get("desa"))}
-- **Kecamatan:** {safe(lokasi.get("kecamatan"))}
-- **Kabupaten/Kota:** {safe(lokasi.get("kabupaten"))}
-- **Provinsi:** {safe(lokasi.get("provinsi"))}
-- **Kode Pos:** {safe(lokasi.get("kode_pos"))}
-- **Koordinat:** {safe(lokasi.get("koordinat", {}).get("lintang"))}, {safe(lokasi.get("koordinat", {}).get("bujur"))}
+- **Alamat:** {safe_count(lokasi.get("alamat_jalan"))}
+- **Desa/Kelurahan:** {safe_count(lokasi.get("desa_kelurahan"))}
+- **Kecamatan:** {safe_count(lokasi.get("kecamatan"))}
+- **Kabupaten/Kota:** {safe_count(lokasi.get("kabupaten"))}
+- **Provinsi:** {safe_count(lokasi.get("provinsi"))}
+- **Kode Pos:** {safe_count(lokasi.get("kode_pos"))}
+- **Kode Wilayah:** {safe_count(lokasi.get("kode_wilayah"))}
+- **Koordinat:** {safe_count(lokasi.get("lintang"))}, {safe_count(lokasi.get("bujur"))}
+- **Wilayah Terpencil:** {safe_count(lokasi.get("wilayah_terpencil"))}
+- **Wilayah Perbatasan:** {safe_count(lokasi.get("wilayah_perbatasan"))}
 
 ---
 
-## Tenaga Pendidik (Guru)
-- **Total Guru:** {safe(guru.get("total_guru"))} (L: {safe(guru.get("laki_laki"))}, P: {safe(guru.get("perempuan"))})
-- **Guru PNS:** {safe(guru.get("guru_pns"))}
-- **Guru P3K:** {safe(guru.get("guru_p3k"))}
-- **Guru Honor:** {safe(guru.get("guru_honor"))}
-- **Guru Sertifikasi:** {safe(guru.get("guru_sertifikasi"))}
-- **Guru S1 ke Atas:** {safe(guru.get("guru_s1_keatas"))}
+## Kontak
+- **Telepon:** {safe_count(kontak.get("nomor_telepon"))}
+- **Email:** {safe_count(kontak.get("email"))}
+- **Website:** {safe_count(kontak.get("website"))}
 
 ---
 
-## Tenaga Kependidikan (Tendik)
-- **Total Tendik:** {safe(tendik.get("total_tendik"))} (L: {safe(tendik.get("laki_laki"))}, P: {safe(tendik.get("perempuan"))})
-
----
-
-## Peserta Didik
-- **Total Siswa:** {safe(siswa.get("total_siswa"))} (L: {safe(siswa.get("laki_laki"))}, P: {safe(siswa.get("perempuan"))})
-"""
-
-    # Rincian dinamis: baru, lulus, mengulang
-    _rincian = {
-        "Siswa Baru":      siswa.get("siswa_baru", {}),
-        "Siswa Lulus":     siswa.get("siswa_lulus", {}),
-        "Siswa Mengulang": siswa.get("siswa_mengulang", {}),
-    }
-    for label, sub in _rincian.items():
-        l_val = sub.get("laki_laki", 0) or 0
-        p_val = sub.get("perempuan", 0) or 0
-        if l_val + p_val > 0:
-            markdown += f"- **{label}:** {l_val + p_val} (L: {l_val}, P: {p_val})\n"
-
-    # ── Sarana & Prasarana ─────────────────────────────────────────────────────
-    markdown += f"""
----
-
-## Sarana & Prasarana
-- **Akses Internet:** {safe(sarana.get("akses_internet"))}
-- **Sumber Listrik:** {safe(sarana.get("sumber_listrik"))}
-- **Sumber Air:** {safe(sarana.get("sumber_air"))}
-- **Kecukupan Air:** {safe(sarana.get("kecukupan_air"))}
-- **Tipe Jamban:** {safe(sarana.get("tipe_jamban"))}
-- **Toilet Laki-laki:** {safe(sarana.get("toilet_siswa_laki"))}
-- **Toilet Perempuan:** {safe(sarana.get("toilet_siswa_perempuan"))}
-- **Total Komputer:** {safe(sarana.get("total_komputer"))}
+## Kepemilikan & Fasilitas
+- **Status Kepemilikan:** {safe_count(kepemilikan.get("status_kepemilikan"))}
+- **Yayasan:** {safe_count(kepemilikan.get("yayasan"))}
+- **Partisipasi BOS:** {safe_count(kepemilikan.get("partisipasi_bos"))}
+- **Sumber Listrik:** {safe_count(infra.get("sumber_listrik"))}
+- **Akses Internet:** {safe_count(infra.get("akses_internet"))}
 
 ---
 
 ## Legalitas
-- **SK Penetapan:** {safe(legalitas.get("sk_penetapan"))}
-- **Terakhir Update:** {safe(legalitas.get("last_update"))}
+- **SK Pendirian:** {safe_count(legalitas.get("sk_pendirian_sekolah"))}
+- **Tanggal SK Pendirian:** {safe_count(legalitas.get("tanggal_sk_pendirian"))}
+- **SK Izin Operasional:** {safe_count(legalitas.get("sk_izin_operasional"))}
+- **Tanggal SK Izin Operasional:** {safe_count(legalitas.get("tanggal_sk_izin_operasional"))}
+
+---
+
+## Kualitas Data
 """
+
+    # Baris ringkasan skor QC
+    persen_bersih  = qc.get("persen_bersih")
+    total_masalah  = qc.get("total_masalah")
+    persen_str     = f"{persen_bersih}%" if persen_bersih is not None else "-"
+    masalah_str    = str(total_masalah) if total_masalah is not None else "-"
+    markdown += f"- **Skor:** {persen_str} bersih | {masalah_str} kolom bermasalah\n"
+
+    # Detail per kolom QC
+    qc_labels = qc.get("qc_labels") or {}
+    for field, name in _QC_NAMES.items():
+        status = qc_labels.get(field)
+        markdown += f"- **{name}:** {safe_count(status)}\n"
 
     return markdown

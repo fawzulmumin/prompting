@@ -284,13 +284,27 @@ def evaluate_node(state: GraphState) -> GraphState:
         "duration_ms":     (state.get("_t_generate_ms") or 0) + t_evaluate_ms,
         "_t_evaluate_ms":  t_evaluate_ms,
     }
- 
- 
+
+
+# ==========================================================
+# COMPILED GRAPH SINGLETON
+# Nodes are stateless — compiled once at module load, reused per request.
+# ==========================================================
+
+_workflow = StateGraph(GraphState)
+_workflow.add_node("generate", generate_node)
+_workflow.add_node("evaluate", evaluate_node)
+_workflow.add_edge(START,      "generate")
+_workflow.add_edge("generate", "evaluate")
+_workflow.add_edge("evaluate", END)
+_COMPILED_GRAPH = _workflow.compile()
+
+
 # ==========================================================
 # ENTRYPOINT — dipanggil dari rag_server.py (RAG flow saja)
 # Interface SAMA dengan versi lama: signature dan return keys identik
 # ==========================================================
- 
+
 async def route_with_fallback(
     query: str,
     initial_context: str,
@@ -308,15 +322,6 @@ async def route_with_fallback(
         logger.info("[Router] Cache hit")
         return {**cached, "from_cache": True, "provider": cached.get("provider", "cache")}
  
-    # Build dan compile graph (sekali per request — overhead minimal)
-    workflow = StateGraph(GraphState)
-    workflow.add_node("generate", generate_node)
-    workflow.add_node("evaluate", evaluate_node)
-    workflow.add_edge(START,      "generate")
-    workflow.add_edge("generate", "evaluate")
-    workflow.add_edge("evaluate", END)
-    app = workflow.compile()
- 
     initial_state: GraphState = {
         "query":           query,
         "context":         initial_context,
@@ -331,7 +336,7 @@ async def route_with_fallback(
         "_t_evaluate_ms":  None,
     }
  
-    final_state = await app.ainvoke(initial_state)
+    final_state = await _COMPILED_GRAPH.ainvoke(initial_state)
  
     result: RouterResponse = {
         "provider":    final_state.get("provider") or "none",

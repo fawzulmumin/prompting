@@ -4,10 +4,6 @@ import json
 import argparse
 import sys
 from pathlib import Path
-# 1. TAMBAHKAN ROOT PATH AGAR BISA IMPORT MODULE DARI LEVEL ATAS
-root_path = Path(__file__).parent.parent
-if str(root_path) not in sys.path:
-    sys.path.append(str(root_path))
 
 root_path = Path(__file__).parent.parent
 if str(root_path) not in sys.path:
@@ -28,7 +24,7 @@ def init_index(force: bool = False) -> None:
         request_timeout=30
     )
     
-    index_name = os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent")
+    index_name = os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc")  
     print(f"DEBUG: Menggunakan index bernama -> {index_name}")
     mapping_path = Path(__file__).parent.parent / "data" / "mapping.json"
     

@@ -69,14 +69,7 @@ class ProfileSearchService:
                     "minimum_should_match": 1
                 }
             },
-            "collapse": {
-                "field": "npsn",
-                "inner_hits": {
-                    "name": "latest_year",
-                    "size": 1,
-                    "sort": [{"tahun": "desc"}]
-                }
-            },
+            "collapse": {"field": "npsn"},
             "sort": [{"_score": {"order": "desc"}}]
         }
  
@@ -407,14 +400,8 @@ class ProfileSearchService:
         hits = []
  
         for hit in response["hits"]["hits"]:
- 
-            if "inner_hits" in hit:
-                latest = hit["inner_hits"]["latest_year"]["hits"]["hits"][0]
-                latest["_score"] = hit.get("_score", 0)
-                hits.append(latest)
-            else:
-                hits.append(hit)
- 
+            hits.append(hit)
+
         total_val = response["hits"]["total"]
         logger.info("[PROFILE] track_total raw=%s", total_val)
         total_hits = total_val["value"] if isinstance(total_val, dict) else total_val

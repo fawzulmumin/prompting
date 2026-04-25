@@ -32,80 +32,95 @@ class ProfileHandler:
         intent=None,
         filters: Optional[Dict] = None,
     ) -> dict:
- 
-        query = self._normalize_query(query)
- 
-        cached = await self._get_cache(query)
-        if cached:
-            return cached
- 
-        filters_dict = filters or extract_filters_from_intent(intent) or {}
-        parsed = _intent_to_legacy_parsed(filters_dict)
+        try:
+            query = self._normalize_query(query)
 
-        # Populate school_name dan wilayah dari intent jika belum ada
-        if intent and not parsed.get("school_name"):
-            _nama = getattr(intent, "nama_sekolah", None)
-            if _nama:
-                parsed["school_name"] = _nama
+            cached = await self._get_cache(query)
+            if cached:
+                return cached
 
-        if intent and not parsed.get("wilayah"):
-            _w = getattr(intent, "wilayah", None)
-            if _w:
-                # Gunakan level paling spesifik sebagai wilayah hint
-                parsed["wilayah"] = (
-                    getattr(_w, "kecamatan", None)
-                    or getattr(_w, "kabupaten", None)
-                    or getattr(_w, "provinsi", None)
+            filters_dict = filters or extract_filters_from_intent(intent) or {}
+            parsed = _intent_to_legacy_parsed(filters_dict)
+
+            # Populate school_name dan wilayah dari intent jika belum ada
+            if intent and not parsed.get("school_name"):
+                _nama = getattr(intent, "nama_sekolah", None)
+                if _nama:
+                    parsed["school_name"] = _nama
+
+            if intent and not parsed.get("wilayah"):
+                _w = getattr(intent, "wilayah", None)
+                if _w:
+                    parsed["wilayah"] = (
+                        getattr(_w, "kecamatan", None)
+                        or getattr(_w, "kabupaten", None)
+                        or getattr(_w, "provinsi", None)
+                    )
+
+            # Fallback: jika school_name masih kosong, parse dari query langsung
+            if not parsed.get("school_name"):
+                from app.services.core.smart_query_parser import parse_school_query
+                _parsed_fallback = parse_school_query(query)
+                if _parsed_fallback.get("school_name"):
+                    parsed.update({k: v for k, v in _parsed_fallback.items() if v and not parsed.get(k)})
+
+            search_result = await self._execute_search(query, parsed)
+
+            if not search_result or search_result["total"] == 0:
+                _npsn_q = self._extract_npsn(query)
+                if _npsn_q:
+                    return {
+                        "status": "not_found",
+                        "message": f"Sekolah dengan NPSN {_npsn_q} tidak ditemukan dalam database.",
+                    }
+                return self._not_found()
+
+            hits          = search_result["hits"]
+            hits_returned = search_result["total"]
+            total_es      = search_result.get("total_found", hits_returned)
+
+            if total_es > 10000:
+                total_found    = hits_returned
+                is_count_exact = False
+            else:
+                total_found    = total_es
+                is_count_exact = True
+
+            hits = search_result["hits"]
+            hits = apply_smart_ranking(parsed, hits)
+
+            wilayah_resolved = search_result.get("wilayah_resolved", True)
+
+            decision = self._decide_result(
+                parsed, hits, total_found, is_count_exact,
+                wilayah_resolved=wilayah_resolved
+            )
+
+            if decision["status"] != "success":
+                return decision
+
+            hit = decision["hit"]
+            try:
+                profile = self._build_profile(hit)
+            except (KeyError, AttributeError) as qc_err:
+                logger.warning(
+                    "[ProfileHandler] QC field error building profile, returning partial: %s", qc_err
                 )
+                profile = build_profile(hit.get("_source", {}), {})
 
-        # Fallback: jika school_name masih kosong, parse dari query langsung
-        if not parsed.get("school_name"):
-            from app.services.core.smart_query_parser import parse_school_query
-            _parsed_fallback = parse_school_query(query)
-            if _parsed_fallback.get("school_name"):
-                parsed.update({k: v for k, v in _parsed_fallback.items() if v and not parsed.get(k)})
+            response = self._build_response(profile, hit)
 
-        
-        search_result = await self._execute_search(query, parsed)
- 
-        if not search_result or search_result["total"] == 0:
-            return self._not_found()
- 
-        hits          = search_result["hits"]
-        hits_returned = search_result["total"]
-        total_es      = search_result.get("total_found", hits_returned)
- 
-        if total_es > 10000:
-            total_found    = hits_returned
-            is_count_exact = False
-        else:
-            total_found    = total_es
-            is_count_exact = True
- 
-        hits = search_result["hits"]
-        hits = apply_smart_ranking(parsed, hits)
- 
-        # ── Tambah: apakah wilayah yang di-parse berhasil membatasi hasil? ──
-        # Jika strict_wilayah fallback ke tanpa filter (total_es sangat besar),
-        # berarti wilayah tidak ditemukan di data → tandai sebagai "tidak valid"
-        wilayah_resolved = search_result.get("wilayah_resolved", True)
- 
-        decision = self._decide_result(
-            parsed, hits, total_found, is_count_exact,
-            wilayah_resolved=wilayah_resolved
-        )
- 
-        if decision["status"] != "success":
-            return decision
- 
-        hit     = decision["hit"]
-        profile = self._build_profile(hit)
-        response = self._build_response(profile, hit)
- 
-        await self._set_cache(query, response)
- 
-        return response
- 
+            await self._set_cache(query, response)
+
+            return response
+
+        except Exception as e:
+            logger.exception("[ProfileHandler] Unhandled error for query=%r: %s", query, e)
+            return {
+                "status": "error",
+                "message": "Terjadi kesalahan internal saat memproses permintaan profil sekolah.",
+            }
+
     # =====================================================
     # SEARCH LOGIC
     # =====================================================

@@ -9,8 +9,39 @@ import asyncio
 from typing import Any, Optional, List, Dict
 import redis.asyncio as redis
 from redis.exceptions import ConnectionError, TimeoutError
+import re as _re
 
 logger = logging.getLogger(__name__)
+
+# =========================
+# HELPERS
+# =========================
+def _log(logger_instance, level: str, event: str, **kwargs):
+    """Emit single-line JSON log. Fallback ke plain log jika json gagal."""
+    import json as _j, time
+    try:
+        payload = {"event": event, "ts": round(time.time(), 3), **kwargs}
+        msg = _j.dumps(payload, ensure_ascii=False, default=str)
+    except Exception:
+        msg = f"{event} {kwargs}"
+    getattr(logger_instance, level)(msg)
+
+
+def _normalize_cache_key(raw: str) -> str:
+    """
+    Normalize string sebelum dijadikan cache key hash.
+    - lowercase + strip
+    - hapus tanda baca tidak signifikan (diganti spasi)
+    - collapse whitespace
+    Tidak mengubah key yang sudah berupa hash (len == 32 dan hex).
+    """
+    if len(raw) == 32 and all(c in "0123456789abcdef" for c in raw):
+        return raw  # sudah hash MD5, jangan diproses
+    normalized = raw.lower().strip()
+    normalized = _re.sub(r"[^\w\s]", " ", normalized)
+    normalized = _re.sub(r"\s+", " ", normalized)
+    return normalized.strip()
+
 
 # =========================
 # CONFIGURATION
@@ -30,10 +61,10 @@ async def get_redis_client() -> redis.Redis:
 
     if not REDIS_AVAILABLE:
         return None
-    
+
     async with _redis_lock:
         if _redis_client is None:
-            logger.info(f"Connecting to Redis at {REDIS_URL}...")
+            _log(logger, "info", "redis_connecting", url=str(REDIS_URL)[:40])
             try:
                 _redis_client = redis.from_url(
                     REDIS_URL,
@@ -46,11 +77,10 @@ async def get_redis_client() -> redis.Redis:
                 )
                 # Async ping
                 await _redis_client.ping()
-                logger.info("✓ Redis connection established")
+                _log(logger, "info", "redis_connected")
             except Exception as e:
-                logger.error(f"Redis disabled due to connection failure")
-                logger.error(f"✗ Failed to connect to Redis: {e}")
-                
+                _log(logger, "error", "redis_connect_failed", error=str(e))
+
                 REDIS_AVAILABLE = False
                 _redis_client = None
                 return None
@@ -62,62 +92,72 @@ async def get_redis_client() -> redis.Redis:
 # =========================
 async def get_cache(key: str) -> Optional[Any]:
     global REDIS_AVAILABLE
-    
+
     if not key or not REDIS_AVAILABLE:
         return None
+
+    normalized_key = _normalize_cache_key(key)
+    if normalized_key != key:
+        _log(logger, "debug", "cache_key_normalized", original=key[:40], normalized=normalized_key[:40])
+    key = normalized_key
 
     try:
         redis_client = await get_redis_client()
         if redis_client is None:
             return None
-        
+
         full_key = f"{CACHE_PREFIX}{key}"
         data = await redis_client.get(full_key)
 
         if data:
             try:
-                return json.loads(data)
+                result = json.loads(data)
+                _log(logger, "debug", "cache_hit", key=key[:40])
+                return result
             except json.JSONDecodeError as e:
-                logger.warning(f"Cache decode error for key '{key}': {e}")
+                _log(logger, "warning", "cache_decode_error", key=key[:40], error=str(e))
                 return None
+        _log(logger, "debug", "cache_miss", key=key[:40])
         return None
 
     except (ConnectionError, TimeoutError):
-        logger.warning("Redis disabled due to runtime failure")
+        _log(logger, "warning", "redis_disabled")
         REDIS_AVAILABLE = False
         return None
     except Exception:
-        logger.warning("Unexpected error in get_cache")
+        _log(logger, "warning", "cache_get_unexpected_error")
         return None
 
 async def set_cache(key: str, value: Any, ttl: int = 3600) -> bool:
     global REDIS_AVAILABLE
-    
+
     if not key or value is None or not REDIS_AVAILABLE:
         return False
+
+    normalized_key = _normalize_cache_key(key)
+    if normalized_key != key:
+        _log(logger, "debug", "cache_key_normalized", original=key[:40], normalized=normalized_key[:40])
+    key = normalized_key
 
     try:
         redis_client = await get_redis_client()
         if redis_client is None:
             return False
-        
+
         full_key = f"{CACHE_PREFIX}{key}"
 
         # Safe JSON serialization
         string_data = json.dumps(value, ensure_ascii=False, default=str)
         await redis_client.setex(full_key, ttl, string_data)
-        logger.info(
-    f"[Cache] SET key={full_key} ttl={ttl} size={len(string_data)} bytes"
-)
-
+        _log(logger, "info", "cache_set", key=key[:40], ttl=ttl, size_bytes=len(string_data))
         return True
 
     except (ConnectionError, TimeoutError):
-        logger.warning("Redis disabled due to runtime failure")
+        _log(logger, "warning", "redis_disabled")
         REDIS_AVAILABLE = False
         return False
     except Exception:
-        logger.warning("Unexpected error in set_cache")
+        _log(logger, "warning", "cache_set_unexpected_error")
         return False
 
 async def delete_cache(key: str) -> bool:
@@ -127,7 +167,7 @@ async def delete_cache(key: str) -> bool:
         result = await redis_client.delete(full_key)
         return result > 0
     except Exception as e:
-        logger.error(f"Error deleting cache key '{key}': {e}")
+        _log(logger, "error", "cache_delete_failed", key=key[:40], error=str(e))
         return False
 
 async def clear_cache_pattern(pattern: str, batch_size: int = 100) -> int:
@@ -154,7 +194,7 @@ async def clear_cache_pattern(pattern: str, batch_size: int = 100) -> int:
         return deleted_count
 
     except Exception as e:
-        logger.error(f"Error clearing cache pattern '{pattern}': {e}")
+        _log(logger, "error", "cache_clear_pattern_failed", pattern=pattern[:40], error=str(e))
         return 0
 
 # =========================
@@ -173,6 +213,8 @@ async def save_chat_history(
 
     try:
         redis_client = await get_redis_client()
+        if redis_client is None:
+            return False
         key = f"{CACHE_PREFIX}history:{user_id}"
 
         message = {
@@ -192,7 +234,7 @@ async def save_chat_history(
         return True
 
     except Exception as e:
-        logger.error(f"Error saving chat history: {e}", exc_info=True)
+        _log(logger, "error", "chat_history_save_failed", error=str(e))
         return False
 
 async def get_chat_history(user_id: str) -> List[Dict[str, Any]]:
@@ -201,6 +243,8 @@ async def get_chat_history(user_id: str) -> List[Dict[str, Any]]:
 
     try:
         redis_client = await get_redis_client()
+        if redis_client is None:
+            return []
         key = f"{CACHE_PREFIX}history:{user_id}"
         history = await redis_client.lrange(key, 0, -1)
 
@@ -213,7 +257,7 @@ async def get_chat_history(user_id: str) -> List[Dict[str, Any]]:
         return parsed
 
     except Exception as e:
-        logger.error(f"Error getting chat history: {e}", exc_info=True)
+        _log(logger, "error", "chat_history_get_failed", error=str(e))
         return []
 
 async def clear_chat_history(user_id: str) -> bool:
@@ -223,7 +267,7 @@ async def clear_chat_history(user_id: str) -> bool:
         result = await redis_client.delete(key)
         return result > 0
     except Exception as e:
-        logger.error(f"Error clearing chat history: {e}")
+        _log(logger, "error", "chat_history_clear_failed", error=str(e))
         return False
 
 # =========================
@@ -243,7 +287,7 @@ def hash_key(*args) -> str:
 # =========================
 async def increment_counter(key: str, ttl: int = 60) -> int:
     global REDIS_AVAILABLE
-    
+
     if not key or not REDIS_AVAILABLE:
         return 0
     try:
@@ -254,20 +298,23 @@ async def increment_counter(key: str, ttl: int = 60) -> int:
         value = await redis_client.incr(full_key)
         if value == 1:
             await redis_client.expire(full_key, ttl)
+        _log(logger, "debug", "counter_increment", key=key[:40])
         return int(value)
     except Exception:
-        logger.warning("Redis disabled due to runtime failure")
+        _log(logger, "warning", "redis_disabled")
         REDIS_AVAILABLE = False
         return 0
 
 async def get_counter(key: str) -> int:
     try:
         redis_client = await get_redis_client()
+        if redis_client is None:
+            return 0
         full_key = f"{CACHE_PREFIX}{key}"
         value = await redis_client.get(full_key)
         return int(value) if value else 0
     except Exception as e:
-        logger.error(f"Error getting counter '{key}': {e}")
+        _log(logger, "error", "counter_get_failed", key=key[:40], error=str(e))
         return 0
 
 # =========================
@@ -276,18 +323,15 @@ async def get_counter(key: str) -> int:
 async def check_redis_health() -> Dict[str, Any]:
     try:
         redis_client = await get_redis_client()
+        if redis_client is None:
+            return {"status": "ERROR", "connected": False, "error": "Redis unavailable"}
         await redis_client.ping()
 
         info = await redis_client.info("memory")
         memory_used = info.get("used_memory_human", "unknown")
 
-        cursor = 0
-        key_count = 0
-        while True:
-            cursor, keys = await redis_client.scan(cursor, match=f"{CACHE_PREFIX}*", count=100)
-            key_count += len(keys)
-            if cursor == 0:
-                break
+        db_info = await redis_client.info("keyspace")
+        key_count = sum(v.get("keys", 0) for v in db_info.values() if isinstance(v, dict))
 
         return {
             "status": "OK",
@@ -305,29 +349,6 @@ async def check_redis_health() -> Dict[str, Any]:
         }
 
 # =========================
-# CONTEXT MANAGER
-# =========================
-class RedisCacheManager:
-    def __init__(self):
-        self.client = None
-
-    async def __aenter__(self):
-        self.client = await get_redis_client()
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        pass
-
-    async def get(self, key: str) -> Optional[Any]:
-        return await get_cache(key)
-
-    async def set(self, key: str, value: Any, ttl: int = 3600) -> bool:
-        return await set_cache(key, value, ttl)
-
-    async def delete(self, key: str) -> bool:
-        return await delete_cache(key)
-
-# =========================
 # EXPORT API
 # =========================
 __all__ = [
@@ -343,5 +364,4 @@ __all__ = [
     "increment_counter",
     "get_counter",
     "check_redis_health",
-    "RedisCacheManager",
 ]

@@ -6,45 +6,45 @@ from elasticsearch import AsyncElasticsearch
 from elasticsearch import ApiError, TransportError
  
 logger = logging.getLogger(__name__)
- # ── Metric target mapping ────────────────────────────────────────────────────
-# Format: metric_target → (agg_type, es_field)
-_METRIC_MAP: Dict[str, tuple] = {
-    "siswa":            ("sum", "siswa_total"),
-    "siswa_l":          ("sum", "siswa_l"),
-    "siswa_p":          ("sum", "siswa_p"),
-    "guru":             ("sum", "guru_total"),
-    "guru_pns":         ("sum", "guru_pns"),
-    "guru_honor":       ("sum", "guru_honor"),
-    "guru_sertifikasi": ("sum", "guru_sertifikasi"),
-    "tendik":           ("sum", "tendik_l"),   # tendik_l + tendik_p handled below
-    # default (None / "sekolah") → count npsn
-}
+# ── Metric target mapping ────────────────────────────────────────────────────
+# Index baru (idx_sekolah_qc) tidak punya field siswa/guru — hanya count sekolah.
+_METRIC_MAP: Dict[str, tuple] = {}
 
 def build_metric_aggs(metric_target: Optional[str]) -> Dict[str, Any]:
     """
     Bangun ES aggregation clause untuk metric yang diminta.
-    Return dict siap dimasukkan ke body["aggs"].
+    Index baru hanya mendukung count sekolah — selalu fallback ke value_count.
     """
-    if not metric_target or metric_target == "sekolah":
-        return {"main_metric": {"value_count": {"field": "npsn"}}}
+    return {"main_metric": {"value_count": {"field": "npsn"}}}
 
-    entry = _METRIC_MAP.get(metric_target)
-    if not entry:
-        logger.warning("[AGG_CORE] metric_target tidak dikenal: %s, fallback ke count", metric_target)
-        return {"main_metric": {"value_count": {"field": "npsn"}}}
+def build_qc_aggs() -> Dict[str, Any]:
+    """
+    Bangun ES aggregation untuk kualitas data (QC).
+    Digunakan ketika intent.qc_masalah_only=True atau query eksplisit tentang kualitas data.
 
-    agg_type, field = entry
+    qc_score adalah object biasa (bukan nested).
+    qc_1..qc_13 ada di dalam plain object "qc" — query langsung tanpa nested wrapper.
+    """
+    # Sub-aggs per kolom QC: hitung berapa dokumen dengan nilai bermasalah (> 1)
+    kolom_aggs: Dict[str, Any] = {}
+    for i in range(1, 14):
+        kolom_aggs[f"qc_{i}_masalah"] = {
+            "filter": {"range": {f"qc.qc_{i}": {"gt": 1}}}
+        }
 
-    aggs = {
-        "main_metric": {agg_type: {"field": field}},
-        "avg_metric":  {"avg":    {"field": field}},
+    return {
+        "avg_masalah": {
+            "avg": {"field": "qc_score.total_masalah"}
+        },
+        "sekolah_bermasalah": {
+            "filter": {"range": {"qc_score.total_masalah": {"gt": 0}}}
+        },
+        "distribusi_skor": {
+            "histogram": {"field": "qc_score.persen_bersih", "interval": 10}
+        },
+        **kolom_aggs,
     }
 
-    # Tendik: jumlahkan laki + perempuan
-    if metric_target == "tendik":
-        aggs["main_metric_p"] = {"sum": {"field": "tendik_p"}}
-
-    return aggs
 
 async def execute_aggregation_query(
     es_client: AsyncElasticsearch,
@@ -53,7 +53,7 @@ async def execute_aggregation_query(
  
     logger.info(f"EXTRACTED ENTITIES FINAL: {entities}")
  
-    index = os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent")
+    index = os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc")
  
     filters = build_filters(entities)
  
@@ -102,7 +102,7 @@ async def execute_nested_aggregation_query(
         }
         atau None jika gagal.
     """
-    index = os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent")
+    index = os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc")
     filters = build_filters(entities)
     _akreditasi = entities.get("akreditasi")
     jenjang_multi = entities.get("jenjang_multi")
@@ -182,22 +182,12 @@ async def execute_nested_aggregation_query(
             for b in status_buckets
         }
  
-        # Ambil nilai metric utama
-        aggs_raw = response.get("aggregations", {})
-        main_val = aggs_raw.get("main_metric", {}).get("value", 0) or 0
-
-        # Khusus tendik: jumlahkan L + P
-        if metric_target == "tendik":
-            main_val += aggs_raw.get("main_metric_p", {}).get("value", 0) or 0
-
-        # Fallback: jika metric adalah count (value_count), ambil value
-        # Jika metric adalah sum, main_val sudah benar
         total_doc = total_raw.get("value", 0) if isinstance(total_raw, dict) else total_raw
 
         return {
-            "total": int(main_val) if metric_target and metric_target != "sekolah" else total_doc,
-            "total_doc": total_doc,          # jumlah dokumen (sekolah) selalu tersedia
-            "metric_target": metric_target or "sekolah",
+            "total": total_doc,
+            "total_doc": total_doc,
+            "metric_target": "sekolah",
             "breakdown_jenjang": breakdown_jenjang,
             "breakdown_status":  breakdown_status,
         }
@@ -209,19 +199,21 @@ async def execute_nested_aggregation_query(
 def build_filters(entities: Dict[str, Any]) -> List[Dict[str, Any]]:
     filters = []
  
-    # Key-key internal yang TIDAK boleh jadi term filter langsung
+    # Key-key internal yang TIDAK boleh jadi term filter langsung di generic loop
     _SKIP_KEYS = {
         "hierarchy_warning",
         "_akreditasi_values",
         "akreditasi_gte",
         "akreditasi_exact",
-        "akreditasi_mode",      
-        "akreditasi",           
-        "bentuk_pendidikan",    
+        "akreditasi_mode",
+        "akreditasi",
+        "bentuk_pendidikan",
         "_area_group",
         "_kecamatan_list",
-        "siswa_min",
-        "siswa_max",
+        # Field QC — ditangani secara eksplisit di bawah
+        "qc_masalah_only",
+        "qc_field",
+        "qc_min_masalah",
     }
 
     # Jika ada area_group (mis. purwokerto → list kecamatan),
@@ -234,28 +226,14 @@ def build_filters(entities: Dict[str, Any]) -> List[Dict[str, Any]]:
 
         if field in _SKIP_KEYS:
             continue
- 
-        # khusus tahun → tetap term
-        if field == "tahun":
-            filters.append({
-                "term": {field: int(value)}
-            })
- 
-        # MULTI VALUE (PAUD)
-        elif field == "bentuk_pendidikan_in":
-            filters.append({
-                "terms": {
-                    "bentuk_pendidikan": value
-                }
-            })
- 
-        # default
+
+        # MULTI VALUE (PAUD / multi-jenjang)
+        if field == "bentuk_pendidikan_in":
+            filters.append({"terms": {"bentuk_pendidikan": value}})
+
+        # default: term filter untuk string/bool/int
         else:
-            filters.append({
-                "term": {
-                    field: value
-                }
-            })
+            filters.append({"term": {field: value}})
     
     # ── Filter akreditasi (IMPROVED VERSION) ─────────────────────────
     _akreditasi      = entities.get("akreditasi")
@@ -301,25 +279,38 @@ def build_filters(entities: Dict[str, Any]) -> List[Dict[str, Any]]:
         filters.append({"terms": {"akreditasi": entities["_akreditasi_values"]}})
         logger.debug("AGG _akreditasi_values (legacy) filter: %s", entities["_akreditasi_values"])
         
-    # ── Filter jenjang (bentuk_pendidikan) ───────────────────────────────────────
+    # ── Filter jenjang (bentuk_pendidikan) ──────────────────────────────────────
     _bentuk = entities.get("bentuk_pendidikan")
     _bentuk_in = entities.get("bentuk_pendidikan_in")
     if _bentuk_in:
         filters.append({"terms": {"bentuk_pendidikan": _bentuk_in}})
     elif _bentuk:
         filters.append({"term": {"bentuk_pendidikan": _bentuk}})
-    # ── PATCH: siswa_total range filter untuk aggregation ───────────────────────
-    if entities.get("siswa_min") is not None or entities.get("siswa_max") is not None:
-        _range = {"range": {"siswa_total": {}}}
 
-        if entities.get("siswa_min") is not None:
-            _range["range"]["siswa_total"]["gte"] = int(entities["siswa_min"])
+    # ── Filter keaktifan ─────────────────────────────────────────────────────
+    if "keaktifan" in entities and entities["keaktifan"] is not None:
+        filters.append({"term": {"keaktifan": entities["keaktifan"]}})
+        logger.debug("[AGG_CORE] keaktifan filter: %s", entities["keaktifan"])
 
-        if entities.get("siswa_max") is not None:
-            _range["range"]["siswa_total"]["lte"] = int(entities["siswa_max"])
+    # ── Filter wilayah_terpencil ─────────────────────────────────────────────
+    if "wilayah_terpencil" in entities and entities["wilayah_terpencil"] is not None:
+        filters.append({"term": {"wilayah_terpencil": entities["wilayah_terpencil"]}})
+        logger.debug("[AGG_CORE] wilayah_terpencil filter: %s", entities["wilayah_terpencil"])
 
-        filters.append(_range)
-        logger.debug("[AGG_CORE] siswa_total range filter: %s", _range)
+    # ── Filter wilayah_perbatasan ────────────────────────────────────────────
+    if "wilayah_perbatasan" in entities and entities["wilayah_perbatasan"] is not None:
+        filters.append({"term": {"wilayah_perbatasan": entities["wilayah_perbatasan"]}})
+        logger.debug("[AGG_CORE] wilayah_perbatasan filter: %s", entities["wilayah_perbatasan"])
+
+    # ── Filter QC: hanya sekolah dengan data bermasalah ─────────────────────
+    if entities.get("qc_masalah_only"):
+        filters.append({"range": {"qc_score.total_masalah": {"gt": 0}}})
+        logger.debug("[AGG_CORE] qc_masalah_only filter applied")
+
+    if entities.get("qc_min_masalah") is not None:
+        filters.append({"range": {"qc_score.total_masalah": {"gte": int(entities["qc_min_masalah"])}}})
+        logger.debug("[AGG_CORE] qc_min_masalah filter: %s", entities["qc_min_masalah"])
+
     return filters
  
 async def get_entity_doc_count(es_client, entity: Dict[str, str]) -> int:
@@ -342,19 +333,19 @@ async def get_entity_doc_count(es_client, entity: Dict[str, str]) -> int:
         "size": 0
     }
  
-    index = os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent")
-    response = await es_client.search(
-        index=index,
-        body=query
-    )
- 
-    return response["hits"]["total"]["value"]
+    index = os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc")
+    try:
+        response = await es_client.search(index=index, body=query)
+        return response["hits"]["total"]["value"]
+    except Exception as e:
+        logger.warning("[AGG_CORE] get_entity_doc_count failed: %s", e)
+        return 0
  
  
 async def get_entity_doc_counts_batch(
     es_client,
     entities_list: list,
-    index: str = "idx_prompting_agent"
+    index: str = "idx_sekolah_qc"
 ) -> list:
     """
     Batch version of get_entity_doc_count using ES msearch.
@@ -438,7 +429,7 @@ async def execute_global_ranking_query(
     size: int = 1
 ) -> Optional[List[Dict[str, Any]]]:
  
-    index = os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent")
+    index = os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc")
  
     body = {
         "size": 0,
@@ -537,7 +528,7 @@ async def execute_drilldown_query(
     Return:
         [{"name": "kab. bogor", "count": 8234}, ...]
     """
-    index = os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent")
+    index = os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc")
     filters = build_filters(entities)
  
     body = {

@@ -18,6 +18,7 @@ Contoh skenario 3 modul:
 """
  
 import asyncio
+import copy
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -151,8 +152,11 @@ async def _dispatch_single(
     filters: Dict[str, Any],
     es_client,
     user_id: str,
+    intent=None,
     *,
     timeout: float = 8.0,
+    list_handler=None,
+    profile_handler=None,
 ) -> ModuleResult:
     """
     Dispatch satu modul dengan timeout.
@@ -160,10 +164,16 @@ async def _dispatch_single(
     Tidak pernah raise exception — caller bisa lanjut.
     """
     enriched_query = inject_filters_to_query(query, filters)
- 
+
     try:
         result = await asyncio.wait_for(
-            _call_module(module_name, enriched_query, es_client, user_id),
+            _call_module(
+                module_name, enriched_query, es_client, user_id,
+                intent=intent,
+                list_handler=list_handler,
+                profile_handler=profile_handler,
+                filters=filters,
+            ),
             timeout=timeout,
         )
         return result
@@ -190,6 +200,10 @@ async def _call_module(
     query: str,
     es_client,
     user_id: str,
+    intent=None,
+    list_handler=None,
+    profile_handler=None,
+    filters: Optional[Dict[str, Any]] = None,
 ) -> ModuleResult:
     """
     Routing ke handler yang sesuai.
@@ -197,7 +211,7 @@ async def _call_module(
     """
     if module_name == "aggregation":
         from app.services.query_handlers.aggregation_handler import handle_aggregation_query
-        raw = await handle_aggregation_query(query=query, es_client=es_client, user_id=user_id)
+        raw = await handle_aggregation_query(query=query, es_client=es_client, user_id=user_id, intent=intent)
         return ModuleResult(
             module_name="aggregation",
             provider=raw.get("provider", "ELASTICSEARCH_AGG"),
@@ -210,7 +224,7 @@ async def _call_module(
  
     elif module_name == "comparison":
         from app.services.query_handlers.comparison_handler import handle_comparison_query
-        raw = await handle_comparison_query(query=query, es_client=es_client)
+        raw = await handle_comparison_query(query=query, es_client=es_client, intent=intent, filters=filters or {})
         return ModuleResult(
             module_name="comparison",
             provider=raw.get("provider", "ELASTICSEARCH_COMPARISON"),
@@ -222,10 +236,11 @@ async def _call_module(
         )
  
     elif module_name == "list":
-        from app.services.query_handlers.list_school_handler import ListSchoolHandler
-        import os
-        handler = ListSchoolHandler(es_client, os.getenv("ELASTICSEARCH_INDEX"))
-        raw = await handler.handle(query)
+        if list_handler is None:
+            from app.services.query_handlers.list_school_handler import ListSchoolHandler
+            import os
+            list_handler = ListSchoolHandler(es_client, os.getenv("ELASTICSEARCH_INDEX"))
+        raw = await list_handler.handle(query, intent=intent)
         schools = raw.get("schools", [])
         # Format ringkas untuk secondary context
         lines = [f"- **{s.get('nama')}** ({s.get('bentuk_pendidikan','')}) — {s.get('kecamatan','')}"
@@ -242,20 +257,22 @@ async def _call_module(
         )
  
     elif module_name == "geo":
-        # Geo memerlukan koordinat — hanya bisa dijalankan sebagai secondary
-        # jika koordinat tersedia dari primary request
-        # Jika tidak ada koordinat → return empty result
+        logger.warning(
+            "[Orchestrator] Secondary geo module not yet supported — "
+            "koordinat user hanya tersedia di primary flow"
+        )
         return ModuleResult(
             module_name="geo",
-            provider="GEO_SKIPPED",
+            provider="GEO_NOT_SUPPORTED",
             success=False,
-            error="Koordinat tidak tersedia untuk secondary geo module",
+            error="Secondary geo not implemented",
         )
  
     elif module_name == "profile":
-        from app.services.query_handlers.profile_handler import ProfileHandler
-        handler = ProfileHandler(es_client)
-        raw = await handler.handle(query)
+        if profile_handler is None:
+            from app.services.query_handlers.profile_handler import ProfileHandler
+            profile_handler = ProfileHandler(es_client)
+        raw = await profile_handler.handle(query, intent=intent)
         return ModuleResult(
             module_name="profile",
             provider="ELASTICSEARCH_PROFILE",
@@ -279,59 +296,134 @@ async def _call_module(
 # MAIN ORCHESTRATOR
 # ─────────────────────────────────────────────────────────────────────────────
  
+def _build_injected_intent(original_intent, parent_result: dict, inject_map: dict):
+    """
+    Return a shallow copy of intent with wilayah fields populated from parent_result.
+    Does NOT mutate original_intent.
+    """
+    new_intent = copy.copy(original_intent)
+    new_intent.wilayah = copy.copy(original_intent.wilayah)
+
+    for field_name, result_key in inject_map.items():
+        injected_value = parent_result.get(result_key)
+        if injected_value and hasattr(new_intent.wilayah, field_name):
+            setattr(new_intent.wilayah, field_name, str(injected_value).lower())
+            new_intent.scope = field_name  # e.g., "provinsi"
+
+    return new_intent
+
+
 async def orchestrate(
     intent,
     query: str,
     es_client,
     user_id: str,
     filters: Optional[Dict[str, Any]] = None,
+    list_handler=None,
+    profile_handler=None,
 ) -> Dict[str, Any]:
     """
-    Entry point utama. Dipanggil dari rag_server.py sebagai pengganti
-    dispatch langsung ke satu handler.
- 
+    Entry point utama. Dependency-aware 2-tier execution:
+      Tier 1 — primary + independent secondary run in parallel.
+      Tier 2 — dependent secondary run after Tier 1, with result injection.
+
     Returns dict dengan:
-        - merged_context: str  → untuk dikirim ke narrator
-        - primary_result:      → ModuleResult modul utama
-        - secondary_results:   → list ModuleResult modul pendukung
-        - providers:           → list provider string untuk logging
-        - total_docs:          → jumlah dokumen dari semua modul
-        - confidence:          → confidence gabungan (rata-rata weighted)
+        - merged_context: str
+        - primary_result, secondary_results, providers, total_docs, confidence
     """
+    sub_queries  = getattr(intent, "sub_queries",  {}) or {}
+    dependencies = getattr(intent, "dependencies", {}) or {}
+
     logger.info(
-        "[Orchestrator] primary=%s secondary=%s filters=%s",
-        intent.primary, intent.secondary
+        "[Orchestrator] primary=%s secondary=%s dependencies=%s",
+        intent.primary, intent.secondary, list(dependencies.keys()),
     )
- 
-    # ── Jalankan primary (wajib) + semua secondary secara paralel ────────────
-    tasks = [
+
+    def _query_for(module_name: str) -> str:
+        return sub_queries.get(module_name, query)
+
+    all_secondary        = list(intent.secondary)
+    dependent_modules    = [m for m in all_secondary if m in dependencies]
+    independent_secondary = [m for m in all_secondary if m not in dependencies]
+
+    if dependent_modules:
+        logger.info(
+            "[Orchestrator] independent layer: [%s %s], dependent layer: %s",
+            intent.primary, independent_secondary, dependent_modules,
+        )
+
+    # ── Tier 1: primary + independent secondary in parallel ──────────────────
+    tier1_tasks = [
         _dispatch_single(
-            intent.primary, query, filters or {},
-            es_client, user_id, timeout=10.0,
+            intent.primary, _query_for(intent.primary), filters or {},
+            es_client, user_id, intent=intent, timeout=10.0,
+            list_handler=list_handler, profile_handler=profile_handler,
         )
     ]
-    for sec_module in intent.secondary:
-        tasks.append(
+    for sec_module in independent_secondary:
+        tier1_tasks.append(
             _dispatch_single(
-                sec_module, query, filters or {},
-                es_client, user_id, timeout=6.0,   # secondary dapat timeout lebih pendek
+                sec_module, _query_for(sec_module), filters or {},
+                es_client, user_id, intent=intent, timeout=6.0,
+                list_handler=list_handler, profile_handler=profile_handler,
             )
         )
- 
-    results = await asyncio.gather(*tasks, return_exceptions=False)
-    primary_result    = results[0]
-    secondary_results = list(results[1:]) if len(results) > 1 else []
- 
+
+    tier1_done   = await asyncio.gather(*tier1_tasks, return_exceptions=False)
+    primary_result = tier1_done[0]
+
+    results_map: Dict[str, ModuleResult] = {intent.primary: primary_result}
+    for i, sec_module in enumerate(independent_secondary):
+        results_map[sec_module] = tier1_done[i + 1]
+
+    # ── Tier 2: dependent secondary with injection ────────────────────────────
+    if dependent_modules:
+        tier2_tasks = []
+        for dep_module in dependent_modules:
+            dep_config    = dependencies[dep_module]
+            parent_module = dep_config.get("depends_on")
+            inject_map    = dep_config.get("inject_from_result", {})
+
+            parent_data = results_map.get(
+                parent_module,
+                ModuleResult(module_name=parent_module or "", provider="MISSING"),
+            ).data
+
+            injected_intent = _build_injected_intent(intent, parent_data, inject_map)
+
+            for field_name, result_key in inject_map.items():
+                logger.info(
+                    "[Orchestrator] [%s] injecting %s=%s from %s",
+                    dep_module, field_name, parent_data.get(result_key), parent_module,
+                )
+
+            tier2_tasks.append(
+                _dispatch_single(
+                    dep_module, _query_for(dep_module), filters or {},
+                    es_client, user_id, intent=injected_intent, timeout=6.0,
+                    list_handler=list_handler, profile_handler=profile_handler,
+                )
+            )
+
+        tier2_done = await asyncio.gather(*tier2_tasks, return_exceptions=False)
+        for i, dep_module in enumerate(dependent_modules):
+            results_map[dep_module] = tier2_done[i]
+
+    # ── Reconstruct secondary_results in original order ───────────────────────
+    secondary_results: List[ModuleResult] = [
+        results_map[m] for m in all_secondary if m in results_map
+    ]
+
     # ── Merge context ─────────────────────────────────────────────────────────
     merged_context = merge_module_results(primary_result, secondary_results)
- 
+
     # ── Aggregate metadata ────────────────────────────────────────────────────
-    all_results  = [primary_result] + secondary_results
-    providers    = [r.provider for r in all_results if r.success]
-    total_docs   = sum(r.num_docs for r in all_results)
-    confidences  = [r.confidence for r in all_results if r.success and r.confidence > 0]
-    avg_conf     = sum(confidences) / len(confidences) if confidences else 0.0
- 
+    all_results = [primary_result] + secondary_results
+    providers   = [r.provider for r in all_results if r.success]
+    total_docs  = sum(r.num_docs for r in all_results)
+    confidences = [r.confidence for r in all_results if r.success and r.confidence > 0]
+    avg_conf    = sum(confidences) / len(confidences) if confidences else 0.0
+
     return {
         "merged_context":    merged_context,
         "primary_result":    primary_result,

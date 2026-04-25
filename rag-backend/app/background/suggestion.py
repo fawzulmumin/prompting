@@ -148,7 +148,7 @@ async def generate_suggestions(
     # ---------------- Elasticsearch path ----------------
     if es:
         try:
-            index_name = os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent")
+            index_name = os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc")
 
             body = {
                 "query": {

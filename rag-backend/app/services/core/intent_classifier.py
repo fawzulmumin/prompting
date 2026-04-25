@@ -77,6 +77,17 @@ SCHOOL_KEYWORDS: list[str] = [
     "ruang kelas", "laboratorium", "perpustakaan",
     # Singkatan nama sekolah
     "sman", "smpn", "sdn", "tkn", "smkn", "man", "mtsn", "min",
+    # Kualitas data / residu sekolah
+    "residu", "data bermasalah", "data tidak lengkap", "kualitas data",
+    "koordinat kosong", "koordinat tidak valid", "lintang kosong", "bujur kosong",
+    "foto belum", "foto sekolah", "foto tidak ada", "belum ada foto",
+    "npsn ganda", "npsn tidak unik", "format npsn",
+    "sk izin", "sk pendirian", "izin operasional",
+    "yayasan tidak terdaftar", "data yayasan",
+    "persen bersih", "total masalah", "masalah data",
+    "data bersih", "data kotor", "kelengkapan data",
+    "residu data", "sekolah bermasalah", "bermasalah",
+    "tidak lengkap", "tidak valid", "belum diunggah",
 ]
  
 # Kata/frasa yang mengindikasikan query di LUAR konteks sekolah

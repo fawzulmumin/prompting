@@ -10,7 +10,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from app.services.core.intent_classifier import classify_intent, IntentType
+from app.services.core.intent_classifier import classify_intent_rule as classify_intent, IntentType
 from app.services.core.cognitive_router import is_education_query
 
 # ─────────────────────────────────────────────────────────────────────────────

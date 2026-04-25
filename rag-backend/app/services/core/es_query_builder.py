@@ -1,4 +1,4 @@
-# services/core/es_query_builder.py 
+# services/core/es_query_builder.py
 """
 Centralized ES query builder.
 Input: CognitiveIntent + es_filters dari _build_es_filters()
@@ -6,6 +6,7 @@ Output: dict ES query siap kirim
 """
 
 from typing import Dict, Any, List, Optional
+
 
 def build_wilayah_filter(intent) -> List[Dict]:
     """
@@ -33,6 +34,104 @@ def build_wilayah_filter(intent) -> List[Dict]:
     # scope nasional → tidak ada filter wilayah
 
     return filters
+
+
+def build_qc_filter(intent) -> List[Dict]:
+    """
+    Bangun filter QC dari intent.
+
+    Mapping field intent → ES:
+      qc_masalah_only=True  → range: qc_score.total_masalah gte 1
+      qc_field=N            → range: qc.qc_N gte 2  (1=OK, >=2 berarti bermasalah)
+      qc_min_masalah=N      → range: qc_score.total_masalah gte N
+                               (jika qc_masalah_only juga True, ambil nilai terbesar)
+
+    qc_score.total_masalah dan qc.qc_N adalah plain object (bukan nested),
+    sehingga cukup pakai range query biasa tanpa nested query.
+    """
+    filters = []
+
+    # 1. qc_masalah_only: sekolah yang punya setidaknya 1 masalah data
+    has_masalah_only = getattr(intent, "qc_masalah_only", False)
+    qc_min = getattr(intent, "qc_min_masalah", None)
+
+    # Tentukan threshold total_masalah (ambil nilai terbesar antara keduanya)
+    total_masalah_gte = None
+    if has_masalah_only:
+        total_masalah_gte = 1
+    if qc_min and isinstance(qc_min, int) and qc_min > 0:
+        total_masalah_gte = max(total_masalah_gte or 0, qc_min)
+
+    if total_masalah_gte is not None:
+        filters.append({
+            "range": {
+                "qc_score.total_masalah": {"gte": total_masalah_gte}
+            }
+        })
+
+    # 2. qc_field: filter pada kolom QC spesifik yang bermasalah (nilai >= 2)
+    qc_field = getattr(intent, "qc_field", None)
+    if qc_field and isinstance(qc_field, int) and 1 <= qc_field <= 13:
+        filters.append({
+            "range": {
+                f"qc.qc_{qc_field}": {"gte": 2}
+            }
+        })
+
+    # 3. qc_persen_min / qc_persen_max: filter range persen_bersih
+    persen_min = getattr(intent, "qc_persen_min", None)
+    persen_max = getattr(intent, "qc_persen_max", None)
+    # Hanya proses jika nilai berupa angka nyata (guard vs MagicMock)
+    _persen_min_valid = isinstance(persen_min, (int, float)) and persen_min is not False
+    _persen_max_valid = isinstance(persen_max, (int, float)) and persen_max is not False
+    if _persen_min_valid or _persen_max_valid:
+        range_clause = {}
+        if _persen_min_valid:
+            range_clause["gte"] = float(persen_min)
+        if _persen_max_valid:
+            range_clause["lte"] = float(persen_max)
+        filters.append({"range": {"qc_score.persen_bersih": range_clause}})
+
+    # 4. qc_field_list: multiple QC field filters sekaligus
+    qc_field_list = getattr(intent, "qc_field_list", None) or []
+    for qf in qc_field_list:
+        if isinstance(qf, int) and 1 <= qf <= 13:
+            filters.append({"range": {f"qc.qc_{qf}": {"gte": 2}}})
+
+    return filters
+
+
+# Module-level cache for semester_id (set by _refresh_semester_id, read by _latest_semester_id)
+_cached_semester_id = None
+
+
+def _latest_semester_id():
+    """
+    Return the latest semester_id from the in-memory cache.
+    Returns None when no semester_id has been fetched yet (graceful fallback).
+    The field 'semester_id' is not yet in the current ES index mapping — function
+    is a forward-compatible stub. When the field exists, call _refresh_semester_id(es)
+    periodically to populate the cache.
+    """
+    return _cached_semester_id
+
+
+async def _refresh_semester_id(es_client) -> None:
+    """Fetch the latest semester_id from ES and update the module cache."""
+    import os as _os
+    global _cached_semester_id
+    index = _os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc")
+    try:
+        resp = await es_client.search(
+            index=index,
+            body={"size": 0, "aggs": {"max_semester": {"max": {"field": "semester_id"}}}},
+            request_timeout=5,
+        )
+        val = resp.get("aggregations", {}).get("max_semester", {}).get("value")
+        if val is not None:
+            _cached_semester_id = val
+    except Exception:
+        pass
 
 
 def build_es_query(
@@ -79,26 +178,21 @@ def build_es_query(
     elif "bentuk_pendidikan" in es_filters:
         hard_filters.append({"term": {"bentuk_pendidikan": es_filters["bentuk_pendidikan"]}})
 
-    # ── Jumlah Siswa (Range) → HARD FILTER ──
-    if getattr(intent, "siswa_min", None) or getattr(intent, "siswa_max", None):
-        range_filter = {"range": {"siswa_total": {}}}
-        if intent.siswa_min is not None:
-            range_filter["range"]["siswa_total"]["gte"] = intent.siswa_min
-        if intent.siswa_max:
-            range_filter["range"]["siswa_total"]["lte"] = intent.siswa_max
-        hard_filters.append(range_filter)
-    
-    # ── Penyelenggara → (opsional, bisa scoring atau filter) ──
-    if "penyelenggara" in es_filters:
-        must_clauses.append({
-            "bool": {
-                "should": [
-                    {"match": {"penyelenggara": {"query": es_filters["penyelenggara"], "fuzziness": "AUTO"}}},
-                    {"term": {"penyelenggara.keyword": es_filters["penyelenggara"].lower()}},
-                ],
-                "minimum_should_match": 1
-            }
-        })
+    # ── Keaktifan → HARD FILTER ──
+    if getattr(intent, "keaktifan", None):
+        hard_filters.append({"term": {"keaktifan": intent.keaktifan}})
+
+    # ── Wilayah Terpencil → HARD FILTER ──
+    if getattr(intent, "wilayah_terpencil", None) is not None:
+        hard_filters.append({"term": {"wilayah_terpencil": intent.wilayah_terpencil}})
+
+    # ── Wilayah Perbatasan → HARD FILTER ──
+    if getattr(intent, "wilayah_perbatasan", None) is not None:
+        hard_filters.append({"term": {"wilayah_perbatasan": intent.wilayah_perbatasan}})
+
+    # ── QC Filter ──
+    qc_filters = build_qc_filter(intent)
+    hard_filters.extend(qc_filters)
 
     # ── Nama Sekolah → SCORING ──
     if intent.nama_sekolah:
@@ -124,15 +218,10 @@ def build_es_query(
         },
         "size": size,
         "from": from_,
+        # Jangan kirim vektor embedding ke LLM — hemat bandwidth & token
+        "_source": {"excludes": ["content_vector"]},
     }
     
-    # ── Sorting ──
-    if getattr(intent, "sort_by", None) == "siswa_total":
-        query["sort"] = [
-            {"siswa_total": {"order": intent.sort_order or "desc"}},
-            {"_score": {"order": "desc"}}
-        ]
-        
     return query
 
 
@@ -161,6 +250,7 @@ def build_aggregation_query(intent_or_filters, es_filters: Dict = None) -> Dict:
         return {
             "query": {"bool": {"must": must if must else [{"match_all": {}}]}},
             "size": 0,
+            "_source": False,
             "aggs": {
                 "total": {"value_count": {"field": "npsn"}},
                 "by_jenjang": {"terms": {"field": "bentuk_pendidikan", "size": 30}},
@@ -221,6 +311,7 @@ def build_geo_query(
             }
         }],
         "size": size,
+        "_source": {"excludes": ["content_vector"]},
         "script_fields": {
             "distance_km": {
                 "script": {

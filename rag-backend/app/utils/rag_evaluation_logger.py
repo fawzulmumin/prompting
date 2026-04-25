@@ -15,7 +15,7 @@ from filelock import FileLock
 logger = logging.getLogger(__name__)
 
 # ========== CONFIGURATION ==========
-LOG_DIR = Path(__file__).parent.parent / "logs"
+LOG_DIR = Path(__file__).parent.parent.parent / "logs"
 EVAL_LOG_FILE = LOG_DIR / "rag_eval_log.csv"
 LOCK_FILE = LOG_DIR / "rag_eval_log.lock"
 
@@ -162,8 +162,8 @@ async def cleanup_old_logs(days: int = MAX_LOG_DAYS) -> Dict[str, Any]:
                     ts = datetime.fromisoformat(row["timestamp"])
                     if ts >= cutoff:
                         kept.append(row)
-                except:
-                    pass
+                except Exception as e:
+                    logger.debug("[EVAL_LOG] Skipping malformed row during cleanup: %s", e)
 
         with open(EVAL_LOG_FILE, 'w', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=fields)
@@ -209,7 +209,8 @@ async def get_summary(days: int = 7) -> Dict[str, Any]:
                 if row["from_cache"] == "TRUE":
                     cache_hits += 1
 
-            except:
+            except Exception as e:
+                logger.debug("[EVAL_LOG] Skipping malformed row during summary: %s", e)
                 continue
 
     if total == 0:

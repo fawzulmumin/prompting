@@ -15,6 +15,12 @@ _FUZZY_BLACKLIST = {
     "dari", "dengan", "sekolah", "jumlah", "berapa", "total",
     "kabupaten", "kecamatan", "provinsi", "kota", "lebih",
     "paling", "terbanyak", "siswa", "murid", "guru",
+    # Kata umum Indonesia yang sering disalah-koreksi ke nama desa/kecamatan
+    "tahun", "apakah", "adalah", "karena", "ketika", "pernah",
+    "semua", "setiap", "dalam", "hanya", "bukan", "kalau",
+    "sudah", "belum", "sedang", "sering", "sangat", "dimana",
+    "bagaimana", "mengapa", "siapa", "kapan", "boleh", "tidak",
+    "data", "nilai", "rata", "hasil", "angka", "score",
 }
 
 def _levenshtein(s1: str, s2: str) -> int:

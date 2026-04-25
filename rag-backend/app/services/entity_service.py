@@ -74,6 +74,9 @@ COMMON_NOUNS_BLOCKLIST = {
     "pantai", "gunung", "bukit", "sungai", "danau", "hutan",
     "perumahan", "industri", "pertanian", "perdagangan",
     "barat", "timur", "utara", "selatan", "tengah",  # arah mata angin standalone
+    # Kata umum query yang kebetulan cocok dengan nama desa tertentu
+    "data", "apakah", "tahun", "berapa", "nilai", "hasil",
+    "angka", "rata", "score", "semua", "total", "jumlah",
 }
 JAKARTA_ALIAS = [
     # Singkatan kota administrasi (harus sebelum pola "jakarta" panjang)
@@ -143,7 +146,7 @@ def normalize_query(query: str) -> str:
 def normalize_location_prefix(query: str) -> str:
     return normalize_query(query)
  
-def _strip_loc_prefix(value: str) -> str:
+def strip_loc_prefix(value: str) -> str:
     """Strip prefix lokasi standar + 'adm.' dari nama wilayah."""
     value = re.sub(r"^(prov\.|kab\.|kota|kec\.)\s*", "", value)
     value = re.sub(r"^adm\.\s*", "", value)
@@ -388,8 +391,7 @@ def extract_entities(query: str) -> Any:
     if "provinsi" not in entities:
         prov_lookup = LOCATION_INDEX.get("provinsi", {})
         for key, raw in prov_lookup.items():
-            stripped = normalize_wilayah_value(key)
-            stripped = re.sub(r"^(prov\.|kab\.|kota|kec\.)\s*", "", stripped)
+            stripped = strip_loc_prefix(normalize_wilayah_value(key))
  
             if stripped and re.search(r"\b" + re.escape(stripped) + r"\b", cleaned):
                 entities["provinsi"] = normalize_wilayah_value(raw)
@@ -660,7 +662,7 @@ def find_all_location_matches(name: str) -> List[Dict[str, str]]:
  
             for key, raw in sorted_keys:
  
-                key_clean = _strip_loc_prefix(key)          # ← UBAH
+                key_clean = strip_loc_prefix(key)          # ← UBAH
                 key_norm  = normalize_query(key_clean)
  
                 if re.search(r"\b" + re.escape(key_norm) + r"\b", cleaned):
@@ -773,8 +775,7 @@ def build_reference_locations():
     for level, lookup in LOCATION_INDEX.items():
         for key, raw in lookup.items():
  
-            stripped = re.sub(r"^(prov\.|kab\.|kota|kec\.)\s*", "", key)
-            normalized_name = normalize_query(stripped)
+            normalized_name = normalize_query(strip_loc_prefix(key))
  
             refs.append({
                 "value": normalize_wilayah_value(raw),
@@ -787,7 +788,7 @@ def build_reference_locations():
 
 # Di fungsi compute_entity_ranking_score atau sebelum memasukkan match:
 def _is_common_noun(value: str) -> bool:
-    clean = re.sub(r"^(prov\.|kab\.|kota|kec\.)\s*", "", value).strip().lower()
+    clean = strip_loc_prefix(value).lower()
     return clean in COMMON_NOUNS_BLOCKLIST
 
 # =========================================================
@@ -1247,10 +1248,10 @@ async def resolve_entities(
     # =====================================================
  
     multi_word_values = [
-        normalize_query(_strip_loc_prefix(m["value"]))
+        normalize_query(strip_loc_prefix(m["value"]))
         for m in possible_matches
         if len(
-            normalize_query(_strip_loc_prefix(m["value"])).split()
+            normalize_query(strip_loc_prefix(m["value"])).split()
         ) > 1
     ]
  
@@ -1258,7 +1259,7 @@ async def resolve_entities(
  
     for m in possible_matches:
  
-        stripped = normalize_query(_strip_loc_prefix(m["value"]))
+        stripped = normalize_query(strip_loc_prefix(m["value"]))
  
         if (
             len(stripped.split()) == 1

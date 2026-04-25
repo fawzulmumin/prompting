@@ -17,10 +17,11 @@ from typing import List, Optional, Dict
 from datetime import datetime
 from contextlib import asynccontextmanager
  
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Depends, Security
+from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
  
 from elasticsearch import AsyncElasticsearch
 from elasticsearch.exceptions import ConnectionError as ESConnectionError
@@ -31,6 +32,7 @@ from app.services.core.cognitive_router import (
     QueryRoute,
     is_education_query,
 )
+from app.services.core.jenjang_constants import JENJANG_MAP
 from app.services.core.intent_classifier import (
     classify_intent_rule as rule_classify,
     IntentType as RuleIntentType,
@@ -38,7 +40,8 @@ from app.services.core.intent_classifier import (
 )
 from app.services.core.multi_intent_orchestrator import orchestrate
 from app.services.core.school_name_normalizer import normalize_school_name
-from app.services.core.result_model import ResultStatus
+from app.services.core.result_model import ResultStatus, build_ambiguous_message
+from app.services.entity_service import build_reference_locations
  
 # ── HANDLERS ─────────────────────────────────────────────────────────────────
 from app.services.query_handlers.list_school_handler import ListSchoolHandler
@@ -68,7 +71,7 @@ from app.services.narrator_service import (
 )
  
 # ── FORMATTER ─────────────────────────────────────────────────────────────────
-from app.services.response_formatter import (
+from app.services.formatters.response_formatter import (
     format_school_answer,
     format_school_list_answer,
     build_reject_answer,
@@ -77,7 +80,7 @@ from app.services.response_formatter import (
 )
  
 # ── SEARCH & GEO ──────────────────────────────────────────────────────────────
-from app.services.search_service import (
+from app.services.search.search_service import (
     perform_search,
     compute_context_sufficiency_score,
     perform_geo_search,
@@ -134,11 +137,13 @@ list_handler = ListSchoolHandler(
 async def lifespan(app: FastAPI):
     logger.info("Starting application...")
     try:
-        get_embedding_model()
+        await asyncio.to_thread(get_embedding_model)
         await initialize_location_index(es_client)
+        await asyncio.to_thread(build_reference_locations)
         logger.info("All services initialized")
     except Exception as e:
-        logger.warning(f"Startup init failed: {e}")
+        logger.error(f"Startup init failed: {e}", exc_info=True)
+        raise RuntimeError(f"Startup init failed: {e}") from e
     yield
     logger.info("Shutting down...")
     await asyncio.sleep(1)
@@ -164,9 +169,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
  
+_ALLOWED_ORIGINS = [
+    o.strip()
+    for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+    if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_ALLOWED_ORIGINS,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -177,12 +187,17 @@ app.add_middleware(
 # =================================================
  
 class AskRequest(BaseModel):
-    question: str
+    question: str = Field(..., min_length=1, max_length=500)
     user_id: Optional[str] = None
     level: Optional[str] = None
     lat: Optional[float] = None
     lon: Optional[float] = None
     radius_km: Optional[float] = None
+
+    @field_validator("question")
+    @classmethod
+    def strip_question(cls, v: str) -> str:
+        return v.strip()
  
  
 class AskResponse(BaseModel):
@@ -310,15 +325,7 @@ def _extract_ambiguous_message(result: dict) -> str | None:
     # Cek message langsung
     if data.get("message"):
         return data["message"]
-    # Bangun dari candidates
-    candidates = data.get("candidates", [])
-    if candidates:
-        lines = ["Wilayah yang Anda maksud memiliki beberapa kemungkinan:"]
-        for i, c in enumerate(candidates, 1):
-            lines.append(f"{i}. {c.get('label', '').title()}")
-        lines.append("\nSilakan sebutkan lebih spesifik.")
-        return "\n".join(lines)
-    return "Wilayah yang Anda maksud ambigu. Silakan sebutkan lebih spesifik."
+    return build_ambiguous_message(data.get("candidates", []))
 
 # =================================================
 # ENDPOINT
@@ -380,16 +387,10 @@ async def ask_question(
     if (_lat is not None and _lon is not None) or detect_geo_query(query):
         if _lat is not None and _lon is not None:
             # Rule-based extraction — intent belum tersedia di fast path ini
-            _JENJANG_MAP_GEO = {
-                "sd": "SD", "sdn": "SD", "mi": "MI",
-                "smp": "SMP", "smpn": "SMP", "mts": "MTs",
-                "sma": "SMA", "sman": "SMA", "ma": "MA",
-                "smk": "SMK", "smkn": "SMK", "tk": "TK",
-                "tkn": "TK", "paud": "PAUD", "kb": "KB", "slb": "SLB",
-            }
+            # JENJANG_MAP diimport dari jenjang_constants — single source of truth
             _q_lower_geo = query.lower()
             _geo_bentuk = next(
-                (v for k, v in _JENJANG_MAP_GEO.items()
+                (v for k, v in JENJANG_MAP.items()
                 if re.search(r'\b' + k + r'\b', _q_lower_geo)),
                 None
             )
@@ -581,15 +582,14 @@ async def ask_question(
     # Ganti timeout per-call menjadi adaptif
     intent = await classify_intent(
         query,
-        timeout=11.0,   
+        timeout=45.0,
         use_cache=True
     )
  
     logger.info(
-        "[RouterV2] primary=%s secondary=%s | query=%r",
+        "[RouterV2] primary=%s secondary=%s",
         intent.primary,
         intent.secondary,
-        query[:80],
     )
  
     # =================================================
@@ -677,6 +677,8 @@ async def ask_question(
             es_client=es_client,
             user_id=user_id,
             filters=intent.filters,
+            list_handler=list_handler,
+            profile_handler=profile_handler,
         )
  
         merged_md = await narrate_multi_module(
@@ -1252,10 +1254,14 @@ async def ask_question(
             resolution_metadata=result.get("metadata", {}),
             total_hits=total,
         )
-        is_desa_level  = "desa_kelurahan" in (result.get("entities") or {})
+        _wilayah_level = result.get("wilayah_level", "")
+        is_desa_level  = _wilayah_level == "desa_kelurahan"
         threshold      = 0.5 if is_desa_level else 0.6
         answer_confident = confidence >= threshold
-        _context_parts = [f"wilayah:{wilayah_list}"]
+        _level_key = _wilayah_level if _wilayah_level in (
+            "provinsi", "kabupaten", "kecamatan", "desa_kelurahan"
+        ) else "wilayah"
+        _context_parts = [f"{_level_key}:{wilayah_list}"] if wilayah_list else []
         if _parsed.get("bentuk"):
             _context_parts.append(f"bentuk_pendidikan:{_parsed['bentuk']}")
         if _parsed.get("status"):
@@ -1419,15 +1425,22 @@ async def ask_question(
 # =================================================
 # ANALYTICS / FEEDBACK LOOP ENDPOINTS
 # =================================================
- 
+
+_REPORT_API_KEY = os.getenv("REPORT_API_KEY")
+_report_key_header = APIKeyHeader(name="X-Report-Key", auto_error=False)
+
+async def _require_report_key(key: str = Security(_report_key_header)):
+    if _REPORT_API_KEY and key != _REPORT_API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid report API key")
+
 @app.get("/report/weekly")
-async def weekly_report(days: int = 7, top_n: int = 20):
+async def weekly_report(days: int = 7, top_n: int = 20, _=Depends(_require_report_key)):
     from app.background.analytics import generate_weekly_report
     return generate_weekly_report(days=days, top_n=top_n)
- 
- 
+
+
 @app.get("/report/ooc-signals")
-async def ooc_signals(top_n: int = 50):
+async def ooc_signals(top_n: int = 50, _=Depends(_require_report_key)):
     from app.background.analytics import extract_ooc_keyword_signals
     tokens = extract_ooc_keyword_signals(top_n=top_n)
     return {
@@ -1435,10 +1448,10 @@ async def ooc_signals(top_n: int = 50):
         "suggestion": "Pertimbangkan token-token ini untuk ditambahkan ke OOC_KEYWORDS",
         "tokens": tokens,
     }
- 
- 
+
+
 @app.get("/report/ooc-alerts")
-async def ooc_alerts():
+async def ooc_alerts(_=Depends(_require_report_key)):
     import csv
     log_file = Path(__file__).parent / "logs" / "ooc_alert_log.csv"
     if not log_file.exists():

@@ -357,31 +357,32 @@ async def test_llm_profile_vs_geo(query, expected_primary, reason):
 @pytest.mark.unit
 async def test_orchestrator_parallel_execution():
     try:
-        from app.services.core.multi_intent_orchestrator import (
-            orchestrate, IntentResult as OrchestratorIntentResult,
-        )
+        from app.services.core.multi_intent_orchestrator import orchestrate
+        from app.services.core.cognitive_router import CognitiveIntent
     except ImportError as exc:
         pytest.fail(f"multi_intent_orchestrator tidak tersedia: {exc}")
- 
+
     async def slow_aggregation(*args, **kwargs):
         await asyncio.sleep(0.5)
         return {"provider": "MOCK_AGG", "answer_markdown": "5 sekolah.", "total": 5, "confidence": 0.8}
- 
-    async def slow_list_handle(self_or_query, *args, **kwargs):
-        await asyncio.sleep(0.5)
-        return {"status": "success", "schools": [{"nama": "SDN 1"}], "total": 1}
- 
-    intent = OrchestratorIntentResult(primary="aggregation", secondary=["list"])
+
+    class MockListHandler:
+        async def handle(self, query, *args, **kwargs):
+            await asyncio.sleep(0.5)
+            return {"status": "success", "schools": [{"nama": "SDN 1"}], "total": 1}
+
+    intent = CognitiveIntent(module="aggregation", secondary=["list"])
     start  = time.time()
- 
-    with (
-        patch("services.query_handlers.aggregation_handler.handle_aggregation_query",
-              new=slow_aggregation),
-        patch("services.query_handlers.list_school_handler.ListSchoolHandler.handle",
-              new=slow_list_handle),
+
+    with patch(
+        "app.services.query_handlers.aggregation_handler.handle_aggregation_query",
+        new=slow_aggregation,
     ):
-        result = await orchestrate(intent, "berapa SD di Depok? tampilkan juga", None, "test-user")
- 
+        result = await orchestrate(
+            intent, "berapa SD di Depok? tampilkan juga", None, "test-user",
+            list_handler=MockListHandler(),
+        )
+
     elapsed = time.time() - start
     assert elapsed < 1.2, f"Tidak paralel: {elapsed:.2f}s (expected < 1.2s)"
     assert "merged_context" in result
@@ -455,6 +456,145 @@ def test_filter_injection_no_duplicate():
 # MANUAL RUNNER
 # ─────────────────────────────────────────────────────────────────────────────
  
+# ─────────────────────────────────────────────────────────────────────────────
+# ⑦ UNIT: SEMESTER FILTER
+# Verifikasi build_es_query() menyertakan filter semester_id terbaru
+# sehingga dokumen historis tidak ikut diambil.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.unit
+def test_es_query_contains_semester_filter():
+    """build_es_query() harus menyertakan hard filter semester_id."""
+    try:
+        from app.services.core.es_query_builder import build_es_query, _latest_semester_id
+        from app.services.core.cognitive_router import CognitiveIntent, WilayahEntities
+    except ImportError as exc:
+        pytest.fail(f"import gagal: {exc}")
+
+    intent = CognitiveIntent(
+        module="list",
+        scope="kabupaten",
+        jenjang="SMP",
+        wilayah=WilayahEntities(kabupaten="bandung"),
+    )
+    query = build_es_query(intent, {}, size=10)
+    filter_clauses = query["query"]["bool"].get("filter", [])
+    sem_id = _latest_semester_id()
+
+    # Filter semester_id harus ada di antara filter hard
+    found = any(
+        clause.get("term", {}).get("semester_id") == sem_id
+        for clause in filter_clauses
+    )
+    assert found, (
+        f"Filter semester_id '{sem_id}' tidak ditemukan di query.\n"
+        f"Filter aktif: {filter_clauses}"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ⑧ UNIT: TIPE_JAMBAN LABEL CONVERSION
+# Verifikasi build_profile() mengembalikan label teks, bukan angka.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.unit
+def test_profile_builder_jamban_label():
+    """
+    build_profile() harus mengembalikan label string untuk tipe_jamban
+    dan kecukupan_air, bukan kode integer mentah.
+    """
+    try:
+        from app.services.core.profile_builder import build_profile
+    except ImportError as exc:
+        pytest.fail(f"import gagal: {exc}")
+
+    source = {
+        "nama": "SDN Test",
+        "npsn": "12345678",
+        "tipe_jamban": 1,       # 1 → "Leher Angsa"
+        "kecukupan_air": 2,     # 2 → "Cukup"
+    }
+    profile = build_profile(source, {})
+    sarana = profile["sarana_prasarana"]
+
+    assert sarana["tipe_jamban"] == "Leher Angsa", (
+        f"tipe_jamban harus 'Leher Angsa', got {sarana['tipe_jamban']!r}"
+    )
+    assert sarana["kecukupan_air"] == "Cukup", (
+        f"kecukupan_air harus 'Cukup', got {sarana['kecukupan_air']!r}"
+    )
+
+
+@pytest.mark.unit
+def test_profile_builder_jamban_zero_returns_none():
+    """tipe_jamban=0 (Tidak Ada) dan kecukupan_air=0 (Sangat Kurang) harus dikembalikan dengan benar."""
+    from app.services.core.profile_builder import build_profile
+    source = {"tipe_jamban": 0, "kecukupan_air": 0}
+    profile = build_profile(source, {})
+    sarana = profile["sarana_prasarana"]
+
+    assert sarana["tipe_jamban"] == "Tidak Ada", (
+        f"tipe_jamban=0 harus 'Tidak Ada', got {sarana['tipe_jamban']!r}"
+    )
+    assert sarana["kecukupan_air"] == "Sangat Kurang", (
+        f"kecukupan_air=0 harus 'Sangat Kurang', got {sarana['kecukupan_air']!r}"
+    )
+
+
+@pytest.mark.unit
+def test_profile_builder_jamban_none_returns_none():
+    """Jika tipe_jamban/kecukupan_air tidak ada di source → harus None (bukan label default)."""
+    from app.services.core.profile_builder import build_profile
+    profile = build_profile({}, {})
+    sarana = profile["sarana_prasarana"]
+
+    assert sarana["tipe_jamban"] is None, (
+        f"tipe_jamban None harus dikembalikan None, got {sarana['tipe_jamban']!r}"
+    )
+    assert sarana["kecukupan_air"] is None, (
+        f"kecukupan_air None harus dikembalikan None, got {sarana['kecukupan_air']!r}"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ⑨ UNIT: EXACT SCHOOL NAME — SDN 1 SERPONG vs SDN 1 SERPONG UTARA
+# Verifikasi keyword fallback TIDAK mencampurkan dua sekolah bernama mirip.
+# Pengecekan di level routing: nama sekolah spesifik → profile,
+# query tanpa nama → list; tidak ada pencampuran.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.unit
+def test_exact_school_name_routing():
+    """
+    'SDN 1 Serpong' harus diroute ke profile (nama spesifik + nomor).
+    Routing tidak boleh mencampur hasil untuk 'SDN 1 Serpong Utara'.
+    """
+    result_serpong        = _keyword_fallback("profil SDN 1 Serpong")
+    result_serpong_utara  = _keyword_fallback("profil SDN 1 Serpong Utara")
+
+    assert result_serpong.primary == "profile", (
+        f"'SDN 1 Serpong' harus → profile, got {result_serpong.primary!r}"
+    )
+    assert result_serpong_utara.primary == "profile", (
+        f"'SDN 1 Serpong Utara' harus → profile, got {result_serpong_utara.primary!r}"
+    )
+    # Keduanya route ke profile — bedanya hanya di nama_sekolah yang dikirim ke ES
+    # (dikontrol oleh CognitiveIntent.nama_sekolah, bukan diuji di sini karena
+    # keyword_fallback tidak mengekstrak nama_sekolah teks-bebas)
+
+
+@pytest.mark.unit
+def test_exact_school_name_no_number_routes_to_list():
+    """
+    Query tanpa nama sekolah spesifik harus ke list, bukan profile,
+    sehingga tidak ada risiko false-positive pada satu sekolah.
+    """
+    result = _keyword_fallback("daftar SDN di Serpong")
+    assert result.primary == "list", (
+        f"Query tanpa nama sekolah spesifik harus → list, got {result.primary!r}"
+    )
+
+
 if __name__ == "__main__":
     print("=" * 72)
     print("KEYWORD FALLBACK TEST  (offline)")

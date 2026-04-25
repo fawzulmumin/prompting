@@ -30,27 +30,27 @@ async def get_es_client() -> Optional[AsyncElasticsearch]:
     async with _es_lock:
         if _es_client:
             return _es_client
-    try:
-        _es_client = AsyncElasticsearch(
-            hosts=[ES_NODE],
-            basic_auth=(ES_USER, ES_PASS),
-            request_timeout=10,
-            max_retries=2,
-            retry_on_timeout=True
-        )
+        try:
+            _es_client = AsyncElasticsearch(
+                hosts=[ES_NODE],
+                basic_auth=(ES_USER, ES_PASS),
+                request_timeout=10,
+                max_retries=2,
+                retry_on_timeout=True
+            )
 
-        if not await _es_client.ping():
-            logger.error("[Analytics] Elasticsearch not responding")
+            if not await _es_client.ping():
+                logger.error("[Analytics] Elasticsearch not responding")
+                _es_client = None
+                return None
+
+            logger.info("[Analytics] Elasticsearch connected")
+            return _es_client
+
+        except Exception as e:
+            logger.error(f"[Analytics] ES init failed: {e}")
             _es_client = None
             return None
-
-        logger.info("[Analytics] Elasticsearch connected")
-        return _es_client
-
-    except Exception as e:
-        logger.error(f"[Analytics] ES init failed: {e}")
-        _es_client = None
-        return None
 
 async def close_analytics_client():
     global _es_client
@@ -180,7 +180,11 @@ async def run_analytics_bulk(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
         ops.append({"index": {"_index": ES_INDEX}})
         ops.append(doc)
 
-    res = await client.bulk(operations=ops)
+    try:
+        res = await client.bulk(operations=ops)
+    except Exception as e:
+        logger.error(f"[Analytics] bulk error: {e}", exc_info=True)
+        return {"total": len(payloads), "success": 0, "failed": len(payloads)}
 
     success = sum(1 for i in res.get("items", []) if i.get("index", {}).get("status") in (200,201))
 
@@ -205,7 +209,7 @@ async def run_analytics_bulk(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
 import csv as _csv
 from pathlib import Path as _Path
 
-_BASE_DIR = _Path(__file__).parent.parent
+_BASE_DIR = _Path(__file__).parent.parent.parent
 _EVAL_LOG  = _BASE_DIR / "logs" / "rag_eval_log.csv"
 _OOC_ALERT_LOG = _BASE_DIR / "logs" / "ooc_alert_log.csv"
 
