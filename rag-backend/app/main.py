@@ -1,6 +1,5 @@
 # rag_server.py
- 
-import app.config as config
+
 import os
 import re
 import logging
@@ -8,7 +7,7 @@ logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
- 
+
 import asyncio
 import hashlib
 import warnings
@@ -16,16 +15,16 @@ from pathlib import Path
 from typing import List, Optional, Dict
 from datetime import datetime
 from contextlib import asynccontextmanager
- 
+
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Depends, Security
 from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
- 
+
 from elasticsearch import AsyncElasticsearch
 from elasticsearch.exceptions import ConnectionError as ESConnectionError
- 
+
 # ── ROUTING: satu sistem, LLM-based ──────────────────────────────────────────
 from app.services.core.cognitive_router import (
     classify_intent,
@@ -42,7 +41,7 @@ from app.services.core.multi_intent_orchestrator import orchestrate
 from app.services.core.school_name_normalizer import normalize_school_name
 from app.services.core.result_model import ResultStatus, build_ambiguous_message
 from app.services.entity_service import build_reference_locations
- 
+
 # ── HANDLERS ─────────────────────────────────────────────────────────────────
 from app.services.query_handlers.list_school_handler import ListSchoolHandler
 from app.services.query_handlers.aggregation_handler import (
@@ -57,7 +56,7 @@ from app.services.query_handlers.school_vs_handler import (
 )
 from app.services.query_handlers.profile_handler import ProfileHandler
 from app.services.query_handlers.comparison_handler import handle_comparison_query
- 
+
 # ── NARRATOR ──────────────────────────────────────────────────────────────────
 from app.services.narrator_service import (
     narrate_out_of_context,
@@ -68,8 +67,9 @@ from app.services.narrator_service import (
     narrate_school_profile,
     detect_level,
     narrate_multi_module,
+    narrate_qc_percentage,
 )
- 
+
 # ── FORMATTER ─────────────────────────────────────────────────────────────────
 from app.services.formatters.response_formatter import (
     format_school_answer,
@@ -78,7 +78,7 @@ from app.services.formatters.response_formatter import (
     format_clarification_answer,
     build_location_label,
 )
- 
+
 # ── SEARCH & GEO ──────────────────────────────────────────────────────────────
 from app.services.search.search_service import (
     perform_search,
@@ -88,7 +88,7 @@ from app.services.search.search_service import (
     geocode_place_name,
     extract_place_from_query,
 )
- 
+
 # ── INFRA ─────────────────────────────────────────────────────────────────────
 from app.services.location_service import initialize_location_index
 from app.services.rate_limit_service import check_rate_limit
@@ -100,20 +100,20 @@ from app.utils.cache import get_cache, set_cache, get_chat_history, save_chat_hi
 from app.utils.markdown_to_html import markdown_to_safe_html
 from app.utils.rag_evaluation_logger import log_rag_evaluation
 from app.background.trigger import trigger_background_jobs
- 
+
 # =================================================
 # CONFIG
 # =================================================
- 
+
 logger = logging.getLogger(__name__)
- 
+
 warnings.filterwarnings(
     "ignore",
     message="'style' attribute specified, but css_sanitizer not set",
     category=UserWarning,
     module="bleach"
 )
- 
+
 es_client = AsyncElasticsearch(
     hosts=[os.getenv("ELASTICSEARCH_NODE")],
     basic_auth=(
@@ -124,15 +124,15 @@ es_client = AsyncElasticsearch(
     max_retries=3,
     retry_on_timeout=True
 )
- 
+
 profile_handler = ProfileHandler(es_client)
- 
+
 list_handler = ListSchoolHandler(
     es_client,
     os.getenv("ELASTICSEARCH_INDEX")
 )
- 
- 
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting application...")
@@ -157,18 +157,18 @@ async def lifespan(app: FastAPI):
         logger.info("DeepSeek client closed")
     except Exception as e:
         logger.warning(f"Error closing DeepSeek client: {e}")
- 
- 
+
+
 # =================================================
 # APP INIT
 # =================================================
- 
+
 app = FastAPI(
     title="RAG API Server",
     version="2.0.0",
     lifespan=lifespan,
 )
- 
+
 _ALLOWED_ORIGINS = [
     o.strip()
     for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
@@ -181,11 +181,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
- 
+
 # =================================================
 # MODELS
 # =================================================
- 
+
 class AskRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=500)
     user_id: Optional[str] = None
@@ -198,8 +198,8 @@ class AskRequest(BaseModel):
     @classmethod
     def strip_question(cls, v: str) -> str:
         return v.strip()
- 
- 
+
+
 class AskResponse(BaseModel):
     query: str
     answer_markdown: str
@@ -214,17 +214,17 @@ class AskResponse(BaseModel):
     completeness_score: Optional[float] = None
     user_id: str
     num_docs: int
- 
- 
+
+
 # =================================================
 # HELPERS
 # =================================================
- 
+
 def build_cache_key(query: str, level: Optional[str]) -> str:
     raw = f"{query}:{level}"
     return f"response:{hashlib.md5(raw.encode()).hexdigest()}"
- 
- 
+
+
 def detect_query_level(query: str) -> Optional[str]:
     q = query.lower()
     patterns = {
@@ -236,8 +236,8 @@ def detect_query_level(query: str) -> Optional[str]:
         if re.search(p, q):
             return level
     return None
- 
- 
+
+
 def _extract_radius_from_query(query: str) -> Optional[float]:
     q = query.lower()
     km_patterns = [
@@ -264,13 +264,13 @@ def _extract_radius_from_query(query: str) -> Optional[float]:
             if 0.05 <= val <= 5:
                 return round(val, 2)
     return None
- 
- 
+
+
 def _ms(start: datetime) -> int:
     """Hitung durasi dalam ms dari start hingga sekarang."""
     return int((datetime.now() - start).total_seconds() * 1000)
- 
- 
+
+
 def _base_response(
     query: str,
     start: datetime,
@@ -306,7 +306,7 @@ def _base_response(
         user_id=user_id,
         num_docs=num_docs,
     )
- 
+
 
 def _extract_ambiguous_message(result: dict) -> str | None:
     """Ekstrak pesan AMBIGUOUS dari result handler manapun."""
@@ -330,7 +330,7 @@ def _extract_ambiguous_message(result: dict) -> str | None:
 # =================================================
 # ENDPOINT
 # =================================================
- 
+
 @app.post("/ask", response_model=AskResponse)
 async def ask_question(
     request: AskRequest,
@@ -338,29 +338,29 @@ async def ask_question(
     req: Request
 ):
     start_time = datetime.now()
- 
+
     query = normalize_school_name(request.question)
     user_id = request.user_id or (req.client.host if req.client else "anonymous")
     query_level = request.level or detect_query_level(query)
- 
+
     # ── RATE LIMIT ────────────────────────────────────────────────────────────
     limit_status = await check_rate_limit(user_id)
     if not limit_status or not limit_status.get("allowed"):
         raise HTTPException(429, "Rate limit exceeded")
- 
+
     # =================================================
     # GEO SEARCH FAST PATH
     # =================================================
     _lat = request.lat
     _lon = request.lon
     _radius_km = request.radius_km or 2.0
- 
+
     if request.radius_km is None:
         _extracted_radius = _extract_radius_from_query(query)
         if _extracted_radius:
             _radius_km = _extracted_radius
             logger.info("[GEO] Radius diekstrak dari teks: %.1f km", _radius_km)
- 
+
     if _lat is None or _lon is None:
         _coord_match = re.search(
             r'(-?\d{1,3}(?:\.\d+)?)\s*[/,\s]\s*(-?\d{1,3}(?:\.\d+)?)',
@@ -375,7 +375,7 @@ async def ask_question(
                     logger.info("[GEO] Koordinat diekstrak: lat=%.4f lon=%.4f", _lat, _lon)
             except (ValueError, TypeError):
                 pass
- 
+
     if (_lat is None or _lon is None) and detect_geo_query(query):
         _place_name = extract_place_from_query(query)
         if _place_name:
@@ -383,7 +383,7 @@ async def ask_question(
             if _geocoded:
                 _lat, _lon = _geocoded
                 logger.info("[GEO] Geocoded: '%s' → lat=%.4f lon=%.4f", _place_name, _lat, _lon)
- 
+
     if (_lat is not None and _lon is not None) or detect_geo_query(query):
         if _lat is not None and _lon is not None:
             # Rule-based extraction — intent belum tersedia di fast path ini
@@ -410,7 +410,7 @@ async def ask_question(
                 _geo_akred = _akred_match.group(1).upper()
             elif _akred_match2:
                 _geo_akred = _akred_match2.group(1).upper()
-            
+
             _geo_result = await perform_geo_search(
                 es_client=es_client,
                 lat=_lat, lon=_lon,
@@ -443,7 +443,7 @@ async def ask_question(
                     "ELASTICSEARCH_GEO",
                     context_used=[f"geo:{_lat},{_lon}"],
                 )
- 
+
             _schools = []
             for h in _geo_hits:
                 s = h["_source"]
@@ -459,7 +459,7 @@ async def ask_question(
                     "provinsi":       s.get("provinsi"),
                     "jarak_km":       h.get("jarak_km"),
                 })
- 
+
             _displayed = len(_schools)
             _info_total = f"Menampilkan **{_displayed}** dari **{_total_in_radius}** sekolah dalam radius {_radius_km} km."
             _lines = [f"### Sekolah Terdekat (radius {_radius_km} km)\n", _info_total, ""]
@@ -472,11 +472,11 @@ async def ask_question(
                     f"{_akred} - {_lokasi}{_jarak}"
                 )
             _template_md = "\n".join(_lines)
- 
+
             _STATUS_NOISE = {"aktif", "aktif (buka)", "buka"}
             _bd_status  = {k: v for k, v in _breakdown_status.items() if k.lower().strip() not in _STATUS_NOISE}
             _bd_jenjang = _breakdown_jenjang
- 
+
             # ── GEO: status note dinamis dari data TOTAL dalam radius ──────────────
             _negeri_total = _bd_status.get("NEGERI", 0) + _bd_status.get("Negeri", 0)
             _swasta_total = _bd_status.get("SWASTA", 0) + _bd_status.get("Swasta", 0)
@@ -503,7 +503,7 @@ async def ask_question(
             if _status_note:
                 _template_md = f"{_status_note}\n\n{_template_md}"
             # ─────────────────────────────────────────────────────────────────────
- 
+
             _geo_active_filters = {}
             if _geo_bentuk:
                 _geo_active_filters["bentuk"] = _geo_bentuk
@@ -511,7 +511,7 @@ async def ask_question(
                 _geo_active_filters["status"] = _geo_status
             if _geo_akred:
                 _geo_active_filters["akreditasi"] = _geo_akred
- 
+
             _md = await narrate_school_list(
                 wilayah=f"radius {_radius_km} km dari koordinat {_lat:.4f},{_lon:.4f}",
                 total=_total_in_radius,
@@ -530,7 +530,7 @@ async def ask_question(
             if _geo_status:
                 _geo_context.append(f"status:{_geo_status}")
 
-            
+
             return _base_response(
                 query, start_time, user_id, _md,
                 "ELASTICSEARCH_GEO",
@@ -540,7 +540,7 @@ async def ask_question(
                 confidence_score=0.9,
                 num_docs=len(_schools),
             )
- 
+
         else:
             _geo_msg = (
                 "Untuk mencari sekolah terdekat, saya membutuhkan koordinat lokasi Anda.\n\n"
@@ -556,7 +556,7 @@ async def ask_question(
                 query, start_time, user_id, _geo_msg,
                 "SYSTEM_GEO_NO_COORDS",
             )
- 
+
     # =================================================
     # ROUTE RESOLUTION V2 (multi-intent aware)
     # =================================================
@@ -585,13 +585,13 @@ async def ask_question(
         timeout=45.0,
         use_cache=True
     )
- 
+
     logger.info(
         "[RouterV2] primary=%s secondary=%s",
         intent.primary,
         intent.secondary,
     )
- 
+
     # =================================================
     # ADJUDICATION — rekonsiliasi LLM vs rule-based classifier
     # =================================================
@@ -606,7 +606,7 @@ async def ask_question(
     #
     # Override hanya terjadi pada konflik OOT vs SCHOOL — kita tidak
     # mengganggu klasifikasi modul spesifik (aggregation/comparison/profile/geo).
- 
+
     if intent.primary == "out_of_context" and not intent.secondary:
         rule_result = rule_classify(query)
         if rule_result == RuleIntentType.SCHOOL:
@@ -643,11 +643,11 @@ async def ask_question(
                 intent.primary   = "list"
                 intent.is_oot    = False
                 intent.oot_reason = None
- 
+
     # =================================================
     # OUT OF CONTEXT GUARD
     # =================================================
- 
+
     if intent.primary == "out_of_context" and not intent.secondary:
         # Domain filter cadangan: jika lolos OOC tapi bukan query pendidikan
         if not is_education_query(query):
@@ -657,7 +657,7 @@ async def ask_question(
                 answer["answer_markdown"],
                 answer["provider"],
             )
- 
+
         answer = await narrate_out_of_context(query)
         return _base_response(
             query, start_time, user_id, answer,
@@ -668,9 +668,9 @@ async def ask_question(
     # =================================================
     # MULTI MODULE ORCHESTRATION
     # =================================================
- 
+
     if intent.secondary:
- 
+
         orch_result = await orchestrate(
             intent=intent,
             query=query,
@@ -680,13 +680,13 @@ async def ask_question(
             list_handler=list_handler,
             profile_handler=profile_handler,
         )
- 
+
         merged_md = await narrate_multi_module(
             query=query,
             merged_context=orch_result["merged_context"],
             intent=intent,
         )
- 
+
         return _base_response(
             query,
             start_time,
@@ -703,7 +703,7 @@ async def ask_question(
     # =================================================
     # COMPARISON
     # =================================================
- 
+
     if route == QueryRoute.COMPARISON:
         # ── School vs School guard — intercept sebelum comparison handler ──
         if is_school_vs_school_query(query):
@@ -743,10 +743,10 @@ async def ask_question(
         except Exception:
             logger.exception("[COMPARISON] handler crashed")
             raise HTTPException(500, "Comparison internal error")
- 
+
         if comparison_result and isinstance(comparison_result, dict):
             provider = comparison_result.get("provider", "")
- 
+
             # ── System error ─────────────────────────────────────────
             if provider == "SYSTEM_ERROR":
                 return _base_response(
@@ -754,7 +754,7 @@ async def ask_question(
                     "Terjadi kesalahan dalam memproses perbandingan.",
                     "SYSTEM_ERROR",
                 )
- 
+
             # ── Validation (minimal 2 lokasi, hierarki tidak lengkap) ─
             if provider == "SYSTEM_VALIDATION":
                 reason = comparison_result.get("reason", "")
@@ -771,14 +771,14 @@ async def ask_question(
                     query, start_time, user_id,
                     answer_markdown, "SYSTEM_VALIDATION",
                 )
- 
+
             # ── Status comparison (negeri vs swasta) ──────────────────
             if provider == "ELASTICSEARCH_COMPARISON_STATUS":
                 answer_markdown = comparison_result.get("answer_markdown", "")
                 total_hits      = comparison_result.get("num_docs", 0)
                 confidence      = comparison_result.get("confidence", 0.0)
                 results_raw     = comparison_result.get("results", [])
- 
+
                 counts    = {status.lower(): count for status, count in results_raw}
                 negeri    = counts.get("negeri", 0)
                 swasta    = counts.get("swasta", 0)
@@ -787,10 +787,10 @@ async def ask_question(
                     dominan     = max(negeri, swasta)
                     non_dominan = min(negeri, swasta)
                     pct_diff    = round((dominan - non_dominan) / non_dominan * 100)
- 
+
                 wilayah_match = re.search(r"\*\*Wilayah:\s*(.+?)\*\*", answer_markdown)
                 wilayah_label = wilayah_match.group(1) if wilayah_match else "wilayah ini"
- 
+
                 answer_markdown = await narrate_comparison_status(
                     wilayah=wilayah_label,
                     negeri=negeri,
@@ -806,7 +806,7 @@ async def ask_question(
                     confidence_score=confidence,
                     num_docs=total_hits,
                 )
- 
+
             # ── Jenjang comparison (sma vs smk di satu wilayah) ───────
             if provider == "ELASTICSEARCH_COMPARISON_JENJANG":
                 answer_markdown = comparison_result.get("answer_markdown", "")
@@ -820,7 +820,7 @@ async def ask_question(
                     confidence_score=confidence,
                     num_docs=total_hits,
                 )
- 
+
             # ── Normal comparison (dua lokasi berbeda) ─────────────────
             if provider == "ELASTICSEARCH_COMPARISON":
                 results         = comparison_result.get("results", [])
@@ -833,7 +833,7 @@ async def ask_question(
                     resolution_metadata={},
                     total_hits=total_sum,
                 )
- 
+
                 if not results:
                     return _base_response(
                         query, start_time, user_id,
@@ -842,11 +842,11 @@ async def ask_question(
                         context_sufficiency_score=1.0,
                         confidence_score=confidence,
                     )
- 
+
                 if not answer_markdown:
                     lines = [f"- {loc}: **{count:,} sekolah**" for loc, count in results]
                     answer_markdown = "### Perbandingan Jumlah Sekolah\n\n" + "\n".join(lines)
- 
+
                 narrator_results = []
                 for i, (loc, count) in enumerate(results):
                     item = {"lokasi": loc, "count": count}
@@ -862,19 +862,19 @@ async def ask_question(
                         if rd.get("max_siswa"):
                             item["max_siswa"]   = rd["max_siswa"]
                     narrator_results.append(item)
- 
+
                 answer_markdown = await narrate_comparison_lokasi(
                     results=narrator_results,
                     template_md=answer_markdown,
                     results_detail=narrator_results,
                     query=query,
                 )
- 
+
                 context_used_list = []
                 for r in (results_detail or []):
                     ent = r.get("entities", {})
                     context_used_list.extend(f"{k}:{v}" for k, v in ent.items() if v)
- 
+
                 return _base_response(
                     query, start_time, user_id,
                     answer_markdown, "ELASTICSEARCH_COMPARISON",
@@ -884,15 +884,15 @@ async def ask_question(
                     confidence_score=confidence,
                     num_docs=total_sum,
                 )
- 
+
         # Comparison tidak menghasilkan data → fall through ke LIST
         logger.info("[COMPARISON] no result, fallback → LIST")
         route = QueryRoute.LIST
- 
+
     # =================================================
     # AGGREGATION
     # =================================================
- 
+
     if route == QueryRoute.AGGREGATION:
         try:
             result = await handle_aggregation_query(
@@ -914,12 +914,12 @@ async def ask_question(
         except Exception:
             logger.exception("[AGGREGATION] handler crashed")
             raise HTTPException(500, "Aggregation internal error")
- 
+
         if not result:
             route = QueryRoute.LIST
         else:
             agg_provider = result.get("provider", "")
- 
+
             # ── Validation / Error ───────────────────────────────────
             if agg_provider in ("SYSTEM_VALIDATION", "SYSTEM_ERROR"):
                 if result.get("reason") == "HIERARCHY_INCOMPLETE":
@@ -932,7 +932,7 @@ async def ask_question(
                     )
                 else:
                     answer_md = "**Data tidak ditemukan atau lokasi tidak dikenali.**"
- 
+
                 confidence = compute_aggregation_confidence(
                     query=query, resolution_status="FAILED",
                     resolution_metadata=result, total_hits=0
@@ -942,7 +942,7 @@ async def ask_question(
                     answer_md, agg_provider,
                     confidence_score=confidence,
                 )
- 
+
             # ── Global ranking ───────────────────────────────────────
             if agg_provider == "ELASTICSEARCH_GLOBAL_RANKING":
                 loc   = result.get("top_location")
@@ -967,7 +967,26 @@ async def ask_question(
                     confidence_score=confidence,
                     num_docs=total,
                 )
- 
+
+            # ── QC Percentage ────────────────────────────────────────
+            if agg_provider == "ELASTICSEARCH_QC_PERCENTAGE":
+                data = result.get("data", {})
+                answer_md = narrate_qc_percentage(
+                    total_sekolah    = data.get("total_sekolah", 0),
+                    total_bersih     = data.get("total_bersih", 0),
+                    total_bermasalah = data.get("total_bermasalah", 0),
+                    persen_bersih    = data.get("persen_bersih", 0.0),
+                    persen_bermasalah= data.get("persen_bermasalah", 0.0),
+                    wilayah_label    = data.get("wilayah_label", "seluruh Indonesia"),
+                )
+                return _base_response(
+                    query, start_time, user_id,
+                    answer_md, "ELASTICSEARCH_QC_PERCENTAGE",
+                    context_sufficiency_score=1.0,
+                    answer_confident=True,
+                    confidence_score=result.get("confidence", 0.95),
+                )
+
             # ── Normal aggregation (single / multi) ──────────────────
             if result.get("is_multi"):
                 comparison_list = result.get("comparison", [])
@@ -993,9 +1012,9 @@ async def ask_question(
                                 break
                         lines.append(f"- {label}: **{total:,} sekolah**")
                         narrator_results_multi.append({"lokasi": label, "count": total})
- 
+
                     answer_md = "### Perbandingan Jumlah Sekolah\n\n" + "\n".join(lines)
- 
+
                     if len(comparison_list) >= 2:
                         best_ent   = comparison_list[0].get("entities", {})
                         best_label = "Wilayah"
@@ -1005,7 +1024,7 @@ async def ask_question(
                                 best_label = val.title()
                                 break
                         answer_md += f"\n\n---\nWilayah dengan sekolah terbanyak adalah **{best_label}**."
- 
+
                     answer_md = await narrate_comparison_lokasi(
                         results=narrator_results_multi,
                         template_md=answer_md,
@@ -1017,7 +1036,7 @@ async def ask_question(
                 wilayah_narasi      = build_location_label(entities_for_narasi)
                 total_narasi        = result.get("total", 0) or 0
                 status_narasi       = entities_for_narasi.get("status_sekolah")
- 
+
                 answer_md = await narrate_aggregation(
                     wilayah=wilayah_narasi,
                     total=total_narasi,
@@ -1034,7 +1053,7 @@ async def ask_question(
                     jenjang_requested=result.get("jenjang_requested"),
                     metric_target=result.get("metric_target"),
                 )
- 
+
             # Disclaimer confidence rendah untuk desa
             resolution_metadata = result.get("metadata", {}) or {}
             if resolution_metadata.get("low_confidence_desa"):
@@ -1047,11 +1066,11 @@ async def ask_question(
                     f"Jika bukan lokasi yang dimaksud, tambahkan nama "
                     f"kabupaten atau kecamatan untuk hasil yang lebih akurat."
                 )
- 
+
             confidence_score = result.get("confidence", 0.0)
             answer_confident = result.get("answer_confident", False)
             entities         = result.get("entities", {}) or {}
- 
+
             if result.get("is_multi"):
                 comparison_list   = result.get("comparison", [])
                 total_docs        = sum(x.get("total", 0) for x in comparison_list)
@@ -1062,7 +1081,7 @@ async def ask_question(
             else:
                 total_docs        = result.get("total", 0)
                 context_used_list = [f"{k}:{v}" for k, v in entities.items()]
- 
+
             return _base_response(
                 query, start_time, user_id,
                 answer_md, result.get("provider", "UNKNOWN"),
@@ -1072,18 +1091,18 @@ async def ask_question(
                 confidence_score=confidence_score,
                 num_docs=total_docs,
             )
- 
+
     # =================================================
     # PROFILE
     # =================================================
- 
+
     if route == QueryRoute.PROFILE:
- 
+
         # ── School vs School ─────────────────────────────────────────────
         if is_school_vs_school_query(query):
             logger.info("[SCHOOL_VS] Detected school vs school query")
             vs_result = await handle_school_vs_school(query, profile_handler)
- 
+
             if vs_result and vs_result.get("status") == "success":
                 comparison_md = format_school_comparison_markdown(vs_result)
                 comparison_md = await narrate_school_comparison(vs_result, comparison_md)
@@ -1099,11 +1118,11 @@ async def ask_question(
                     confidence_score=0.90,
                     num_docs=2,
                 )
- 
+
         # ── Profile cache check ──────────────────────────────────────────
         profile_cache_key = f"profile:v2:{hashlib.md5(query.encode()).hexdigest()}"
         cached_profile    = await get_cache(profile_cache_key)
- 
+
         if cached_profile:
             if "answer_markdown" not in cached_profile:
                 logger.warning("Invalid profile cache format, deleting...")
@@ -1113,10 +1132,10 @@ async def ask_question(
                 cached_profile["from_cache"]   = True
                 cached_profile["duration_ms"]  = 0
                 return AskResponse(**cached_profile)
- 
+
         profile_result = await profile_handler.handle(query, intent=intent)
         logger.debug("[PROFILE] result status: %s", profile_result.get("status"))
- 
+
         if profile_result["status"] == "not_found":
             return _base_response(
                 query, start_time, user_id,
@@ -1124,7 +1143,7 @@ async def ask_question(
                 "ELASTICSEARCH_PROFILE",
                 context_sufficiency_score=1.0,
             )
- 
+
         if profile_result["status"] == "ambiguous":
             candidates  = profile_result["candidates"]
             msg         = profile_result.get("message", "Mohon perjelas sekolah yang dimaksud:")
@@ -1141,12 +1160,12 @@ async def ask_question(
                 context_sufficiency_score=1.0,
                 num_docs=len(candidates),
             )
- 
+
         # ── Success ──────────────────────────────────────────────────────
         profile_data = profile_result.get("data") or {}
         if not isinstance(profile_data, dict) or not profile_data:
             raise HTTPException(status_code=500, detail="Invalid profile format")
- 
+
         formatted_md = profile_result.get("formatted")
         if not formatted_md:
             from app.services.formatters.profile_formatter import format_profile_markdown
@@ -1155,11 +1174,11 @@ async def ask_question(
             profile_data=profile_data,
             template_md=formatted_md,
         )
- 
+
         npsn_value        = profile_data.get("identitas", {}).get("npsn")
         completeness_score = profile_result.get("completeness_score", 0.0)
         confidence_score  = profile_result.get("confidence", 0.0)
- 
+
         response_payload = {
             "query":                    query,
             "answer_markdown":          formatted_md,
@@ -1173,7 +1192,7 @@ async def ask_question(
             "user_id":                  user_id,
             "num_docs":                 1,
         }
- 
+
         # TTL dinamis: data >= 2 tahun → 24 jam, data baru → 1 jam
         _tahun_data = profile_data.get("tahun") or profile_data.get("identitas", {}).get("tahun")
         try:
@@ -1182,17 +1201,17 @@ async def ask_question(
             _tahun_int = 0
         _profile_ttl = 86400 if (_tahun_int > 0 and (datetime.now().year - _tahun_int) >= 2) else 3600
         await set_cache(profile_cache_key, response_payload, _profile_ttl)
- 
+
         return AskResponse(
             **response_payload,
             duration_ms=_ms(start_time),
             answer_html=markdown_to_safe_html(formatted_md),
         )
- 
+
     # =================================================
     # LIST
     # =================================================
- 
+
     if route in (QueryRoute.LIST, QueryRoute.PROFILE):
         # PROFILE bisa fall-through ke sini jika school_vs dan profile handler sama-sama gagal
         result = await list_handler.handle(query, intent=intent)
@@ -1206,10 +1225,10 @@ async def ask_question(
                 confidence_score=0.5,
             )
         status_res  = result.get("status")
-        
+
         schools     = result.get("schools", [])
         total       = result.get("total", 0)
- 
+
         if status_res == "clarification":
             formatted = format_clarification_answer(result)
             return _base_response(
@@ -1217,7 +1236,7 @@ async def ask_question(
                 formatted["answer_markdown"], "ELASTICSEARCH_LIST",
                 context_sufficiency_score=1.0,
             )
- 
+
         if not schools:
             return _base_response(
                 query, start_time, user_id,
@@ -1225,18 +1244,21 @@ async def ask_question(
                 "ELASTICSEARCH_LIST",
                 context_sufficiency_score=1.0,
             )
- 
+
         formatted = format_school_list_answer(result)
         wilayah_list = result.get("parsed", {}).get("wilayah", "") or "wilayah yang diminta"
         _parsed = result.get("parsed", {})
         _active_filters = {
             k: v for k, v in {
-                "bentuk":     _parsed.get("bentuk"),
-                "status":     _parsed.get("status"),
-                "akreditasi": _parsed.get("akreditasi"),
+                "bentuk":          _parsed.get("bentuk"),
+                "status":          _parsed.get("status"),
+                "akreditasi":      _parsed.get("akreditasi"),
+                "qc_masalah_only": _parsed.get("qc_masalah_only"),
+                "qc_field_list":   _parsed.get("qc_field_list"),
+                "qc_field":        _parsed.get("qc_field"),
             }.items() if v
         }
- 
+
         formatted["answer_markdown"] = await narrate_school_list(
             wilayah=wilayah_list,
             total=total,
@@ -1247,7 +1269,7 @@ async def ask_question(
             active_filters=_active_filters,
             wilayah_level=result.get("wilayah_level", ""),
         )
- 
+
         confidence = compute_aggregation_confidence(
             query=query,
             resolution_status="SUCCESS",
@@ -1278,11 +1300,11 @@ async def ask_question(
             confidence_score=confidence,
             num_docs=total,
         )
- 
+
     # =================================================
     # RAG FLOW — fallback terakhir
     # =================================================
- 
+
     cache_key = build_cache_key(query, query_level)
     cached = await get_cache(cache_key)
     if cached:
@@ -1290,7 +1312,7 @@ async def ask_question(
         cached["from_cache"]  = True
         cached["duration_ms"] = 0
         return AskResponse(**cached)
- 
+
     history = await get_chat_history(user_id) or []
     # Hanya sertakan pesan user (bukan asisten) untuk context retrieval.
     # Respons asisten panjang dan tidak meningkatkan kualitas retrieval —
@@ -1324,7 +1346,7 @@ async def ask_question(
         filter_level=query_level,
         location_filter=_loc_filter or None,
     )
- 
+
     retrieval_score = compute_context_sufficiency_score(hits)
     # Budget 4500 char (~1500 token) dibagi rata per dokumen.
     # Field numerik penting (siswa_l/p, tendik, nilai_akhir, kode_pos) TIDAK ada
@@ -1350,7 +1372,7 @@ async def ask_question(
 
     context_parts = [_build_doc_context(i, h, _per_doc_limit) for i, h in enumerate(hits)]
     context = "\n\n".join(context_parts) if hits else "Tidak ada data relevan."
- 
+
     if retrieval_score < 0.3:
         return _base_response(
             query, start_time, user_id,
@@ -1358,7 +1380,7 @@ async def ask_question(
             "SYSTEM_LOW_RETRIEVAL",
             num_docs=len(hits),
         )
- 
+
     ai_result  = await route_with_fallback(
         query=query,
         initial_context=context,
@@ -1366,7 +1388,7 @@ async def ask_question(
     )
     evaluation = ai_result.get("evaluation") or {}
     llm_score  = evaluation.get("score", 0)
- 
+
     if llm_score < 30 and retrieval_score < 0.4:
         return _base_response(
             query, start_time, user_id,
@@ -1376,7 +1398,7 @@ async def ask_question(
             context_sufficiency_score=round(float(llm_score) / 100, 3),
             num_docs=len(hits),
         )
- 
+
     final_response   = ai_result["response"]
     confidence_score = compute_rag_confidence(
         llm_score=llm_score,
@@ -1384,7 +1406,7 @@ async def ask_question(
         num_docs=len(hits),
     )
     answer_confident = confidence_score >= 0.6
- 
+
     response_data = {
         "query":                     query,
         "answer_markdown":           final_response,
@@ -1400,7 +1422,7 @@ async def ask_question(
         "user_id":                   user_id,
         "num_docs":                  len(hits),
     }
- 
+
     background_tasks.add_task(set_cache, cache_key, response_data, 600)
     background_tasks.add_task(save_chat_history, user_id, "user", query)
     background_tasks.add_task(save_chat_history, user_id, "assistant", final_response)
@@ -1413,15 +1435,15 @@ async def ask_question(
         num_docs=len(hits),
         answer_length=len(final_response),
     )
- 
+
     await trigger_background_jobs(response_data, background_tasks)
- 
+
     return AskResponse(
         **response_data,
         answer_html=markdown_to_safe_html(final_response),
     )
- 
- 
+
+
 # =================================================
 # ANALYTICS / FEEDBACK LOOP ENDPOINTS
 # =================================================
@@ -1465,8 +1487,8 @@ async def ooc_alerts(_=Depends(_require_report_key)):
     except Exception as e:
         return {"error": str(e)}
     return {"total": len(alerts), "alerts": alerts[-50:]}
- 
- 
+
+
 @app.get("/health")
 async def health_check():
     try:
@@ -1474,15 +1496,15 @@ async def health_check():
         return {"status": "UP"}
     except ESConnectionError:
         return JSONResponse(status_code=503, content={"status": "DOWN"})
- 
- 
+
+
 # ========== MAIN ==========
 if __name__ == "__main__":
     import uvicorn
- 
+
     log_dir = Path(__file__).parent / "logs"
     log_dir.mkdir(exist_ok=True)
- 
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -1491,7 +1513,7 @@ if __name__ == "__main__":
             logging.StreamHandler(),
         ]
     )
- 
+
     port = int(os.getenv("PORT", 3001))
     uvicorn.run(
         "rag_server:app",

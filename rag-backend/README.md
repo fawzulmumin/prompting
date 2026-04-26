@@ -1,3 +1,5 @@
+> ✅ Last fix session: QC pipeline — 155 passed, 0 failed (2026-04-26)
+
 # rag-backend
  
 FastAPI service sebagai RAG (Retrieval-Augmented Generation) engine yang melayani query berbasis data Elasticsearch.

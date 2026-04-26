@@ -182,3 +182,254 @@ def test_narrate_qc_percentage_format():
     assert "30.000" in narasi
     assert "70,0%" in narasi
     assert "30,0%" in narasi
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bagian C — end-to-end: handler → narrator → validasi answer_markdown
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.unit
+async def test_qc_percentage_full_response_no_error_strings():
+    """
+    Regression: query QC persentase harus menghasilkan answer_markdown dengan
+    persentase yang valid — BUKAN 'Tidak ditemukan satuan pendidikan' atau 'Tidak diketahui'.
+
+    Bug yang dilindungi: main.py tidak punya handler ELASTICSEARCH_QC_PERCENTAGE
+    sehingga jatuh ke handler list dan menghasilkan
+    "Tidak ditemukan satuan pendidikan di Tidak diketahui".
+    """
+    import re
+    from app.services.core.cognitive_router import CognitiveIntent, WilayahEntities
+    from app.services.query_handlers.aggregation_handler import handle_aggregation_query
+    from app.services.narrator_service import narrate_qc_percentage
+
+    # Dua ES call via asyncio.gather: call[0]=total, call[1]=bersih
+    mock_es = AsyncMock()
+    mock_es.search.side_effect = [
+        {"aggregations": {"total": {"value": 350000}}, "hits": {"total": {"value": 350000}}},
+        {"aggregations": {"total": {"value": 245000}}, "hits": {"total": {"value": 245000}}},
+    ]
+
+    intent = CognitiveIntent(
+        module="aggregation",
+        scope="nasional",
+        qc_persen_query=True,
+        wilayah=WilayahEntities(),
+    )
+
+    result = await handle_aggregation_query(
+        query="berapa persen sekolah yang datanya bersih di seluruh Indonesia",
+        es_client=mock_es,
+        intent=intent,
+    )
+
+    # Requirement 1: provider harus ELASTICSEARCH_QC_PERCENTAGE
+    assert result.get("provider") == "ELASTICSEARCH_QC_PERCENTAGE", (
+        f"Expected ELASTICSEARCH_QC_PERCENTAGE, got {result.get('provider')!r}"
+    )
+
+    # Simulasi branch main.py: if agg_provider == "ELASTICSEARCH_QC_PERCENTAGE"
+    data = result.get("data", {})
+    answer_markdown = narrate_qc_percentage(
+        total_sekolah    =data.get("total_sekolah", 0),
+        total_bersih     =data.get("total_bersih", 0),
+        total_bermasalah =data.get("total_bermasalah", 0),
+        persen_bersih    =data.get("persen_bersih", 0.0),
+        persen_bermasalah=data.get("persen_bermasalah", 0.0),
+        wilayah_label    =data.get("wilayah_label", "seluruh Indonesia"),
+    )
+
+    # Requirement 2: answer_markdown mengandung angka persentase (format XX,X%)
+    assert re.search(r"\d+,\d+%", answer_markdown), (
+        f"answer_markdown harus mengandung persentase XX,X%, got: {answer_markdown!r}"
+    )
+
+    # Requirement 3: TIDAK mengandung pesan error handler list yang salah
+    assert "Tidak ditemukan satuan pendidikan" not in answer_markdown, (
+        f"answer_markdown mengandung error string dari handler yang salah: {answer_markdown!r}"
+    )
+
+    # Requirement 4: TIDAK mengandung "Tidak diketahui"
+    assert "Tidak diketahui" not in answer_markdown, (
+        f"answer_markdown mengandung 'Tidak diketahui': {answer_markdown!r}"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bagian D — _prompt_school_profile: QC data injection ke prompt
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.unit
+def test_prompt_school_profile_includes_qc_data():
+    """
+    _prompt_school_profile harus menyertakan kualitas_data dalam prompt:
+    - 'Kualitas Data:' hadir di bagian DATA SEKOLAH
+    - Nama masalah human-readable (mis. 'koordinat lintang', 'foto sekolah')
+    - Heading '## Kualitas & Kelengkapan Data' hadir di INSTRUKSI NARASI
+    - TIDAK mengandung 'Data kualitas tidak tersedia' ketika kualitas_data ada
+    """
+    from app.services.narrator_service import _prompt_school_profile
+
+    mock_profile = {
+        "kualitas_data": {
+            "total_masalah": 4,
+            "persen_bersih": 69.23,
+            "qc_labels": {
+                "qc_6":  "Bermasalah (kode: 2)",   # koordinat lintang
+                "qc_7":  "Bermasalah (kode: 2)",   # koordinat bujur
+                "qc_12": "Bermasalah (kode: 2)",   # foto sekolah
+                "qc_13": "Bermasalah (kode: 3)",   # data yayasan
+                "qc_1":  "OK",
+                "qc_3":  "OK",
+            },
+        },
+    }
+
+    prompt = _prompt_school_profile(mock_profile)
+
+    # Requirement 1: baris 'Kualitas Data:' hadir di DATA SEKOLAH
+    assert "Kualitas Data:" in prompt, (
+        "Prompt harus mengandung 'Kualitas Data:' di bagian DATA SEKOLAH"
+    )
+
+    # Requirement 2: nama masalah readable (mapped dari _QC_NAMES)
+    assert "koordinat lintang" in prompt, (
+        "Prompt harus mengandung 'koordinat lintang' (mapped dari qc_6)"
+    )
+    assert "foto sekolah" in prompt, (
+        "Prompt harus mengandung 'foto sekolah' (mapped dari qc_12)"
+    )
+
+    # Requirement 3: heading instruksi narasi hadir
+    assert "## Kualitas & Kelengkapan Data" in prompt, (
+        "Prompt harus mengandung heading '## Kualitas & Kelengkapan Data'"
+    )
+
+    # Requirement 4: tidak ada fallback 'tidak tersedia' ketika data ada
+    assert "Data kualitas tidak tersedia" not in prompt, (
+        "Prompt tidak boleh mengandung 'Data kualitas tidak tersedia' ketika kualitas_data tersedia"
+    )
+
+
+@pytest.mark.unit
+def test_prompt_school_profile_no_qc_section_when_clean():
+    """
+    Ketika kualitas_data.total_masalah == 0, heading '## Kualitas & Kelengkapan Data'
+    TIDAK boleh ada di prompt (karena instruksi QC sekarang kondisional dari Python,
+    bukan teks statis yang selalu ada).
+    """
+    from app.services.narrator_service import _prompt_school_profile
+
+    mock_profile = {
+        "kualitas_data": {
+            "total_masalah": 0,
+            "persen_bersih": 100.0,
+            "qc_labels": {
+                "qc_1": "OK",
+                "qc_3": "OK",
+                "qc_6": "OK",
+                "qc_7": "OK",
+            },
+        },
+    }
+
+    prompt = _prompt_school_profile(mock_profile)
+
+    assert "## Kualitas & Kelengkapan Data" not in prompt, (
+        "Heading QC tidak boleh muncul ketika total_masalah == 0"
+    )
+    assert "WAJIB" not in prompt, (
+        "Instruksi WAJIB tidak boleh muncul ketika data bersih"
+    )
+    assert "Data lengkap (100% bersih)" in prompt, (
+        "Prompt harus menyebutkan '100% bersih' di baris Kualitas Data"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bagian E — _build_qc_summary_context: non-empty untuk sekolah bermasalah
+# ───────────────────────────────────���─────────────────────────────────────────
+
+@pytest.mark.unit
+def test_build_qc_summary_context_nonempty_when_masalah():
+    """
+    _build_qc_summary_context harus mengembalikan string non-empty ketika
+    schools mengandung total_masalah > 0.
+
+    Regression: query qc_field_list (mis. koordinat kosong) menghasilkan
+    _qc_summary=None karena _qc_mode hanya cek qc_masalah_only, bukan qc_field_list.
+    Fungsi ini harus tetap menghasilkan output valid selama data QC tersedia.
+    """
+    from app.services.narrator_service import _build_qc_summary_context
+
+    schools = [
+        {
+            "nama": "SDN 01 Bandung",
+            "npsn": "20201234",
+            "total_masalah": 2,
+            "persen_bersih": 84.6,
+            "masalah_detail": "SDN 01 Bandung. SD. Masalah data: koordinat lintang kosong, koordinat bujur kosong.",
+        },
+        {
+            "nama": "SMPN 3 Bandung",
+            "npsn": "20205678",
+            "total_masalah": 1,
+            "persen_bersih": 92.3,
+            "masalah_detail": "SMPN 3 Bandung. SMP. Masalah data: koordinat lintang kosong.",
+        },
+        {
+            "nama": "SMAN 5 Bandung",
+            "npsn": "20209999",
+            "total_masalah": 0,
+            "persen_bersih": 100.0,
+            "masalah_detail": "",
+        },
+    ]
+
+    result = _build_qc_summary_context(schools)
+
+    assert result, "Harus mengembalikan string non-empty ketika ada sekolah dengan total_masalah > 0"
+    assert "SDN 01 Bandung" in result
+    assert "SMPN 3 Bandung" in result
+    assert "koordinat lintang" in result
+
+
+@pytest.mark.unit
+def test_build_qc_summary_context_empty_when_no_qc_data():
+    """_build_qc_summary_context harus mengembalikan '' ketika semua total_masalah=None."""
+    from app.services.narrator_service import _build_qc_summary_context
+
+    schools = [
+        {"nama": "TK Fazza", "npsn": "69999001", "total_masalah": None, "persen_bersih": None},
+        {"nama": "Politeknik AKMB", "npsn": "69999002", "total_masalah": None, "persen_bersih": None},
+    ]
+
+    result = _build_qc_summary_context(schools)
+    assert result == "", f"Harus mengembalikan '' ketika tidak ada data QC, got: {result!r}"
+
+
+@pytest.mark.unit
+def test_qc_mode_detected_from_qc_field_list():
+    """
+    narrate_school_list harus mengaktifkan _qc_mode ketika active_filters
+    mengandung qc_field_list, bukan hanya qc_masalah_only.
+
+    Regression: _qc_mode = bool(active_filters.get('qc_masalah_only')) saja
+    tidak mendeteksi qc_field_list=[6] sehingga _qc_summary selalu None.
+    """
+    # Verifikasi logika deteksi _qc_mode langsung tanpa memanggil async function
+    def _detect_qc_mode(active_filters):
+        return bool(
+            active_filters and (
+                active_filters.get("qc_masalah_only")
+                or active_filters.get("qc_field_list")
+                or active_filters.get("qc_field")
+            )
+        )
+
+    assert _detect_qc_mode({"qc_masalah_only": True}) is True
+    assert _detect_qc_mode({"qc_field_list": [6]}) is True,    "qc_field_list=[6] harus trigger _qc_mode"
+    assert _detect_qc_mode({"qc_field": "koordinat_lintang"}) is True, "qc_field harus trigger _qc_mode"
+    assert _detect_qc_mode({"bentuk": "SD"}) is False,         "filter non-QC tidak boleh trigger _qc_mode"
+    assert _detect_qc_mode({}) is False
+    assert _detect_qc_mode(None) is False

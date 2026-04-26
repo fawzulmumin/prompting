@@ -1,5 +1,5 @@
 # list_school_handler.py
- 
+
 import re
 import logging
 from typing import Dict, List, Optional, Tuple, Set
@@ -9,20 +9,20 @@ from app.services.core.jenjang_constants import JENJANG_MAP
 from app.services.entity_service import strip_loc_prefix
 
 logger = logging.getLogger(__name__)
- 
+
 # PAUD adalah kategori umbrella — expand ke jenjang konkret di ES
 _PAUD_BENTUK_EXPAND = ["TK", "KB", "RA", "SPS", "TPA", "PAUDQ", "SPK TK", "SPK KB", "SDTK"]
- 
+
 _AMBIGUOUS_SINGLE_WORDS = {
     "timur", "barat", "utara", "selatan", "tengah",
     "dalam", "luar", "baru", "lama", "raya", "induk",
 }
- 
+
 _NON_STANDALONE_LOCATION_WORDS = {
     "barat", "timur", "utara", "selatan", "tengah",
     "dalam", "luar", "baru", "lama", "raya",
 }
- 
+
 # ================================================================
 # SORT KEYWORDS — deteksi niat pengurutan dari query
 # ================================================================
@@ -65,7 +65,7 @@ _AKREDITASI_ORDER_SCRIPT = (
     "if (v == 'C') { return 3; }"
     "return 4;"
 )
- 
+
 def _build_sort_clause(sort_mode: str, intent=None) -> List[Dict]:
     # Prioritas: jika intent punya sort_by eksplisit, gunakan field/order langsung
     if intent is not None:
@@ -97,7 +97,7 @@ def _build_sort_clause(sort_mode: str, intent=None) -> List[Dict]:
             {"_score": {"order": "desc"}},
         ]
     return [{"_score": {"order": "desc"}}]
- 
+
 # ================================================================
 # OPTIONAL AGGREGATIONS FOR BREAKDOWN (jenjang + status)
 # ================================================================
@@ -107,25 +107,25 @@ LIST_AGGS_SNIPPET = {
         "by_status":  {"terms": {"field": "status_sekolah", "size": 5}},
     }
 }
- 
+
 def extract_breakdowns(es_response: dict):
     agg = es_response.get("aggregations", {})
- 
+
     jenjang = {
         b["key"]: b["doc_count"]
         for b in agg.get("by_jenjang", {}).get("buckets", [])
     }
- 
+
     status = {
         b["key"]: b["doc_count"]
         for b in agg.get("by_status", {}).get("buckets", [])
     }
- 
+
     return jenjang, status
 # ================================================================
 # FUZZY MATCH
 # ================================================================
- 
+
 def _levenshtein(s1: str, s2: str) -> int:
     if len(s1) < len(s2):
         return _levenshtein(s2, s1)
@@ -138,22 +138,22 @@ def _levenshtein(s1: str, s2: str) -> int:
             curr.append(min(prev[j + 1] + 1, curr[j] + 1, prev[j] + (c1 != c2)))
         prev = curr
     return prev[-1]
- 
- 
+
+
 def _fuzzy_match_keyword(keyword: str) -> Optional[Tuple[str, str]]:
     try:
         from app.services.location_service import LOCATION_INDEX
     except ImportError:
         return None
- 
+
     kw = keyword.lower().strip()
     if len(kw) < 4 or " " in kw:
         return None
- 
+
     threshold = min(2, max(1, len(kw) // 4))
     best_match = None
     best_dist  = 999
- 
+
     for level in ["kecamatan", "kabupaten", "provinsi"]:
         lookup = LOCATION_INDEX.get(level, {})
         for key in lookup:
@@ -167,19 +167,19 @@ def _fuzzy_match_keyword(keyword: str) -> Optional[Tuple[str, str]]:
             if dist <= threshold and dist < best_dist:
                 best_dist  = dist
                 best_match = (key_norm, level)
- 
+
     if best_match:
         logger.info("[LIST] Fuzzy match: '%s' → '%s' (level=%s dist=%d)",
                     keyword, best_match[0], best_match[1], best_dist)
     return best_match
- 
- 
+
+
 def _apply_typo_correction(kw: str, q_low: str = "") -> Optional[Tuple[str, str]]:
     if not kw or len(kw) < 4 or " " in kw:
         return None
     return _fuzzy_match_keyword(kw)
- 
- 
+
+
 # ================================================================
 # MULTI-KATA LOCATION CHECK
 # Cek apakah beberapa token membentuk satu nama lokasi multi-kata.
@@ -187,7 +187,7 @@ def _apply_typo_correction(kw: str, q_low: str = "") -> Optional[Tuple[str, str]
 # Juga digunakan di handle() untuk mendeteksi wilayah multi-kata
 # dan langsung meneruskannya tanpa fallback.
 # ================================================================
- 
+
 def _is_multikata_location(tokens: List[str]) -> Optional[Tuple[str, str]]:
     """
     Cek apakah token-token membentuk satu nama lokasi multi-kata.
@@ -198,7 +198,7 @@ def _is_multikata_location(tokens: List[str]) -> Optional[Tuple[str, str]]:
         from app.services.location_service import LOCATION_INDEX
     except ImportError:
         return None
- 
+
     # Cek dari level tertinggi dulu agar "papua barat" → provinsi, bukan kab
     for level in ["provinsi", "kabupaten", "kecamatan", "desa_kelurahan"]:
         lookup = LOCATION_INDEX.get(level, {})
@@ -213,27 +213,27 @@ def _is_multikata_location(tokens: List[str]) -> Optional[Tuple[str, str]]:
                         or f"prov. {phrase_lower}" in lookup):
                     logger.info("[LIST] Multi-kata location found: '%s' level=%s", phrase_lower, level)
                     return (phrase_lower, level)
- 
+
     return None
- 
+
 def _is_multikata_with_context(tokens: List[str]) -> Optional[Tuple[Tuple[str, str], Optional[Dict]]]:
     """
     Cek apakah token-token mengandung nama multi-kata PLUS token kecamatan/kabupaten.
-    
+
     Prioritas deteksi multi-kata utama: desa → kecamatan → kabupaten → provinsi
     (kebalikan dari _is_multikata_location yang prioritas provinsi dulu,
     karena di sini kita ingin filter desa yang paling spesifik)
-    
+
     Sisa token dicek sebagai kecamatan/kabupaten (bisa multi-kata).
     """
     try:
         from app.services.location_service import LOCATION_INDEX
     except ImportError:
         return None
- 
+
     kec_lookup = LOCATION_INDEX.get("kecamatan", {})
     kab_lookup = LOCATION_INDEX.get("kabupaten", {})
- 
+
     # Coba level desa dulu, kemudian kecamatan, kabupaten, provinsi
     # Ini berbeda dari _is_multikata_location yang provinsi dulu
     for level in ["desa_kelurahan", "kecamatan", "kabupaten", "provinsi"]:
@@ -247,30 +247,30 @@ def _is_multikata_with_context(tokens: List[str]) -> Optional[Tuple[Tuple[str, s
                         or f"kab. {phrase_lower}" in lookup
                         or f"kota {phrase_lower}" in lookup
                         or f"prov. {phrase_lower}" in lookup):
- 
+
                     # Token sisa (di luar range i..i+n)
                     remaining = tokens[:i] + tokens[i+n:]
- 
+
                     if not remaining:
                         return ((phrase_lower, level), None)
- 
+
                     # Cek sisa token sebagai kecamatan/kabupaten
                     # Coba dari panjang ke pendek (multi-kata juga)
                     for m in range(min(3, len(remaining)), 0, -1):
                         for j in range(len(remaining) - m + 1):
                             rem_phrase = " ".join(remaining[j:j+m])
                             rem_lower  = rem_phrase.lower()
- 
+
                             # Skip kata ambigu standalone
                             if m == 1 and rem_lower in _NON_STANDALONE_LOCATION_WORDS:
                                 continue
- 
+
                             rem_in_kec = (rem_lower in kec_lookup
                                           or f"kec. {rem_lower}" in kec_lookup)
                             rem_in_kab = (rem_lower in kab_lookup
                                           or f"kab. {rem_lower}" in kab_lookup
                                           or f"kota {rem_lower}" in kab_lookup)
- 
+
                             if rem_in_kec or rem_in_kab:
                                 extra = {}
                                 if level == "desa_kelurahan":
@@ -287,12 +287,12 @@ def _is_multikata_with_context(tokens: List[str]) -> Optional[Tuple[Tuple[str, s
                                     phrase_lower, level, rem_lower
                                 )
                                 return ((phrase_lower, level), extra if extra else None)
- 
+
                     # Sisa token ada tapi tidak cocok di kec/kab
                     return ((phrase_lower, level), None)
- 
+
     return None
- 
+
 # ================================================================
 # FIX 2: _has_province_siblings — baru, untuk deteksi provinsi
 # dengan "saudara" seperti papua/papua barat/papua selatan.
@@ -309,7 +309,7 @@ def _has_province_siblings(name: str) -> bool:
         from app.services.location_service import LOCATION_INDEX
     except ImportError:
         return False
- 
+
     prov_lookup = LOCATION_INDEX.get("provinsi", {})
     name_lower  = name.lower().strip()
     count = 0
@@ -321,54 +321,54 @@ def _has_province_siblings(name: str) -> bool:
             count += 1
     # Jika lebih dari satu provinsi yang match (diri sendiri + sibling)
     return count > 1
- 
+
 # ================================================================
 # IMPLICIT MULTI-WILAYAH
 # ================================================================
- 
+
 def _detect_implicit_multi_wilayah(query: str) -> Optional[Dict]:
     try:
         from app.services.location_service import LOCATION_INDEX
     except ImportError:
         return None
- 
+
     stopwords = {
         "daftar", "sekolah", "di", "ada", "cari", "list",
         "smp", "sma", "sd", "smk", "tk", "mi", "mts", "ma",
         "man", "mtsn", "min", "negeri", "swasta",
     }
- 
+
     q = re.sub(r"[^\w\s]", " ", query.lower()).strip()
     tokens = [t for t in q.split() if t not in stopwords and len(t) >= 3]
- 
+
     if len(tokens) < 2:
         return None
- 
+
     # Guard: jika token-token membentuk nama multi-kata valid, jangan split
     multikata = _is_multikata_location(tokens)
     if multikata:
         logger.info("[LIST] Tokens form a multi-kata location '%s', skip implicit split", multikata[0])
         return None
- 
+
     desa_lookup = LOCATION_INDEX.get("desa_kelurahan", {})
     kec_lookup  = LOCATION_INDEX.get("kecamatan", {})
     kab_lookup  = LOCATION_INDEX.get("kabupaten", {})
- 
+
     for i in range(len(tokens)):
         for j in range(len(tokens)):
             if i == j:
                 continue
             t1 = tokens[i]
             t2 = tokens[j]
- 
+
             if t2 in _NON_STANDALONE_LOCATION_WORDS:
                 continue
- 
+
             t1_in_desa = (t1 in desa_lookup or f"desa {t1}" in desa_lookup)
             t2_in_kec  = (t2 in kec_lookup or f"kec. {t2}" in kec_lookup)
             t2_in_kab  = (t2 in kab_lookup or f"kab. {t2}" in kab_lookup
                           or f"kota {t2}" in kab_lookup)
- 
+
             if t1_in_desa and (t2_in_kec or t2_in_kab):
                 result = {"desa": t1}
                 if t2_in_kec and not t2_in_kab:
@@ -379,12 +379,12 @@ def _detect_implicit_multi_wilayah(query: str) -> Optional[Dict]:
                     result["kecamatan"] = t2
                 logger.info("[LIST] Implicit multi-wilayah detected: %s", result)
                 return result
- 
+
     return None
- 
- 
- 
- 
+
+
+
+
 # ================================================================
 # SPLIT QUERY "DAN" — deteksi dua lokasi dipisahkan "dan/serta"
 # ================================================================
@@ -433,11 +433,11 @@ def _split_dan_query(query: str) -> Optional[List[str]]:
             c = c[len(p):].strip()
         return c
     return [prefix + _clean_chunk(chunks[0]), prefix + _clean_chunk(chunks[1])]
- 
+
 # ================================================================
 # MULTI-WILAYAH EXTRACTION (explicit dengan hint level)
 # ================================================================
- 
+
 # Kata-kata yang menandakan nama wilayah sudah selesai
 _FILTER_BOUNDARY_WORDS = {
     "yang", "akreditasi", "jumlah", "siswa", "murid", "urutkan",
@@ -446,12 +446,12 @@ _FILTER_BOUNDARY_WORDS = {
     "paling", "minimal", "maksimal", "lebih", "kurang",
     "dan", "atau", "serta",
 }
- 
+
 def _extract_multi_wilayah(query: str) -> Optional[Dict]:
     q = query.lower().strip()
     q = re.sub(r"[^\w\s]", " ", q)
     q = re.sub(r"\s+", " ", q).strip()
- 
+
     level_patterns = [
         ("desa",      r"\b(desa|kelurahan)\b"),
         ("kecamatan", r"\b(kecamatan|kec)\b"),
@@ -459,17 +459,17 @@ def _extract_multi_wilayah(query: str) -> Optional[Dict]:
         ("kota",      r"\bkota\b"),
         ("provinsi",  r"\b(provinsi|prov)\b"),
     ]
- 
+
     found = []
     for canonical, pattern in level_patterns:
         for m in re.finditer(pattern, q):
             found.append((m.start(), m.end(), canonical))
- 
+
     if len(found) < 2:
         return None
- 
+
     found.sort(key=lambda x: x[0])
- 
+
     result = {}
     for i, (start, end, canonical) in enumerate(found):
         name_start = end
@@ -478,7 +478,7 @@ def _extract_multi_wilayah(query: str) -> Optional[Dict]:
         name = re.sub(r"^\b(di|dan)\b\s*", "", name).strip()
         name = re.sub(r"\b(daftar|sekolah|di|ada|cari|list)\b", "", name).strip()
         name = re.sub(r"\s+", " ", name).strip()
- 
+
         # === PERBAIKAN: potong nama saat menemukan kata filter ===
         tokens = name.split()
         clean_tokens = []
@@ -488,35 +488,35 @@ def _extract_multi_wilayah(query: str) -> Optional[Dict]:
             clean_tokens.append(tok)
         name = " ".join(clean_tokens).strip()
         # =========================================================
- 
+
         if name and len(name) >= 3:
             result[canonical] = name
- 
+
     logger.info("[LIST] _extract_multi_wilayah raw result: %s", result)
     return result if len(result) >= 2 else None
- 
- 
+
+
 # ================================================================
 # LOCATION CANDIDATE LOOKUP
 # ================================================================
- 
+
 def _find_location_candidates(keyword: str) -> List[Dict]:
     try:
         from app.services.location_service import LOCATION_HIERARCHY, LOCATION_INDEX
     except ImportError:
         return []
- 
+
     if not keyword or len(keyword) < 3:
         return []
- 
+
     kw      = keyword.lower().strip()
     pattern = re.compile(r"\b" + re.escape(kw) + r"\b")
     seen: Set[str] = set()
- 
+
     by_level: Dict[str, List[Dict]] = {
         "provinsi": [], "kabupaten": [], "kecamatan": [], "desa_kelurahan": []
     }
- 
+
     for level in ["desa_kelurahan", "kecamatan", "kabupaten"]:
         hier = LOCATION_HIERARCHY.get(level, {})
         for raw_key, entries in hier.items():
@@ -546,7 +546,7 @@ def _find_location_candidates(keyword: str) -> List[Dict]:
                     "nama_raw": nama_raw, "nama_display": key_clean,
                     "kecamatan": kec, "kabupaten": kab, "provinsi": prov,
                 })
- 
+
     try:
         prov_lookup = LOCATION_INDEX.get("provinsi", {})
         for pkey, praw in prov_lookup.items():
@@ -564,40 +564,40 @@ def _find_location_candidates(keyword: str) -> List[Dict]:
             })
     except Exception:
         pass
- 
+
     candidates  = by_level["provinsi"][:5]
     candidates += by_level["kabupaten"][:10]
     candidates += by_level["kecamatan"][:10]
     candidates += by_level["desa_kelurahan"][:15]
- 
+
     logger.info("[LIST] Candidates for keyword=%s: %d (prov=%d kab=%d kec=%d desa=%d)",
                 keyword, len(candidates),
                 len(by_level["provinsi"]), len(by_level["kabupaten"]),
                 len(by_level["kecamatan"]), len(by_level["desa_kelurahan"]))
- 
+
     return candidates[:40]
- 
- 
+
+
 # ================================================================
 # FALLBACK WILAYAH DETECTION
 # ================================================================
- 
+
 def _fallback_detect_wilayah(query: str) -> Optional[Tuple[str, str]]:
     try:
         from app.services.location_service import LOCATION_INDEX
     except ImportError:
         return None
- 
+
     q = re.sub(r"[^\w\s]", " ", query.lower())
     q = re.sub(r"\s+", " ", q).strip()
- 
+
     has_desa_hint = bool(re.search(r"\b(desa|kelurahan)\b", q))
     has_prov_hint = bool(re.search(r"\bprovinsi\b", q))
     has_kab_hint  = bool(re.search(r"\b(kabupaten|kab)\b", q))
     has_kec_hint  = bool(re.search(r"\b(kecamatan|kec)\b", q))
     has_kota_hint = bool(re.search(r"\bkota\b", q))
     has_explicit_hint = has_kec_hint or has_kab_hint or has_prov_hint or has_desa_hint or has_kota_hint
- 
+
     if has_kec_hint:
         check_order = ["kecamatan"]
     elif has_kab_hint or has_kota_hint:
@@ -608,7 +608,7 @@ def _fallback_detect_wilayah(query: str) -> Optional[Tuple[str, str]]:
         check_order = ["desa_kelurahan"]
     else:
         check_order = ["kecamatan", "kabupaten", "provinsi"]
- 
+
     for level in check_order:
         lookup = LOCATION_INDEX.get(level, {})
         if not lookup:
@@ -618,9 +618,9 @@ def _fallback_detect_wilayah(query: str) -> Optional[Tuple[str, str]]:
         def key_clean_len(item):
             key = item[0]
             return len(strip_loc_prefix(key))
- 
+
         sorted_keys = sorted(lookup.items(), key=key_clean_len, reverse=True)
- 
+
         for key, raw in sorted_keys:
             key_clean = re.sub(r"^(prov\.|kab\.|kota|kec\.)\s*", "", key)
             key_norm  = re.sub(r"[^\w\s]", " ", key_clean.lower()).strip()
@@ -632,20 +632,20 @@ def _fallback_detect_wilayah(query: str) -> Optional[Tuple[str, str]]:
             if re.search(r"\b" + re.escape(key_norm) + r"\b", q):
                 logger.info("[LIST] Fallback detected: level=%s name=%s", level, key_norm)
                 return (key_norm, level)
- 
+
     return None
- 
- 
+
+
 # ================================================================
 # AMBIGUOUS DETECTION
 # ================================================================
- 
+
 def _check_ambiguous(schools: list, wilayah_level: str,
                     min_distinct: int = 3,
                     use_province_check: bool = False) -> bool:
     if not schools:
         return False
- 
+
     if wilayah_level == "desa_kelurahan":
         # Cek berdasarkan provinsi jika diminta (untuk nama desa multi-kata
         # yang tersebar luas — threshold lebih rendah: 2 provinsi)
@@ -657,7 +657,7 @@ def _check_ambiguous(schools: list, wilayah_level: str,
                     prov_vals.add(prov)
             if len(prov_vals) >= 2:
                 return True
- 
+
         # Cek standar berdasarkan kecamatan+kabupaten
         parent_vals: Set[str] = set()
         for s in schools:
@@ -666,7 +666,7 @@ def _check_ambiguous(schools: list, wilayah_level: str,
             if kec and kab:
                 parent_vals.add(f"{kec}|{kab}")
         return len(parent_vals) >= min_distinct
- 
+
     elif wilayah_level == "kecamatan":
         parent_vals = set()
         for s in schools:
@@ -674,7 +674,7 @@ def _check_ambiguous(schools: list, wilayah_level: str,
             if kab:
                 parent_vals.add(kab)
         return len(parent_vals) >= min_distinct
- 
+
     elif wilayah_level in ("kabupaten", "provinsi"):
         parent_vals = set()
         for s in schools:
@@ -682,9 +682,9 @@ def _check_ambiguous(schools: list, wilayah_level: str,
             if prov:
                 parent_vals.add(prov)
         return len(parent_vals) >= min_distinct
- 
+
     return False
- 
+
 def _has_multi_level_match(keyword: str) -> bool:
     try:
         from app.services.location_service import LOCATION_HIERARCHY, LOCATION_INDEX
@@ -716,8 +716,8 @@ def _has_multi_level_match(keyword: str) -> bool:
     if result:
         logger.info("[LIST] Multi-level match: keyword=%s levels=%s", keyword, matched_levels)
     return result
- 
- 
+
+
 def _extract_location_keyword(query: str) -> str:
     stopwords = {
         "daftar", "sekolah", "di", "ada", "cari", "list", "semua",
@@ -732,8 +732,8 @@ def _extract_location_keyword(query: str) -> str:
     tokens = re.sub(r"[^\w\s]", " ", query.lower()).split()
     keywords = [t for t in tokens if t not in stopwords and len(t) >= 3]
     return " ".join(keywords).strip()
- 
- 
+
+
 def _extract_main_keyword(query: str) -> str:
     stopwords = {
         "daftar", "sekolah", "di", "ada", "cari", "list", "semua",
@@ -746,7 +746,7 @@ def _extract_main_keyword(query: str) -> str:
     tokens = re.sub(r"[^\w\s]", " ", query.lower()).split()
     keywords = [t for t in tokens if t not in stopwords and len(t) >= 3]
     return " ".join(keywords).strip()
- 
+
 def _inject_intent_filters(parsed, intent):
     _if = extract_filters_from_intent(intent)
 
@@ -824,11 +824,11 @@ def _intent_to_legacy_parsed(filters: dict) -> dict:
     return parsed
 
 class ListSchoolHandler:
- 
+
     def __init__(self, es: AsyncElasticsearch, index_name: str):
         self.es = es
         self.index = index_name
- 
+
     async def handle(
     self,
     query: str,
@@ -845,7 +845,7 @@ class ListSchoolHandler:
 
         # convert ke format lama agar compatible dengan handler existing
         parsed = _intent_to_legacy_parsed(filters_dict)
- 
+
         q_low = query.lower()
 
         _GEO_KEYWORDS_GUARD = {"terdekat", "dekat", "terdeket", "terkedat", "sekitar"}
@@ -879,7 +879,7 @@ class ListSchoolHandler:
                     "breakdown_status":  None,
                 }
             # Salah satu gagal → lanjut flow normal
- 
+
         # ── Step 1: Multi-wilayah eksplisit ──────────────────────
         multi = _extract_multi_wilayah(query)
         if multi and len(multi) >= 2:
@@ -1001,9 +1001,9 @@ class ListSchoolHandler:
             r"\b(desa|kelurahan|kecamatan|kec|kabupaten|kab|"
             r"kota|provinsi|prov)\b", q_low
         ))
- 
+
         detected_multikata = None
- 
+
         if not has_level_hint:
             stopwords_q = {
                 "daftar", "sekolah", "di", "ada", "cari", "list",
@@ -1012,7 +1012,7 @@ class ListSchoolHandler:
             }
             q_clean = re.sub(r"[^\w\s]", " ", q_low).strip()
             tokens  = [t for t in q_clean.split() if t not in stopwords_q and len(t) >= 3]
- 
+
             if len(tokens) >= 2:
                 mk_result = _is_multikata_with_context(tokens)
                 if mk_result:
@@ -1025,7 +1025,7 @@ class ListSchoolHandler:
                         detected_multikata = mk_name_level
                         logger.info("[LIST] Multi-kata location early: '%s' level=%s",
                                     mk_name_level[0], mk_name_level[1])
- 
+
         # ── Step 2b: Implicit multi-wilayah ──────────────────────
         if not detected_multikata and not has_level_hint:
             implicit = _detect_implicit_multi_wilayah(query)
@@ -1033,7 +1033,7 @@ class ListSchoolHandler:
                 logger.info("[LIST] Implicit multi-wilayah: %s", implicit)
                 parsed = _inject_intent_filters(parsed, intent)
                 return await self._handle_multi_wilayah(query, parsed, implicit, intent=intent)
- 
+
         # ── Step 2b2: Reversed token order ───────────────────────
         # "barat jawa" → coba reversed "jawa barat" sebagai multi-kata
         if not detected_multikata and not has_level_hint:
@@ -1050,7 +1050,7 @@ class ListSchoolHandler:
                 if mk_rev:
                     logger.info("[LIST] Reversed-token multi-kata: '%s' level=%s", mk_rev[0], mk_rev[1])
                     detected_multikata = mk_rev
- 
+
         # ── Step 2c: Desa hint + multi-kata + kecamatan ──────────
         # Contoh: "desa bukit subur penajam" → has_level_hint=True
         # tapi ada nama desa multi-kata + kecamatan setelahnya
@@ -1072,7 +1072,7 @@ class ListSchoolHandler:
                         logger.info("[LIST] Hint+multi-kata+context → multi-wilayah: %s", mk_extra2)
                         parsed = _inject_intent_filters(parsed, intent)
                         return await self._handle_multi_wilayah(query, parsed, mk_extra2, intent=intent)
- 
+
         # ── Step 3: Single wilayah ────────────────────────────────
         if detected_multikata:
             multikata_name, multikata_level = detected_multikata
@@ -1093,7 +1093,7 @@ class ListSchoolHandler:
                 is_from_multikata=True,
                 intent=intent,
             )
- 
+
         # Fallback normal
         wilayah_level = "kabupaten"
         if not parsed.get("wilayah"):
@@ -1119,11 +1119,11 @@ class ListSchoolHandler:
                 wilayah_level = "kecamatan"
             else:
                 wilayah_level = "kabupaten"
- 
+
         if not parsed.get("wilayah"):
             kw         = _extract_location_keyword(query)
             candidates = _find_location_candidates(kw) if kw else []
- 
+
             if not candidates and kw and len(kw) >= 4:
                 kw_main = _extract_main_keyword(query)
                 # Guard: jika sisa keyword hanya kata level (kecamatan, kabupaten, dll)
@@ -1154,7 +1154,7 @@ class ListSchoolHandler:
                         original_kw=kw, corrected_kw=corrected_name,
                         intent=intent,
                     )
- 
+
             if len(candidates) == 1:
                 single = candidates[0]
                 parsed["wilayah"] = single["nama"]
@@ -1167,7 +1167,7 @@ class ListSchoolHandler:
                     is_from_multikata=True,
                     intent=intent,
                 )
- 
+
             logger.info("[LIST] No wilayah detected, keyword=%s candidates=%d", kw, len(candidates))
             return {
                 "status": "clarification", "intent": "school_list",
@@ -1175,18 +1175,18 @@ class ListSchoolHandler:
                 "wilayah_level": wilayah_level, "is_ambiguous": True,
                 "keyword": kw, "candidates": candidates,
             }
- 
+
         return await self._query_single_wilayah(query, parsed, wilayah_level, has_level_hint, intent=intent)
- 
+
     async def _query_single_wilayah(
         self, query: str, parsed: dict, wilayah_level: str,
         has_level_hint: bool, intent,
         original_kw: str = "", corrected_kw: str = "",
         is_from_multikata: bool = False,
     ) -> dict:
- 
+
         wilayah_kw = parsed.get("wilayah", "")
- 
+
         # Provinsi dengan sibling
         if not has_level_hint and not is_from_multikata and wilayah_level == "provinsi" and wilayah_kw:
             if _has_province_siblings(wilayah_kw):
@@ -1208,11 +1208,11 @@ class ListSchoolHandler:
                         "wilayah_level": wilayah_level, "is_ambiguous": True,
                         "keyword": wilayah_kw, "candidates": candidates,
                     }
- 
+
         # Multi-level match
         if not has_level_hint and not is_from_multikata and wilayah_kw and _has_multi_level_match(wilayah_kw):
             candidates = _find_location_candidates(wilayah_kw)
- 
+
             if len(candidates) == 1:
                 single = candidates[0]
                 parsed["wilayah"] = single["nama"]
@@ -1319,7 +1319,7 @@ class ListSchoolHandler:
         # Tambahkan aggregation breakdown
         es_query.update(LIST_AGGS_SNIPPET)
         result   = await self.es.search(index=self.index, body=es_query, request_timeout=5)
- 
+
         hits      = result["hits"]["hits"]
         total_val = result["hits"]["total"]
         total     = total_val["value"] if isinstance(total_val, dict) else total_val
@@ -1355,14 +1355,14 @@ class ListSchoolHandler:
                     original_kw=wilayah_kw, corrected_kw=corrected_name,
                     intent=intent,
                 )
- 
+
         # ── SCATTERED CHECK ──────────────────────────────────────
         # Untuk desa: cek SELALU (meski has_level_hint=True) karena
         # nama desa bisa sama di banyak provinsi.
         # Province check untuk semua desa (single-kata maupun multi-kata).
         is_desa_level = (wilayah_level == "desa_kelurahan" and bool(wilayah_kw))
         should_check_scattered = (not has_level_hint) or is_desa_level
- 
+
         is_scattered = False
         if should_check_scattered:
             is_scattered = _check_ambiguous(
@@ -1370,7 +1370,7 @@ class ListSchoolHandler:
                 min_distinct=3,
                 use_province_check=is_desa_level,
             )
- 
+
         if is_scattered:
             kw         = wilayah_kw or ""
             candidates = _find_location_candidates(kw) if kw else []
@@ -1381,14 +1381,17 @@ class ListSchoolHandler:
                 "wilayah_level": wilayah_level, "is_ambiguous": True,
                 "keyword": kw, "candidates": candidates,
             }
- 
+
         # Tambahkan flag QC ke parsed agar narrator tahu ini query residu
         _qc_masalah_only = getattr(intent, "qc_masalah_only", False) if intent else False
         _qc_field        = getattr(intent, "qc_field", None) if intent else None
+        _qc_field_list   = getattr(intent, "qc_field_list", []) if intent else []
         if _qc_masalah_only:
             parsed = {**parsed, "qc_masalah_only": True}
             if _qc_field:
                 parsed["qc_field"] = _qc_field
+        if _qc_field_list:
+            parsed["qc_field_list"] = _qc_field_list
 
         response = {
             "status": "success", "intent": "school_list",
@@ -1404,26 +1407,26 @@ class ListSchoolHandler:
         if corrected_kw:
             response["typo_corrected"] = {"original": original_kw, "corrected": corrected_kw}
         return response
- 
+
     async def _handle_multi_wilayah(self, query: str, parsed: Dict, multi: Dict, intent=None) -> Dict:
         desa      = multi.get("desa") or multi.get("kelurahan") or ""
         kecamatan = multi.get("kecamatan") or ""
         kabupaten = multi.get("kabupaten") or ""
         kota      = multi.get("kota") or ""
         provinsi  = multi.get("provinsi") or ""
- 
+
         want_kota = bool(kota and not kabupaten)
         want_kab  = bool(kabupaten and not kota)
         kab_name  = kabupaten or kota
- 
+
         filters = []
         should  = []
- 
+
         bentuk    = parsed.get("bentuk")
         bentuk_in = parsed.get("bentuk_pendidikan_in")  # PAUD expand
         akreditasi = parsed.get("akreditasi")
         status    = parsed.get("status")
-        
+
         if not status:
             sn = (parsed.get("school_name") or "").lower()
             if re.search(r"\bnegeri\b", sn):
@@ -1436,10 +1439,10 @@ class ListSchoolHandler:
             filters.append({"term": {"bentuk_pendidikan": bentuk}})
         if status:
             filters.append({"term": {"status_sekolah": status.upper()}})
-        if akreditasi:                                          
-            filters.append({"term": {"akreditasi": akreditasi}})  
+        if akreditasi:
+            filters.append({"term": {"akreditasi": akreditasi}})
             logger.info("[LIST] Multi: filter akreditasi=%s", akreditasi)
- 
+
         if desa:
             filters.append({"bool": {"should": [
                 {"term":  {"desa_kelurahan": desa}},
@@ -1447,7 +1450,7 @@ class ListSchoolHandler:
             ], "minimum_should_match": 1}})
             should.append({"term": {"desa_kelurahan": {"value": desa, "boost": 30}}})
             logger.info("[LIST] Multi: filter desa=%s", desa)
- 
+
         if kecamatan:
             filters.append({"bool": {"should": [
                 {"term":  {"kecamatan": kecamatan}},
@@ -1457,7 +1460,7 @@ class ListSchoolHandler:
             should.append({"term": {"kecamatan": {"value": kecamatan, "boost": 25}}})
             should.append({"term": {"kecamatan": {"value": f"kec. {kecamatan}", "boost": 25}}})
             logger.info("[LIST] Multi: filter kecamatan=%s", kecamatan)
- 
+
         if kab_name:
             if want_kota:
                 filters.append({"bool": {"should": [
@@ -1482,14 +1485,14 @@ class ListSchoolHandler:
                 should.append({"term": {"kabupaten": {"value": f"kab. {kab_name}", "boost": 20}}})
                 should.append({"term": {"kabupaten": {"value": f"kota {kab_name}", "boost": 20}}})
             logger.info("[LIST] Multi: filter kab=%s", kab_name)
- 
+
         if provinsi:
             filters.append({"bool": {"should": [
                 {"match": {"provinsi.text": provinsi}},
                 {"term":  {"provinsi": provinsi}},
                 {"term":  {"provinsi": f"prov. {provinsi}"}},
             ], "minimum_should_match": 1}})
-        
+
         if query:
             keyword = _extract_main_keyword(query)
             if keyword:
@@ -1524,7 +1527,7 @@ class ListSchoolHandler:
         total_val = result["hits"]["total"]
         total     = total_val["value"] if isinstance(total_val, dict) else total_val
         schools   = [self._format_hit(h) for h in hits]
- 
+
         # ── FALLBACK: desa+kecamatan gabungan ────────────────────
         # Jika query "X di kecamatan Y" menghasilkan 0, coba
         # gabungan desa sebagai satu nama: "X Y" atau "Y X"
@@ -1544,7 +1547,7 @@ class ListSchoolHandler:
                 elif bentuk:
                     return [{"term": {"bentuk_pendidikan": bentuk}}]
                 return []
- 
+
             for combined in combined_names:
                 fallback_body = {
                     "size": 10, "track_total_hits": True,
@@ -1582,7 +1585,7 @@ class ListSchoolHandler:
                         "wilayah_level": "desa_kelurahan",
                         "is_ambiguous": False, "candidates": [],
                     }
- 
+
         # ── FALLBACK 2: desa saja (drop kecamatan) ───────────────
         # Jika desa+kecamatan AND combined-name semuanya 0,
         # coba query desa saja — mungkin "kecamatan" di query adalah
@@ -1638,8 +1641,8 @@ class ListSchoolHandler:
                     "wilayah_level": "desa_kelurahan",
                     "is_ambiguous": False, "candidates": [],
                 }
- 
- 
+
+
         display_parts  = [p for p in [desa, kecamatan, kab_name, provinsi] if p]
         parsed_display = dict(parsed)
         parsed_display["wilayah"] = " ".join(display_parts)
@@ -1654,30 +1657,30 @@ class ListSchoolHandler:
             "wilayah_level": "desa_kelurahan" if desa else "kecamatan",
             "is_ambiguous": False, "candidates": [],
         }
- 
+
     @staticmethod
     def _match_phrase(field: str, value: str) -> Dict:
         return {"match_phrase": {field: value}}
- 
+
     @staticmethod
     def _match_phrase_boosted(field: str, value: str, boost: float) -> Dict:
         return {"bool": {"should": [{"match_phrase": {field: value}}],
                         "minimum_should_match": 1, "boost": boost}}
-    
+
     def _build_query(self, parsed: Dict, wilayah_level: str = "kabupaten",
                     query_raw: str = "", intent=None) -> Dict:
- 
+
         bentuk     = parsed.get("bentuk")
         bentuk_in  = parsed.get("bentuk_pendidikan_in")  # PAUD expand: list of jenjang
         wilayah    = parsed.get("wilayah")
         status     = parsed.get("status")
         akreditasi = parsed.get("akreditasi")
- 
+
         if not status:
             sn = (parsed.get("school_name") or "").lower()
             if re.search(r"\bnegeri\b", sn) or re.search(r"\b n \b", sn):
                 status = "NEGERI"
- 
+
         # Deteksi multi-jenjang dari query: "sd, smp, sma di X" atau "sma dan sd di X"
         # JENJANG_MAP diimport dari jenjang_constants — single source of truth
         if query_raw:
@@ -1686,7 +1689,8 @@ class ListSchoolHandler:
                 r'\b(spk\s+(?:sd|smp|sma|smk|tk|kb)|sd|smp|sma|smk|ma|mts|mi|tk|paud|kb|ra|sps|tpa)\b', _qr
             )
             # Hapus duplikat, pertahankan urutan
-            _seen = set(); _multi_jenjang = [x for x in _multi_jenjang if not (_seen.add(x) or x in _seen)]
+            _seen = set()
+            _multi_jenjang = [x for x in _multi_jenjang if not (_seen.add(x) or x in _seen)]
             if len(_multi_jenjang) >= 2:
                 # Multi-jenjang: override bentuk dengan terms filter
                 _jenjang_es = []
@@ -1694,7 +1698,7 @@ class ListSchoolHandler:
                     if j == "paud":
                         _jenjang_es.extend(_PAUD_BENTUK_EXPAND)
                     else:
-                        _jenjang_es.append(_JENJANG_MAP.get(j, j.upper()))
+                        _jenjang_es.append(JENJANG_MAP.get(j, j.upper()))
                 bentuk_in = list(dict.fromkeys(_jenjang_es))  # deduplicate
                 bentuk = None
 
@@ -1741,16 +1745,16 @@ class ListSchoolHandler:
                 logger.info("[LIST] QC filters injected: %s", qc_filters)
 
         should = []
- 
+
         if wilayah:
             wc        = self._strip_prefix(wilayah.lower())
             q_check   = query_raw.lower() if query_raw else ""
             want_kota = bool(re.search(r"\bkota\b", q_check)) and not bool(re.search(r"\b(kabupaten|kab)\b", q_check))
             want_kab  = bool(re.search(r"\b(kabupaten|kab)\b", q_check)) and not bool(re.search(r"\bkota\b", q_check))
- 
+
             logger.info("[LIST] _build_query: wc=%s want_kab=%s want_kota=%s q=%s",
                         wc, want_kab, want_kota, q_check[:60])
- 
+
             if wilayah_level == "provinsi":
                 should += [
                     {"match": {"provinsi.text": {"query": wc, "boost": 20}}},
@@ -1762,7 +1766,7 @@ class ListSchoolHandler:
                     {"term":  {"provinsi": wc}},
                     {"term":  {"provinsi": f"prov. {wc}"}},
                 ], "minimum_should_match": 1}})
- 
+
             elif wilayah_level == "desa_kelurahan":
                 should += [
                     {"term":  {"desa_kelurahan": {"value": wc, "boost": 20}}},
@@ -1773,7 +1777,7 @@ class ListSchoolHandler:
                     {"term":  {"desa_kelurahan": wc}},
                     self._match_phrase("desa_kelurahan.text", wc),
                 ], "minimum_should_match": 1}})
- 
+
             elif wilayah_level == "kecamatan":
                 # Jika user eksplisit sebut "kecamatan", filter STRICT hanya kecamatan
                 # Jangan ikutkan kabupaten — akan menyebabkan hasil kabupaten-wide
@@ -1810,7 +1814,7 @@ class ListSchoolHandler:
                         {"term":  {"kabupaten": f"kota {wc}"}},
                         self._match_phrase("kabupaten.text", wc),
                     ], "minimum_should_match": 1}})
- 
+
             else:
                 if want_kab:
                     should += [
@@ -1823,7 +1827,7 @@ class ListSchoolHandler:
                         {"term": {"kabupaten": f"kab. {wc}"}},
                         {"term": {"kabupaten": wc}},
                     ], "minimum_should_match": 1}})
- 
+
                 elif want_kota:
                     should += [
                         {"term": {"kabupaten": {"value": f"kota {wc}", "boost": 30}}},
@@ -1837,7 +1841,7 @@ class ListSchoolHandler:
                         self._match_phrase("kabupaten.text", wc),
                         self._match_phrase("kecamatan.text", wc),
                     ], "minimum_should_match": 1}})
- 
+
                 else:
                     should += [
                         {"term": {"kabupaten": {"value": wc, "boost": 20}}},
@@ -1856,7 +1860,7 @@ class ListSchoolHandler:
                         self._match_phrase("kabupaten.text", wc),
                         self._match_phrase("kecamatan.text", wc),
                     ], "minimum_should_match": 1}})
- 
+
         query_body = {
             "size": 10, "track_total_hits": True,
             "query": {"bool": {"filter": filters, "should": should,
@@ -1868,7 +1872,7 @@ class ListSchoolHandler:
         logger.info("LIST ES QUERY: %s", query_body)
         print("LIST ES QUERY:", query_body)
         return query_body
- 
+
     def _strip_prefix(self, text: str) -> str:
         return re.sub(
             r"^(kota\s+adm\.?\s*|kota\s+|kab\.?\s+|kabupaten\s+|"
@@ -1876,7 +1880,7 @@ class ListSchoolHandler:
             r"desa\s+|kelurahan\s+)",
             "", text
         ).strip()
- 
+
     def _format_hit(self, hit: Dict) -> Dict:
         src = hit["_source"]
         qc_score = src.get("qc_score") or {}

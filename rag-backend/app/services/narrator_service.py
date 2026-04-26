@@ -3,23 +3,23 @@
 NarratorService — mengubah data terstruktur dari ES menjadi narasi natural
 menggunakan DeepSeek. Dipanggil setelah data valid didapat, sebelum response
 dikembalikan ke user.
- 
+
 Prinsip:
 - AI TIDAK mencari data → tidak bisa hallucinate angka
 - Semua angka/lokasi disuntikkan eksplisit ke prompt
 - Jika AI gagal → fallback ke template (tidak pernah error ke user)
 - Timeout pendek (8 detik) agar latency terjaga
 """
- 
+
 import asyncio
 import logging
 import os
 from typing import Dict, Any, List, Optional
 
 from app.providers.deepseek import call_deepseek, DeepSeekUnavailableError
- 
+
 logger = logging.getLogger(__name__)
- 
+
 # Timeout khusus narasi — lebih pendek dari total request budget (~30s)
 # Dengan retry_strategy di deepseek.py (2 attempts, 1s wait):
 #   worst-case = TIMEOUT * 2 + 1 ≈ 25s (simple) / 31s (aggregation with breakdown)
@@ -40,17 +40,17 @@ NARRATOR_TOKENS_OOC          = 650
 
 # ── TEMP CONFIG ──
 NARRATOR_TEMP                = 0.4
- 
- 
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
- 
+
 _SYSTEM_BASE = (
     "Kamu adalah Sistem Informasi Data Pendidikan resmi Kemendikdasmen "
     "(Kementerian Pendidikan Dasar dan Menengah) yang bertugas menyajikan "
     "data operasional satuan pendidikan di Indonesia.\n\n"
- 
+
     "GAYA KOMUNIKASI:\n"
     "- Gunakan bahasa Indonesia baku sesuai PUEBI, formal namun mudah dipahami.\n"
     "- Awali setiap respons dengan kalimat pengantar yang memberikan konteks "
@@ -59,39 +59,39 @@ _SYSTEM_BASE = (
     "- Format angka dengan titik sebagai pemisah ribuan: 1.234, bukan 1234 atau 1,234.\n"
     "- Hindari kata informal: 'yuk', 'oke', 'guys', 'so', 'well', 'basically'.\n"
     "- Akhiri respons dengan kalimat penutup yang mengundang pertanyaan lanjutan.\n\n"
-    
+
     "FIELD KHUSUS INFRASTRUKTUR:\n"
     "- tipe_jamban: data sudah berupa label teks (mis. 'Leher Angsa', 'Tangki Septik'). Gunakan langsung.\n"
     "- kecukupan_air: data sudah berupa label teks (mis. 'Cukup', 'Tidak Cukup'). Gunakan langsung.\n"
     "- minum_siswa: jumlah unit air minum yang tersedia untuk siswa.\n"
     "- Jika field bernilai null, '-', atau 'data tidak tersedia', nyatakan 'data tidak tersedia'.\n"
-    
+
     "PENANGANAN DATA:\n"
     "- Hanya bahas data yang tersedia dalam konteks yang diberikan.\n"
     "- Sertakan angka PERSIS seperti yang diberikan — dilarang membulatkan atau mengubah.\n"
     "- Jika breakdown jenjang tersedia, sebutkan komposisi 2-3 jenjang teratas.\n"
     "- Jika ada dua section data (utama + pendukung), integrasikan keduanya dalam narasi.\n"
     "- Jangan menyebutkan nama sistem, model AI, atau teknologi yang digunakan.\n\n"
- 
+
     "FORMAT OUTPUT:\n"
     "- Tulis dalam paragraf, bukan poin-poin (kecuali diminta atau untuk daftar nama).\n"
     "- Jika ada data tabular, sajikan dalam tabel Markdown sebelum analisis.\n"
     "- Gunakan heading ### hanya jika ada 2+ sub-topik yang perlu dibedakan.\n"
     "- Panjang respons: 150-300 kata untuk query sederhana, "
     "  300-500 kata untuk query multi-modul atau kompleks.\n\n"
- 
+
     "LARANGAN KERAS:\n"
     "- Dilarang menambahkan angka, nama sekolah, atau fakta baru di luar konteks.\n"
     "- Dilarang menebak atau mengasumsikan data yang tidak tersedia.\n"
     "- Dilarang menjawab pertanyaan di luar domain satuan pendidikan.\n"
     "- Dilarang menyebut 'berdasarkan pelatihan saya' atau 'menurut pengetahuan saya'."
 )
- 
+
 _BENCHMARK_DESA     = {"rendah": 5,    "sedang": 20,   "tinggi": 40}
 _BENCHMARK_KEC      = {"rendah": 30,   "sedang": 100,  "tinggi": 300}
 _BENCHMARK_KAB      = {"rendah": 500,  "sedang": 2000, "tinggi": 6000}
 _BENCHMARK_PROVINSI = {"rendah": 5000, "sedang": 20000,"tinggi": 60000}
- 
+
 def _benchmark_label(total: int, level: str) -> str:
     tbl = {
         "desa_kelurahan": _BENCHMARK_DESA,
@@ -104,12 +104,12 @@ def _benchmark_label(total: int, level: str) -> str:
     if total <= tbl["sedang"]:
         return "tergolong cukup memadai untuk level wilayah ini"
     return "tergolong banyak dan mencerminkan layanan pendidikan yang luas"
- 
- 
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PROMPT BUILDERS  (satu fungsi per query-type)
 # ─────────────────────────────────────────────────────────────────────────────
- 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # VALIDATOR — Cek angka kritis tidak berubah setelah narasi LLM
 # ─────────────────────────────────────────────────────────────────────────────
@@ -288,9 +288,9 @@ def _prompt_aggregation(
     breakdown_status: Optional[Dict[str, int]] = None,
     drilldown_top3: Optional[List[Dict[str, Any]]] = None,
     drilldown_field: Optional[str] = None,
-    total_all: Optional[int] = None,        
-    pct_of_total: Optional[float] = None,   
-    active_filters: Optional[Dict] = None,  
+    total_all: Optional[int] = None,
+    pct_of_total: Optional[float] = None,
+    active_filters: Optional[Dict] = None,
     jenjang_requested: Optional[List[str]] = None,
     metric_target: Optional[str] = None,
     metric_label: str = "satuan pendidikan",
@@ -369,7 +369,7 @@ def _prompt_aggregation(
                 f"Sebutkan bahwa {total:,} sekolah ({pct_of_total}%) dari total "
                 f"{total_all:,} sekolah di wilayah ini memenuhi kriteria filter."
             )
-            
+
         # ── Instruksi komposisi jenjang (aware filter user) ────────────────
         if jenjang_requested:
             jenjang_instruksi = (
@@ -387,7 +387,7 @@ def _prompt_aggregation(
                 "Interpretasikan breakdown jenjang — jenjang apa yang dominan "
                 "dan apa implikasinya terhadap layanan pendidikan."
             )
-            
+
         instruksi = (
             "INSTRUKSI NARASI (gunakan ## sebagai heading per bagian):\n\n"
             "## Gambaran Umum\n"
@@ -465,7 +465,7 @@ NARASI:"""
 # PROMPT AGGREGATION MULTI-MODUL
 # (untuk query yang menggabungkan aggregation + list atau aggregation + geo)
 # ─────────────────────────────────────────────────────────────────────────────
- 
+
 def _prompt_aggregation_with_list(
     wilayah: str,
     total: int,
@@ -509,7 +509,7 @@ def _prompt_aggregation_with_list(
         f"({s.get('kecamatan', '-')})"
         for s in schools_list[:20]  # batasi 20 untuk context
     )
- 
+
     breakdown_str = ""
     if breakdown_jenjang:
         top = sorted(breakdown_jenjang.items(), key=lambda x: -x[1])[:5]
@@ -623,7 +623,7 @@ def _prompt_comparison_lokasi(
                 default=None,
             )
             avg_section = (
-                f"\n\nDATA RATA-RATA SISWA PER SEKOLAH"
+                "\n\nDATA RATA-RATA SISWA PER SEKOLAH"
                 + (f" (jenjang {_jenjang_req})" if _jenjang_req else "")
                 + ":\n" + "\n".join(avg_rows)
             )
@@ -718,7 +718,7 @@ NARASI:"""
 # ─────────────────────────────────────────────────────────────────────────────
 def _prompt_school_vs_school(school_a: dict, school_b: dict, query: str) -> str:
     """Prompt khusus perbandingan dua sekolah individual."""
-    
+
     def fmt(s):
         return (
             f"Nama: {s.get('nama','-')} | Jenjang: {s.get('bentuk_pendidikan','-')} | "
@@ -808,16 +808,16 @@ def _prompt_comparison_status(
     total   = negeri + swasta
     pct_negeri = round(negeri / total * 100) if total > 0 else 0
     pct_swasta = round(swasta / total * 100) if total > 0 else 0
- 
+
     return f"""{_SYSTEM_BASE}
- 
+
 DATA KOMPOSISI SEKOLAH:
 - Wilayah: {wilayah}
 - Sekolah Negeri : {negeri:,} ({pct_negeri}%)
 - Sekolah Swasta : {swasta:,} ({pct_swasta}%)
 - Total          : {total:,} sekolah
 - Dominasi       : {dominan} lebih banyak sebesar {abs(pct_diff)}%
- 
+
 INSTRUKSI NARASI (3 kalimat + 1 tabel ringkas, TANPA bullet point di narasi):
 - Tampilkan tabel markdown 2 kolom (Status | Jumlah) SEBELUM narasi.
 - Kalimat 1: Gambaran total dan komposisi negeri vs swasta secara eksplisit.
@@ -825,7 +825,7 @@ INSTRUKSI NARASI (3 kalimat + 1 tabel ringkas, TANPA bullet point di narasi):
 seberapa jauh selisihnya.
 - Kalimat 3: Konteks singkat mengapa pola ini umum terjadi \
 (mis. kota besar cenderung banyak swasta).
- 
+
 NARASI:"""
 
 
@@ -836,7 +836,7 @@ def _build_school_table(schools: list, max_rows: int = 20) -> str:
     """
     if not schools:
         return ""
-    
+
     header = "| No | Nama Sekolah | Jenjang | Akreditasi | Siswa | Kecamatan |\n"
     sep    = "|----|-------------|---------|-----------|-------|----------|\n"
     rows   = []
@@ -847,7 +847,7 @@ def _build_school_table(schools: list, max_rows: int = 20) -> str:
         siswa    = '-'
         kec      = s.get('kecamatan', '-')
         rows.append(f"| {i} | {nama} | {jenjang} | {akred} | {siswa} | {kec} |")
-    
+
     return header + sep + "\n".join(rows)
 
 def _prompt_school_list(
@@ -886,7 +886,7 @@ def _prompt_school_list(
             f"{k}: {v}" for k, v in sorted(bc.items(), key=lambda x: -x[1])[:4]
         ) or "tidak tersedia"
         jenjang_str += " *(estimasi dari sampel yang ditampilkan)*"
- 
+
     if breakdown_status:
         # Normalisasi: gabungkan variasi kapitalisasi
         _STATUS_NORMALIZE = {
@@ -928,7 +928,7 @@ def _prompt_school_list(
             f"{k}: {v}" for k, v in sorted(sc_tmp.items(), key=lambda x: -x[1])
         ) or "tidak tersedia"
         status_str += " *(estimasi dari sampel yang ditampilkan)*"
- 
+
         # Bangun deskripsi filter aktif untuk narasi
     filter_parts = []
     if active_filters:
@@ -941,7 +941,7 @@ def _prompt_school_list(
         if active_filters.get("status"):
             filter_parts.append(f"status {active_filters['status']}")
         if active_filters.get("akreditasi"):
-            filter_parts.append(f"akreditasi {active_filters['akreditasi']}")   
+            filter_parts.append(f"akreditasi {active_filters['akreditasi']}")
         if active_filters.get("siswa_min"):
             filter_parts.append(f"jumlah siswa di atas {active_filters['siswa_min']} orang")
         if active_filters.get("siswa_max"):
@@ -952,14 +952,28 @@ def _prompt_school_list(
 
     _qc_instruksi_str = ""
     if qc_summary:
+        # Hitung jumlah sekolah dalam qc_summary untuk menentukan instruksi
+        qc_lines = [ln for ln in qc_summary.strip().split("\n") if ln.strip().startswith("-")]
+        total_qc_shown = len(qc_lines) if qc_lines else ditampilkan
+
+        if total_qc_shown <= 10:
+            contoh_instruksi = (
+                "- Sebutkan SEMUA sekolah yang ditemukan beserta masalah spesifiknya\n"
+                "- Format per sekolah: **Nama Sekolah** → [daftar masalah yang ditemukan]\n"
+            )
+        else:
+            contoh_instruksi = (
+                "- Sebutkan contoh spesifik 3-5 sekolah beserta masalahnya\n"
+                "- Sebutkan masalah yang paling sering muncul di semua sekolah\n"
+            )
+
         _qc_instruksi_str = (
             "\n\nINSTRUKSI KHUSUS — QUERY RESIDU DATA:\n"
             "User menanyakan sekolah yang datanya BERMASALAH. "
             "Fokus narasi pada masalah data yang ditemukan, bukan pada akreditasi atau jenjang.\n"
             "Sertakan dalam narasi:\n"
             "- Jumlah total sekolah bermasalah yang ditemukan\n"
-            "- Nama-nama masalah yang paling sering muncul\n"
-            "- Contoh spesifik 2-3 sekolah beserta masalahnya\n"
+            + contoh_instruksi +
             "- Jangan sebutkan breakdown akreditasi kecuali diminta\n"
             f"\nData masalah:\n{qc_summary}"
         )
@@ -984,8 +998,8 @@ INSTRUKSI NARASI:
 4. JANGAN tulis narasi panjang tentang distribusi wilayah atau implikasi — user minta LIST, bukan analisis.
 
 NARASI:"""
- 
- 
+
+
 def _extract_profile_fields(profile_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Normalisasi profile_data ke field flat untuk prompt narrator.
@@ -1085,8 +1099,8 @@ def _extract_profile_fields(profile_data: Dict[str, Any]) -> Dict[str, Any]:
         "total_komputer":_get(["sarana_prasarana.total_komputer","total_komputer"], 0),
         "tahun_data":    _get(["identitas.tahun_data", "tahun"], "-"),
     }
- 
- 
+
+
 def _prompt_school_profile(profile_data: Dict[str, Any]) -> str:
     f          = _extract_profile_fields(profile_data)
     nama       = f["nama"]
@@ -1096,11 +1110,6 @@ def _prompt_school_profile(profile_data: Dict[str, Any]) -> str:
     nilai_akhir = f["nilai_akhir"]
     lokasi_str = ", ".join(filter(None, [f["kec"], f["kab"], f["prov"]])) or "-"
     kode_pos   = f["kode_pos"]
-
-    guru_total  = f["guru_total"]
-    guru_pns    = f["guru_pns"]
-    guru_honor  = f["guru_honor"]
-    guru_serti  = f["guru_serti"]
 
     tendik_total = f["tendik_total"]
     tendik_l     = f["tendik_l"]
@@ -1122,29 +1131,6 @@ def _prompt_school_profile(profile_data: Dict[str, Any]) -> str:
     komputer    = f.get("total_komputer", 0)
     tahun_data  = f.get("tahun_data", "-")
 
-    rasio_str = (
-        f"1:{round(siswa_total / guru_total)}"
-        if guru_total and siswa_total else "tidak dapat dihitung"
-    )
-    pct_serti = (
-        f"{round(guru_serti / guru_total * 100)}%"
-        if guru_total else "-"
-    )
-
-    # Benchmark nasional
-    RASIO_IDEAL = {"SD": 17, "SMP": 20, "SMA": 20, "SMK": 15}
-    rasio_ideal = RASIO_IDEAL.get(bentuk, 20)
-    rasio_angka = round(siswa_total / guru_total) if guru_total and siswa_total else None
-
-    if rasio_angka:
-        if rasio_angka <= rasio_ideal:
-            rasio_konteks = f"lebih baik dari rata-rata nasional {bentuk} (~1:{rasio_ideal})"
-        elif rasio_angka <= rasio_ideal * 1.5:
-            rasio_konteks = f"sedikit di atas rata-rata nasional {bentuk} (~1:{rasio_ideal})"
-        else:
-            rasio_konteks = f"jauh di atas rata-rata nasional {bentuk} (~1:{rasio_ideal}), beban mengajar tinggi"
-    else:
-        rasio_konteks = ""
 
     # Komposisi siswa per gender
     if siswa_total and siswa_l + siswa_p > 0:
@@ -1164,10 +1150,10 @@ def _prompt_school_profile(profile_data: Dict[str, Any]) -> str:
 
     if air in ("Air hujan", ""):
         catatan_kritis.append(f"sumber air: {air} (perlu perhatian)")
-    
+
     if f.get("tipe_jamban") in (None, "-", "Tidak Ada"):
         catatan_kritis.append("fasilitas jamban tidak tercatat atau tidak ada")
-    
+
     if f.get("toilet_l", 0) == 0 and f.get("toilet_p", 0) == 0:
         catatan_kritis.append("jumlah toilet siswa: tidak ada data (0)")
 
@@ -1192,6 +1178,44 @@ def _prompt_school_profile(profile_data: Dict[str, Any]) -> str:
 
     kode_pos_str = kode_pos if kode_pos not in (None, "-", "") else "tidak tersedia"
 
+    # ── QC / Kualitas Data ─────────────────────────────────────────────
+    _QC_NAMES = {
+        "qc_6": "koordinat lintang", "qc_7": "koordinat bujur",
+        "qc_12": "foto sekolah", "qc_13": "data yayasan",
+        "qc_8": "SK izin operasional", "qc_10": "SK pendirian",
+        "qc_4": "alamat jalan", "qc_3": "nama sekolah",
+    }
+    qc = profile_data.get("kualitas_data", {}) or {}
+    total_masalah_qc = qc.get("total_masalah")
+    persen_bersih_qc = qc.get("persen_bersih")
+    qc_labels = qc.get("qc_labels", {}) or {}
+    masalah_list = [
+        _QC_NAMES.get(k, k)
+        for k, v in qc_labels.items()
+        if v and v != "OK"
+    ]
+    if total_masalah_qc is not None and total_masalah_qc > 0:
+        qc_str = (
+            f"{total_masalah_qc} masalah ditemukan ({persen_bersih_qc}% bersih). "
+            f"Kolom bermasalah: {', '.join(masalah_list)}."
+        )
+        masalah_joined = ", ".join(masalah_list) if masalah_list else "lihat tabel kualitas"
+        qc_narasi_instruksi = f"""
+
+## Kualitas & Kelengkapan Data (WAJIB — ada {total_masalah_qc} masalah)
+Tulis paragraf ini. Sebutkan EKSPLISIT kolom yang bermasalah: {masalah_joined}.
+Gunakan kalimat: "Data yang perlu dilengkapi meliputi: {masalah_joined}."
+"""
+        n_paragraf = "5"
+    elif total_masalah_qc == 0:
+        qc_str = "Data lengkap (100% bersih)."
+        qc_narasi_instruksi = ""
+        n_paragraf = "4"
+    else:
+        qc_str = "Data kualitas tidak tersedia."
+        qc_narasi_instruksi = ""
+        n_paragraf = "4"
+
     return f"""{_SYSTEM_BASE}
 
 DATA SEKOLAH:
@@ -1207,8 +1231,9 @@ DATA SEKOLAH:
 - Komputer   : {komputer} unit
 - Tahun Data : {tahun_data}
 - Catatan    : {catatan_str}
+- Kualitas Data: {qc_str}
 
-INSTRUKSI NARASI (4 paragraf pendek dengan ## heading, TANPA bullet):
+INSTRUKSI NARASI ({n_paragraf} paragraf dengan ## heading, TANPA bullet):
 
 ## Identitas & Posisi
 Sebutkan nama sekolah PERSIS "{nama}" (jangan diubah sama sekali).
@@ -1231,20 +1256,19 @@ Jika PNS dominan: sorot stabilitas yang baik.
 ## Sarana & Rekomendasi
 Komentari kondisi internet, listrik, air, sanitasi, toilet, komputer secara jujur.
 Jika ada kondisi kritis (dari catatan): SOROT sebagai temuan penting.
-Tutup dengan satu kalimat insight keseluruhan.
-
+Tutup dengan satu kalimat insight keseluruhan.{qc_narasi_instruksi}
 PENTING: Gunakan nama "{nama}" PERSIS. JANGAN tulis "Sekolah dengan NPSN X" atau "Sekolah ini".
 PENTING: Jangan ulang angka yang sudah ada di tabel — fokus pada INTERPRETASI.
 
 NARASI:"""
- 
- 
+
+
 def _prompt_ooc(query: str) -> str:
     return _prompt_ooc_guardrail(query)
 # ─────────────────────────────────────────────────────────────────────────────
 # CORE CALLER  (tidak berubah dari versi sebelumnya)
 # ─────────────────────────────────────────────────────────────────────────────
- 
+
 async def _call_narrator(
     prompt: str,
     fallback: str,
@@ -1295,17 +1319,17 @@ async def _call_narrator(
     except Exception:
         logger.exception("[Narrator] Unexpected error, using template fallback")
         return fallback
- 
- 
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PUBLIC API — satu fungsi per query-type
 # ─────────────────────────────────────────────────────────────────────────────
- 
+
 def detect_level(entities: Dict[str, Any]) -> str:
     """
     Deteksi level administratif terspesifik dari dict entities aggregation.
     Urutan prioritas: desa > kecamatan > kabupaten > provinsi.
- 
+
     Panggil dari aggregation_handler sebelum narrate_aggregation:
         from services.narrator_service import detect_level
         level = detect_level(entities)
@@ -1315,7 +1339,7 @@ def detect_level(entities: Dict[str, Any]) -> str:
         if entities.get(lvl):
             return lvl
     return "provinsi"
- 
+
 # narrator_service.py
 # GANTI narrate_aggregation():
 
@@ -1350,7 +1374,7 @@ async def narrate_aggregation(
         "sekolah":          "satuan pendidikan",
     }
     metric_label = _METRIC_LABELS.get(metric_target or "sekolah", "satuan pendidikan")
-    
+
     prompt = _prompt_aggregation(
         wilayah, total, level, status_filter,
         breakdown_jenjang, breakdown_status,
@@ -1420,8 +1444,8 @@ async def narrate_comparison_lokasi(
         return template_md
 
     return f"{template_md}\n\n---\n\n{narasi}"
- 
- 
+
+
 async def narrate_comparison_status(
     wilayah: str,
     negeri: int,
@@ -1453,8 +1477,8 @@ async def narrate_comparison_status(
         return template_md
 
     return f"{template_md}\n\n---\n\n{narasi}"
- 
- 
+
+
 async def narrate_school_list(
     wilayah: str,
     total: int,
@@ -1472,9 +1496,15 @@ async def narrate_school_list(
     """
     if total == 0 or not schools:
         return _zero_result_message(wilayah, active_filters, modul="list")
- 
+
     # Deteksi QC mode dari active_filters — tambahkan qc_summary ke prompt
-    _qc_mode    = bool(active_filters and active_filters.get("qc_masalah_only"))
+    _qc_mode = bool(
+        active_filters and (
+            active_filters.get("qc_masalah_only")
+            or active_filters.get("qc_field_list")
+            or active_filters.get("qc_field")
+        )
+    )
     _qc_summary = _build_qc_summary_context(schools) if _qc_mode else None
 
     prompt = _prompt_school_list(
@@ -1485,11 +1515,11 @@ async def narrate_school_list(
         qc_summary=_qc_summary,
     )
     narasi = await _call_narrator(
-                                prompt, 
+                                prompt,
                                 fallback="",
                                 max_tokens=NARRATOR_TOKENS_LIST
                                 )
- 
+
     if not narasi:
         return template_md
 
@@ -1511,7 +1541,7 @@ async def narrate_school_profile(
             profile_data.get("nama", "sekolah yang dimaksud") if profile_data else "sekolah yang dimaksud",
             modul="profile",
         )
- 
+
     # ── Debug log (hapus setelah field mapping terkonfirmasi) ────────────────
     # Set LOG_PROFILE_DEBUG=true di .env untuk aktifkan
     if os.getenv("LOG_PROFILE_DEBUG", "false").lower() == "true":
@@ -1520,14 +1550,14 @@ async def narrate_school_profile(
             list(profile_data.keys())
         )
     # ────────────────────────────────────────────────────────────────────────
- 
+
     prompt = _prompt_school_profile(profile_data)
     narasi = await _call_narrator(
-                                prompt, 
+                                prompt,
                                 fallback="",
                                 max_tokens=NARRATOR_TOKENS_PROFILE
                                 )
- 
+
     if not narasi:
         return template_md
 
@@ -1598,7 +1628,7 @@ async def narrate_out_of_context(query: str) -> str:
         '"Bandingkan sekolah di Cibunar vs Lumpang Parungpanjang".'
     )
     return await _call_narrator(
-                            prompt, 
+                            prompt,
                             fallback=fallback,
                             max_tokens=NARRATOR_TOKENS_OOC
                             )

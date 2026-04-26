@@ -4,6 +4,7 @@
 
 import sys
 import os
+import asyncio
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pytest
 from dotenv import load_dotenv
@@ -13,3 +14,10 @@ load_dotenv(".env.production")
 def pytest_configure(config):
     config.addinivalue_line("markers", "unit: unit test — tidak butuh LLM atau ES")
     config.addinivalue_line("markers", "integration: integration test — butuh API key / koneksi")
+
+
+@pytest.fixture(scope="function")
+def event_loop():
+    loop = asyncio.new_event_loop()
+    yield loop
+    loop.close()

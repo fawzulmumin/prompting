@@ -9,6 +9,6 @@ async def t():
     rc = r.from_url(os.getenv("REDIS_URL"))
     await rc.ping()
     print("✅ Redis OK")
-    await rc.close()
+    await rc.aclose()
 
 asyncio.run(t())
