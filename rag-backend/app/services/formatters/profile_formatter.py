@@ -114,7 +114,10 @@ def format_profile_markdown(profile: dict) -> str:
 
     # Detail per kolom QC
     qc_labels = qc.get("qc_labels") or {}
+    _status_sekolah = (identitas.get("status_sekolah") or "").upper()
     for field, name in _QC_NAMES.items():
+        if field == "qc_13" and _status_sekolah == "NEGERI":
+            continue
         status = qc_labels.get(field)
         markdown += f"- **{name}:** {safe_count(status)}\n"
 

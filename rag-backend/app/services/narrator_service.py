@@ -32,11 +32,11 @@ NARRATOR_TIMEOUT_AGGREGATION = 25   # aggregation + breakdown — lebih longgar 
 _NARRATOR_WAIT_FOR_GRACE     = 5    # detik ekstra untuk asyncio.wait_for di atas timeout LLM
 
 # ── TOKEN CONFIG ──
-NARRATOR_TOKENS_PROFILE      = 900
-NARRATOR_TOKENS_AGGREGATION  = 750
-NARRATOR_TOKENS_COMPARISON   = 700
-NARRATOR_TOKENS_LIST         = 500
-NARRATOR_TOKENS_OOC          = 650
+NARRATOR_TOKENS_PROFILE      = 1500
+NARRATOR_TOKENS_AGGREGATION  = 1200
+NARRATOR_TOKENS_COMPARISON   = 1000
+NARRATOR_TOKENS_LIST         = 1200
+NARRATOR_TOKENS_OOC          = 800
 
 # ── TEMP CONFIG ──
 NARRATOR_TEMP                = 0.4
@@ -151,6 +151,33 @@ def _validate_numbers_in_narasi(narasi: str, expected_numbers) -> Optional[str]:
             return None
 
     return narasi
+
+
+def _safe(val, default: str = "-") -> str:
+    """Konversi None/falsy/string-'None' ke default, hasil selalu str."""
+    if val is None or str(val).strip().lower() == "none" or str(val).strip() == "":
+        return default
+    return str(val).strip()
+
+
+def _enrich_template_on_validation_fail(
+    template_md: str,
+    expected: dict,
+    context: str = "",
+) -> str:
+    """
+    Tambahkan catatan ringkas ke template saat LLM gagal mempertahankan angka.
+    Deterministik (tidak pakai LLM), lebih informatif dari bare template.
+    """
+    if not expected:
+        return template_md
+    angka_str = ", ".join(
+        f"{label}: {int(val):,}".replace(",", ".")
+        for label, val in expected.items()
+        if val is not None
+    )
+    catatan = f"\n\n> _Data ringkas: {angka_str}._" if angka_str else ""
+    return f"{template_md}{catatan}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -505,8 +532,8 @@ def _prompt_aggregation_with_list(
     metric_label = _METRIC_LABELS.get(metric_target, "satuan pendidikan") if metric_target else "satuan pendidikan"
     is_numeric_metric = metric_target and metric_target != "sekolah"
     school_lines = "\n".join(
-        f"- {s.get('nama', 'Nama tidak tersedia')} "
-        f"({s.get('kecamatan', '-')})"
+        f"- {_safe(s.get('nama'), 'Nama tidak tersedia')} "
+        f"({_safe(s.get('kecamatan'))})"
         for s in schools_list[:20]  # batasi 20 untuk context
     )
 
@@ -721,9 +748,9 @@ def _prompt_school_vs_school(school_a: dict, school_b: dict, query: str) -> str:
 
     def fmt(s):
         return (
-            f"Nama: {s.get('nama','-')} | Jenjang: {s.get('bentuk_pendidikan','-')} | "
-            f"Status: {s.get('status_sekolah','-')} | Akreditasi: {s.get('akreditasi','-')} | "
-            f"Kecamatan: {s.get('kecamatan','-')} | Siswa: data tidak tersedia | "
+            f"Nama: {_safe(s.get('nama'))} | Jenjang: {_safe(s.get('bentuk_pendidikan'))} | "
+            f"Status: {_safe(s.get('status_sekolah'))} | Akreditasi: {_safe(s.get('akreditasi'))} | "
+            f"Kecamatan: {_safe(s.get('kecamatan'))} | Siswa: data tidak tersedia | "
             f"Guru: data tidak tersedia"
         )
 
@@ -841,11 +868,11 @@ def _build_school_table(schools: list, max_rows: int = 20) -> str:
     sep    = "|----|-------------|---------|-----------|-------|----------|\n"
     rows   = []
     for i, s in enumerate(schools[:max_rows], 1):
-        nama     = s.get('nama', '-')
-        jenjang  = s.get('bentuk_pendidikan', s.get('bentuk', '-'))
-        akred    = s.get('akreditasi', '-')
+        nama     = _safe(s.get('nama'))
+        jenjang  = _safe(s.get('bentuk_pendidikan') or s.get('bentuk'))
+        akred    = _safe(s.get('akreditasi'))
         siswa    = '-'
-        kec      = s.get('kecamatan', '-')
+        kec      = _safe(s.get('kecamatan'))
         rows.append(f"| {i} | {nama} | {jenjang} | {akred} | {siswa} | {kec} |")
 
     return header + sep + "\n".join(rows)
@@ -868,7 +895,11 @@ def _prompt_school_list(
         "desa_kelurahan": "Desa/Kelurahan",
     }
     level_desc = _LEVEL_LABEL.get(wilayah_level, "")
-    wilayah_full = f"{level_desc} {wilayah}".strip() if level_desc else wilayah
+    _wilayah_lower = wilayah.lower()
+    if _wilayah_lower.startswith("kabupaten ") or _wilayah_lower.startswith("kota "):
+        wilayah_full = wilayah.title()
+    else:
+        wilayah_full = f"{level_desc} {wilayah}".strip() if level_desc else wilayah
     # Gunakan breakdown dari ES aggregation jika tersedia,
     # fallback ke hitung dari sampel
     if breakdown_jenjang:
@@ -1101,7 +1132,7 @@ def _extract_profile_fields(profile_data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _prompt_school_profile(profile_data: Dict[str, Any]) -> str:
+def _prompt_school_profile(profile_data: Dict[str, Any], query: str = "") -> str:
     f          = _extract_profile_fields(profile_data)
     nama       = f["nama"]
     bentuk     = f["bentuk"]
@@ -1189,11 +1220,18 @@ def _prompt_school_profile(profile_data: Dict[str, Any]) -> str:
     total_masalah_qc = qc.get("total_masalah")
     persen_bersih_qc = qc.get("persen_bersih")
     qc_labels = qc.get("qc_labels", {}) or {}
+    _is_negeri = (f.get("status") or "").upper() == "NEGERI"
     masalah_list = [
         _QC_NAMES.get(k, k)
         for k, v in qc_labels.items()
         if v and v != "OK"
+        and not (k == "qc_13" and _is_negeri)
     ]
+    _qc_13_val = qc_labels.get("qc_13", "OK")
+    _qc_13_counted = _is_negeri and _qc_13_val and _qc_13_val != "OK"
+    if _qc_13_counted and total_masalah_qc:
+        total_masalah_qc = max(0, total_masalah_qc - 1)
+        persen_bersih_qc = round((13 - total_masalah_qc) / 13 * 100, 2)
     if total_masalah_qc is not None and total_masalah_qc > 0:
         qc_str = (
             f"{total_masalah_qc} masalah ditemukan ({persen_bersih_qc}% bersih). "
@@ -1216,6 +1254,17 @@ Gunakan kalimat: "Data yang perlu dilengkapi meliputi: {masalah_joined}."
         qc_narasi_instruksi = ""
         n_paragraf = "4"
 
+    _q = query.strip() if query else ""
+    _konteks_query = (
+        f'KONTEKS PERTANYAAN USER: "{_q}"\n\n'
+        f'PEMBUKA WAJIB (1 kalimat sebelum ## Identitas & Posisi):\n'
+        f'Awali narasi dengan satu kalimat yang merangkum apa yang ditanyakan user.\n'
+        f'Contoh: "Berikut adalah informasi mengenai masalah data pada SMAN 28 Kabupaten Tangerang."\n'
+        f'atau: "Berikut profil lengkap TK FAZZA di Kota Bandung."\n'
+        f'JANGAN mulai langsung dengan nama sekolah tanpa konteks.\n\n'
+        if _q else ""
+    )
+
     return f"""{_SYSTEM_BASE}
 
 DATA SEKOLAH:
@@ -1233,7 +1282,7 @@ DATA SEKOLAH:
 - Catatan    : {catatan_str}
 - Kualitas Data: {qc_str}
 
-INSTRUKSI NARASI ({n_paragraf} paragraf dengan ## heading, TANPA bullet):
+{_konteks_query}INSTRUKSI NARASI ({n_paragraf} paragraf dengan ## heading, TANPA bullet):
 
 ## Identitas & Posisi
 Sebutkan nama sekolah PERSIS "{nama}" (jangan diubah sama sekali).
@@ -1410,8 +1459,11 @@ async def narrate_aggregation(
     skip_validation = bool(metric_target and metric_target not in (None, "sekolah"))
 
     if not skip_validation and not _validate_numbers_in_narasi(narasi, expected):
-        logger.warning("[Narrator] Validasi angka gagal (aggregation), pakai template")
-        return template_md
+        logger.warning(
+            "[Narrator] Validasi angka gagal (aggregation) — expected=%s, pakai template",
+            expected,
+        )
+        return _enrich_template_on_validation_fail(template_md, expected, context="aggregation")
 
     return f"{template_md}\n\n---\n\n{narasi}"
 
@@ -1440,8 +1492,11 @@ async def narrate_comparison_lokasi(
     # Validasi: setiap count wilayah wajib ada di narasi
     expected = {f"count_{i}": r["count"] for i, r in enumerate(results) if r.get("count")}
     if not _validate_numbers_in_narasi(narasi, expected):
-        logger.warning("[Narrator] Validasi angka gagal (comparison_lokasi), pakai template")
-        return template_md
+        logger.warning(
+            "[Narrator] Validasi angka gagal (comparison_lokasi) — expected=%s, pakai template",
+            expected,
+        )
+        return _enrich_template_on_validation_fail(template_md, expected, context="comparison_lokasi")
 
     return f"{template_md}\n\n---\n\n{narasi}"
 
@@ -1473,8 +1528,13 @@ async def narrate_comparison_status(
 
     # Validasi: angka negeri dan swasta wajib muncul
     if not _validate_numbers_in_narasi(narasi, {"negeri": negeri, "swasta": swasta}):
-        logger.warning("[Narrator] Validasi angka gagal (comparison_status), pakai template")
-        return template_md
+        logger.warning(
+            "[Narrator] Validasi angka gagal (comparison_status) — negeri=%s swasta=%s, pakai template",
+            negeri, swasta,
+        )
+        return _enrich_template_on_validation_fail(
+            template_md, {"negeri": negeri, "swasta": swasta}, context="comparison_status"
+        )
 
     return f"{template_md}\n\n---\n\n{narasi}"
 
@@ -1523,10 +1583,31 @@ async def narrate_school_list(
     if not narasi:
         return template_md
 
-    # Validasi: total wajib ada di narasi
-    if not _validate_numbers_in_narasi(narasi, {"total": total}):
-        logger.warning("[Narrator] Validasi angka gagal (school_list), pakai template")
-        return template_md
+    # Validasi angka — dan-split: cukup salah satu angka per-wilayah muncul
+    _dan_split_breakdown = active_filters.get("dan_split_breakdown") if active_filters else None
+    if _dan_split_breakdown:
+        _any_found = any(
+            _validate_numbers_in_narasi(narasi, {f"subtotal_{i}": v})
+            for i, v in enumerate(_dan_split_breakdown.values())
+            if v and v >= 10
+        )
+        if not _any_found:
+            logger.warning(
+                "[Narrator] Validasi angka gagal (school_list dan-split) — expected=%s, pakai template",
+                _dan_split_breakdown,
+            )
+            return _enrich_template_on_validation_fail(
+                template_md, _dan_split_breakdown, context="school_list dan-split"
+            )
+    else:
+        if not _validate_numbers_in_narasi(narasi, {"total": total}):
+            logger.warning(
+                "[Narrator] Validasi angka gagal (school_list) — expected total=%s, pakai template",
+                total,
+            )
+            return _enrich_template_on_validation_fail(
+                template_md, {"total ditemukan": total}, context="school_list"
+            )
 
     return f"{template_md}\n\n---\n\n{narasi}"
 
@@ -1534,6 +1615,7 @@ async def narrate_school_list(
 async def narrate_school_profile(
     profile_data: Dict[str, Any],
     template_md: str,
+    query: str = "",
 ) -> str:
     """Narasi profil sekolah. profile_data adalah dict hasil dari ES."""
     if not profile_data:
@@ -1551,7 +1633,7 @@ async def narrate_school_profile(
         )
     # ────────────────────────────────────────────────────────────────────────
 
-    prompt = _prompt_school_profile(profile_data)
+    prompt = _prompt_school_profile(profile_data, query=query)
     narasi = await _call_narrator(
                                 prompt,
                                 fallback="",
@@ -1675,7 +1757,7 @@ Instruksi:
     narasi = await _call_narrator(
         prompt,
         fallback=merged_context,
-        max_tokens=900,
+        max_tokens=1500,
     )
 
     expected_numbers = _extract_numbers_from_text(merged_context)

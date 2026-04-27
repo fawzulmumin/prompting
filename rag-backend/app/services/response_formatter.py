@@ -242,13 +242,22 @@ def format_school_list_answer(result: Dict[str, Any]) -> Dict[str, str]:
     if status:
         header_parts.append(status.capitalize())
     if wilayah:
-        header_parts.append(f"di {wilayah.title()}")
+        def _title_wilayah(s: str) -> str:
+            """Title-case nama wilayah tapi pertahankan kata sambung lowercase."""
+            _LOWERCASE_WORDS = {"dan", "atau", "di", "ke", "dari"}
+            return " ".join(
+                w if w.lower() in _LOWERCASE_WORDS else w.title()
+                for w in s.split()
+            )
+        header_parts.append(f"di {_title_wilayah(wilayah)}")
     header = " ".join(header_parts)
  
     md_lines = [f"### {header}\n"]
     md_lines.append(f"Menampilkan **{len(schools)}** dari **{total:,}** sekolah yang ditemukan.\n")
     for s in schools:
         nama   = s.get("nama") or "-"
+        if str(nama).strip().lower() == "none":
+            nama = "-"
         label  = _format_bentuk_status(s)
         lokasi = _format_lokasi(s)
         md_lines.append(f"- **{nama}**" + (f" `{label}`" if label else ""))
@@ -260,6 +269,8 @@ def format_school_list_answer(result: Dict[str, Any]) -> Dict[str, str]:
     html_items = []
     for s in schools:
         nama   = s.get("nama") or "-"
+        if str(nama).strip().lower() == "none":
+            nama = "-"
         label  = _format_bentuk_status(s)
         lokasi = _format_lokasi(s)
         badge  = f' <span class="school-badge">{label}</span>' if label else ""

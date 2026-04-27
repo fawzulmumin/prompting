@@ -148,6 +148,18 @@ def detect_ranking_level(query: str) -> Optional[str]:
 # WILAYAH TRUST HELPERS
 # ===============================
 
+# Mapping canonical Jakarta → format "kota adm." yang disimpan di ES index
+_JAKARTA_KABUPATEN_CANONICAL: dict = {
+    "jakarta pusat":   "kota adm. jakarta pusat",
+    "jakarta selatan": "kota adm. jakarta selatan",
+    "jakarta barat":   "kota adm. jakarta barat",
+    "jakarta timur":   "kota adm. jakarta timur",
+    "jakarta utara":   "kota adm. jakarta utara",
+    "jakarta":         "kota adm. jakarta pusat",   # fallback jika standalone
+}
+_JAKARTA_PROVINSI_CANONICAL = "prov. dki jakarta"
+_JAKARTA_PROVINSI_ALIASES: frozenset = frozenset({"dki jakarta", "dki", "jakarta"})
+
 # Nama kota yang ambigu: ada kab. X dan kota X sekaligus.
 # Untuk nama ini tanpa prefix eksplisit, jangan auto-trust → biarkan resolver
 # ask for clarification via AMBIGUOUS response.
@@ -359,21 +371,35 @@ async def handle_aggregation_query(
                 wilayah_from_intent: Dict[str, str] = {}
 
                 if getattr(w, "provinsi", None):
-                    wilayah_from_intent["provinsi"] = _normalize_wilayah_prefix(
-                        w.provinsi, "prov."
-                    )
+                    prov_raw = w.provinsi.lower().strip()
+                    if prov_raw in _JAKARTA_PROVINSI_ALIASES or "dki" in prov_raw:
+                        wilayah_from_intent["provinsi"] = _JAKARTA_PROVINSI_CANONICAL
+                        logger.info(
+                            "[AGG] DKI Jakarta provinsi remap: '%s' → '%s'",
+                            prov_raw, _JAKARTA_PROVINSI_CANONICAL,
+                        )
+                    else:
+                        wilayah_from_intent["provinsi"] = _normalize_wilayah_prefix(
+                            w.provinsi, "prov."
+                        )
 
                 kab_raw = (getattr(w, "kabupaten", None) or "").lower().strip()
                 if kab_raw:
                     has_prefix = any(
                         kab_raw.startswith(p)
-                        for p in ("kab.", "kota ", "kabupaten ")
+                        for p in ("kab.", "kota ", "kabupaten ", "kota adm.")
                     )
                     if not has_prefix and kab_raw in _AMBIGUOUS_CITIES:
                         logger.info(
                             "[AGG] ambiguous city '%s' without prefix → "
                             "skip auto-trust, let resolver ask for clarification",
                             kab_raw,
+                        )
+                    elif kab_raw in _JAKARTA_KABUPATEN_CANONICAL:
+                        canonical = _JAKARTA_KABUPATEN_CANONICAL[kab_raw]
+                        wilayah_from_intent["kabupaten"] = canonical
+                        logger.info(
+                            "[AGG] Jakarta remap: '%s' → '%s'", kab_raw, canonical,
                         )
                     else:
                         wilayah_from_intent["kabupaten"] = _normalize_wilayah_prefix(

@@ -866,7 +866,16 @@ class ListSchoolHandler:
                 wilayah_a = result_a.get("parsed", {}).get("wilayah", "")
                 wilayah_b = result_b.get("parsed", {}).get("wilayah", "")
                 merged_parsed  = dict(result_a.get("parsed", {}))
-                merged_parsed["wilayah"] = f"{wilayah_a} dan {wilayah_b}"
+                if wilayah_a.lower() != wilayah_b.lower():
+                    merged_wilayah_label = f"{wilayah_a} dan {wilayah_b}"
+                else:
+                    merged_wilayah_label = wilayah_a
+                merged_parsed["wilayah"] = merged_wilayah_label
+                merged_parsed["dan_split_breakdown"] = {
+                    wilayah_a: result_a["total"],
+                    wilayah_b: result_b["total"],
+                }
+                merged_parsed["dan_split_total"] = merged_total
                 logger.info("[LIST] Dan-split merged: %d + %d = %d schools",
                             result_a["total"], result_b["total"], merged_total)
                 return {
@@ -875,8 +884,8 @@ class ListSchoolHandler:
                     "parsed": merged_parsed,
                     "wilayah_level": result_a.get("wilayah_level", "desa_kelurahan"),
                     "is_ambiguous": False, "candidates": [],
-                    "breakdown_jenjang": None,
-                    "breakdown_status":  None,
+                    "breakdown_jenjang": result_a.get("breakdown_jenjang"),
+                    "breakdown_status":  result_a.get("breakdown_status"),
                 }
             # Salah satu gagal → lanjut flow normal
 
@@ -1754,6 +1763,13 @@ class ListSchoolHandler:
 
             logger.info("[LIST] _build_query: wc=%s want_kab=%s want_kota=%s q=%s",
                         wc, want_kab, want_kota, q_check[:60])
+
+            # Propagate ke parsed["wilayah"] agar header display eksplisit Kabupaten/Kota
+            _cur_wilayah = parsed.get("wilayah", "").lower()
+            if want_kab and not _cur_wilayah.startswith("kab"):
+                parsed["wilayah"] = f"kabupaten {wc}"
+            elif want_kota and not _cur_wilayah.startswith("kota"):
+                parsed["wilayah"] = f"kota {wc}"
 
             if wilayah_level == "provinsi":
                 should += [

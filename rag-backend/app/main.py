@@ -1173,6 +1173,7 @@ async def ask_question(
         formatted_md = await narrate_school_profile(
             profile_data=profile_data,
             template_md=formatted_md,
+            query=query,
         )
 
         npsn_value        = profile_data.get("identitas", {}).get("npsn")
@@ -1258,6 +1259,10 @@ async def ask_question(
                 "qc_field":        _parsed.get("qc_field"),
             }.items() if v
         }
+        _dan_split = _parsed.get("dan_split_breakdown")
+        if _dan_split:
+            _active_filters["dan_split_breakdown"] = _dan_split
+            _active_filters["dan_split_total"] = _parsed.get("dan_split_total", total)
 
         formatted["answer_markdown"] = await narrate_school_list(
             wilayah=wilayah_list,
@@ -1514,7 +1519,7 @@ if __name__ == "__main__":
         ]
     )
 
-    port = int(os.getenv("PORT", 3001))
+    port = int(os.getenv("PORT", 3000))
     uvicorn.run(
         "rag_server:app",
         host="0.0.0.0",
