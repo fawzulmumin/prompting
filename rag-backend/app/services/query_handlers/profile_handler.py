@@ -75,6 +75,24 @@ class ProfileHandler:
                     }
                 return self._not_found()
 
+            # ── NPSN path: bypass ranking — NPSN adalah identifier unik ────────
+            if search_result.get("is_npsn_search") and search_result["total"] >= 1:
+                _npsn_hit = search_result["hits"][0]
+                logger.info(
+                    "[ProfileHandler] NPSN search bypass ranking → langsung return hit"
+                )
+                try:
+                    _npsn_profile = self._build_profile(_npsn_hit)
+                except (KeyError, AttributeError) as _qc_err:
+                    logger.warning(
+                        "[ProfileHandler] QC field error building NPSN profile: %s", _qc_err
+                    )
+                    _npsn_profile = build_profile(_npsn_hit.get("_source", {}), {})
+                _npsn_response = self._build_response(_npsn_profile, _npsn_hit)
+                await self._set_cache(query, _npsn_response)
+                return _npsn_response
+            # ─────────────────────────────────────────────────────────────────────
+
             hits          = search_result["hits"]
             hits_returned = search_result["total"]
             total_es      = search_result.get("total_found", hits_returned)
@@ -99,7 +117,8 @@ class ProfileHandler:
             if decision["status"] != "success":
                 return decision
 
-            hit = decision["hit"]
+            hit        = decision["hit"]
+            weak_match = decision.get("weak_match", False)
             try:
                 profile = self._build_profile(hit)
             except (KeyError, AttributeError) as qc_err:
@@ -108,7 +127,7 @@ class ProfileHandler:
                 )
                 profile = build_profile(hit.get("_source", {}), {})
 
-            response = self._build_response(profile, hit)
+            response = self._build_response(profile, hit, weak_match=weak_match)
 
             await self._set_cache(query, response)
 
@@ -134,6 +153,7 @@ class ProfileHandler:
                 npsn, parsed.get("year")
             )
             result["wilayah_resolved"] = True
+            result["is_npsn_search"]   = True
             return result
  
         school_name = parsed.get("school_name")
@@ -320,9 +340,10 @@ class ProfileHandler:
  
         return {
             "status": "success",
-            "hit": top_hit
+            "hit": top_hit,
+            "weak_match": is_weak_query,
         }
- 
+
     def _result_matches_wilayah(self, hit, wilayah: str) -> bool:
         """
         Cek apakah hasil search berlokasi di wilayah yang diminta.
@@ -396,22 +417,23 @@ class ProfileHandler:
     # RESPONSE
     # =====================================================
  
-    def _build_response(self, profile, hit):
- 
+    def _build_response(self, profile, hit, weak_match: bool = False):
+
         completeness = compute_profile_completeness(profile)
- 
+
         quality = analyze_profile_quality(profile)
- 
+
         score = hit.get("_custom_score", 0)
- 
+
         confidence = min(0.95, score / 100)
- 
+
         return {
             "status": "success",
             "data": profile,
             "confidence": confidence,
             "completeness_score": completeness,
-            "quality": quality
+            "quality": quality,
+            "weak_match": weak_match,
         }
  
     # =====================================================

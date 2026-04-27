@@ -729,7 +729,8 @@ async def ask_question(
         try:
             comparison_result = await handle_comparison_query(
                 query=query,
-                es_client=es_client
+                es_client=es_client,
+                intent=intent,
             )
             _amb_msg = _extract_ambiguous_message(comparison_result)
             if _amb_msg:
@@ -1174,6 +1175,7 @@ async def ask_question(
             profile_data=profile_data,
             template_md=formatted_md,
             query=query,
+            is_weak_match=profile_result.get("weak_match", False),
         )
 
         npsn_value        = profile_data.get("identitas", {}).get("npsn")

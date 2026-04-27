@@ -71,7 +71,7 @@ app.post("/api/ask", async (req, res) => {
 
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30_000);
+    const timeout = setTimeout(() => controller.abort(), 60_000);  // 30s → 60s
 
     const response = await fetch(`${PYTHON_BASE_URL}/ask`, {
       method: "POST",
@@ -101,7 +101,7 @@ app.post("/api/ask", async (req, res) => {
     res.json(data);
   } catch (err) {
     if (err.name === "AbortError") {
-      return res.status(504).json({ error: "Python backend timeout setelah 30 detik." });
+      return res.status(504).json({ error: "Python backend timeout setelah 60 detik." });
     }
     res.status(502).json({
       error: "Python backend tidak dapat dijangkau",

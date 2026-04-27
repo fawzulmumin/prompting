@@ -40,6 +40,30 @@ def safe_count(value) -> str:
     return str(value)
 
 
+def _format_qc_status(value) -> str:
+    """Format nilai QC field menjadi label human-readable dengan emoji."""
+    if value is None or value == "" or value == "null":
+        return "- (data tidak tersedia)"
+
+    v_str = str(value).strip()
+    v_lower = v_str.lower()
+
+    # profile_builder menghasilkan "OK" atau "Bermasalah (kode: N)"
+    if v_lower == "ok" or v_lower in ("1", "baik", "valid", "bersih"):
+        return "✅ OK"
+    if v_lower.startswith("bermasalah"):
+        return f"⚠️ {v_str}"
+
+    # Fallback: coba parse sebagai integer (0 = OK, >0 = bermasalah)
+    try:
+        int_val = int(value)
+        return "✅ OK" if int_val == 0 else f"⚠️ Bermasalah (nilai: {int_val})"
+    except (ValueError, TypeError):
+        pass
+
+    return v_str
+
+
 def format_profile_markdown(profile: dict) -> str:
     identitas  = profile.get("identitas", {})
     lokasi     = profile.get("lokasi", {})
@@ -115,10 +139,25 @@ def format_profile_markdown(profile: dict) -> str:
     # Detail per kolom QC
     qc_labels = qc.get("qc_labels") or {}
     _status_sekolah = (identitas.get("status_sekolah") or "").upper()
+
+    # Summary field bermasalah — tampilkan sebelum detail per kolom
+    if total_masalah is not None and int(total_masalah) > 0:
+        masalah_fields = []
+        for field, name in _QC_NAMES.items():
+            if field == "qc_13" and _status_sekolah == "NEGERI":
+                continue
+            val = qc_labels.get(field)
+            if val is not None and str(val).lower().startswith("bermasalah"):
+                masalah_fields.append(name)
+        if masalah_fields:
+            markdown += f"- **Field bermasalah:** {', '.join(masalah_fields)}\n"
+        else:
+            markdown += "- **Field bermasalah:** (tidak teridentifikasi)\n"
+
     for field, name in _QC_NAMES.items():
         if field == "qc_13" and _status_sekolah == "NEGERI":
             continue
         status = qc_labels.get(field)
-        markdown += f"- **{name}:** {safe_count(status)}\n"
+        markdown += f"- **{name}:** {_format_qc_status(status)}\n"
 
     return markdown

@@ -21,6 +21,12 @@ _FUZZY_BLACKLIST = {
     "sudah", "belum", "sedang", "sering", "sangat", "dimana",
     "bagaimana", "mengapa", "siapa", "kapan", "boleh", "tidak",
     "data", "nilai", "rata", "hasil", "angka", "score",
+    # Kata yang sering salah fuzzy ke nama lokasi
+    "banyak",      # → "bancak" (kecamatan Jawa Tengah)
+    "sedikit", "atau", "bandingkan", "compare",
+    "koordinat", "kosong", "bersih", "bermasalah",
+    # Arah mata angin — bagian dari nama provinsi multi-kata
+    "tengah", "timur", "barat", "utara", "selatan",
 }
 
 def _levenshtein(s1: str, s2: str) -> int:
@@ -112,6 +118,21 @@ def fuzzy_match_location(
  
     return best_match
 
+# Bigram nama provinsi yang komponennya tidak boleh di-fuzzy sendiri
+# Contoh: "jawa tengah" → "jawa" dan "tengah" sama-sama dilindungi
+_PROTECTED_BIGRAMS: frozenset = frozenset({
+    "jawa tengah", "jawa timur", "jawa barat",
+    "kalimantan tengah", "kalimantan timur", "kalimantan barat",
+    "kalimantan utara", "kalimantan selatan",
+    "sulawesi tengah", "sulawesi timur", "sulawesi barat",
+    "sulawesi utara", "sulawesi selatan",
+    "nusa tenggara barat", "nusa tenggara timur",
+    "papua barat", "papua tengah", "papua selatan",
+    "maluku utara",
+    "sumatera barat", "sumatera utara", "sumatera selatan",
+})
+
+
 def fuzzy_correct_words(text: str) -> str:
     """
     Koreksi typo kata per kata menggunakan fuzzy_match_location,
@@ -121,9 +142,26 @@ def fuzzy_correct_words(text: str) -> str:
         return text
 
     words = text.split()
+    text_lower = text.lower()
+
+    # Tandai indeks kata yang merupakan bagian dari bigram provinsi
+    protected_indices: set = set()
+    for bigram in _PROTECTED_BIGRAMS:
+        if bigram in text_lower:
+            bigram_words = bigram.split()
+            for i in range(len(words) - len(bigram_words) + 1):
+                if all(words[i + j].lower() == bigram_words[j] for j in range(len(bigram_words))):
+                    for j in range(len(bigram_words)):
+                        protected_indices.add(i + j)
+
     corrected = []
 
-    for word in words:
+    for idx, word in enumerate(words):
+
+        # ✅ GUARD: bagian dari bigram provinsi — jangan diubah
+        if idx in protected_indices:
+            corrected.append(word)
+            continue
 
         # ✅ GUARD: skip kata umum
         if word.lower() in _FUZZY_BLACKLIST:

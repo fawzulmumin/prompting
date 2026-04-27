@@ -163,6 +163,8 @@ async def set_cache(key: str, value: Any, ttl: int = 3600) -> bool:
 async def delete_cache(key: str) -> bool:
     try:
         redis_client = await get_redis_client()
+        if redis_client is None:
+            return False
         full_key = f"{CACHE_PREFIX}{key}"
         result = await redis_client.delete(full_key)
         return result > 0
@@ -174,6 +176,8 @@ async def clear_cache_pattern(pattern: str, batch_size: int = 100) -> int:
     """Safely clear cache keys in batches (production safe)."""
     try:
         redis_client = await get_redis_client()
+        if redis_client is None:
+            return 0
         full_pattern = f"{CACHE_PREFIX}{pattern}"
 
         cursor = 0
@@ -263,6 +267,8 @@ async def get_chat_history(user_id: str) -> List[Dict[str, Any]]:
 async def clear_chat_history(user_id: str) -> bool:
     try:
         redis_client = await get_redis_client()
+        if redis_client is None:
+            return False
         key = f"{CACHE_PREFIX}history:{user_id}"
         result = await redis_client.delete(key)
         return result > 0

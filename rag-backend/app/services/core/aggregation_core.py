@@ -6,6 +6,23 @@ from elasticsearch import AsyncElasticsearch
 from elasticsearch import ApiError, TransportError
  
 logger = logging.getLogger(__name__)
+
+# ── Jakarta provinsi variants (ES menyimpan dengan titik: "prov. d.k.i. jakarta") ──
+def _build_provinsi_filter(provinsi_value: str) -> dict:
+    """Build ES filter untuk field provinsi, dengan handling khusus Jakarta."""
+    if "jakarta" in provinsi_value.lower():
+        return {
+            "bool": {
+                "should": [
+                    {"term": {"provinsi": "prov. d.k.i. jakarta"}},
+                    {"term": {"provinsi": "prov. dki jakarta"}},
+                    {"match": {"provinsi.text": "jakarta"}},
+                ],
+                "minimum_should_match": 1,
+            }
+        }
+    return {"term": {"provinsi": provinsi_value}}
+
 # ── Metric target mapping ────────────────────────────────────────────────────
 # Index baru (idx_sekolah_qc) tidak punya field siswa/guru — hanya count sekolah.
 _METRIC_MAP: Dict[str, tuple] = {}
@@ -214,6 +231,9 @@ def build_filters(entities: Dict[str, Any]) -> List[Dict[str, Any]]:
         "qc_masalah_only",
         "qc_field",
         "qc_min_masalah",
+        "qc_persen_min",
+        "qc_persen_max",
+        "qc_field_list",
     }
 
     # Jika ada area_group (mis. purwokerto → list kecamatan),
@@ -231,6 +251,8 @@ def build_filters(entities: Dict[str, Any]) -> List[Dict[str, Any]]:
         if field == "bentuk_pendidikan_in":
             filters.append({"terms": {"bentuk_pendidikan": value}})
 
+        elif field == "provinsi":
+            filters.append(_build_provinsi_filter(value))
         # default: term filter untuk string/bool/int
         else:
             filters.append({"term": {field: value}})
@@ -310,6 +332,31 @@ def build_filters(entities: Dict[str, Any]) -> List[Dict[str, Any]]:
     if entities.get("qc_min_masalah") is not None:
         filters.append({"range": {"qc_score.total_masalah": {"gte": int(entities["qc_min_masalah"])}}})
         logger.debug("[AGG_CORE] qc_min_masalah filter: %s", entities["qc_min_masalah"])
+
+    # ── Filter QC spesifik per kolom (qc_field / qc_field_list) ─────────────
+    _qc_field = entities.get("qc_field")
+    if _qc_field is not None and isinstance(_qc_field, int) and 1 <= _qc_field <= 13:
+        filters.append({"range": {f"qc.qc_{_qc_field}": {"gte": 2}}})
+        logger.debug("[AGG_CORE] qc_field filter: qc_%d >= 2", _qc_field)
+
+    for _qf in (entities.get("qc_field_list") or []):
+        if isinstance(_qf, int) and 1 <= _qf <= 13:
+            filters.append({"range": {f"qc.qc_{_qf}": {"gte": 2}}})
+            logger.debug("[AGG_CORE] qc_field_list item filter: qc_%d >= 2", _qf)
+
+    # ── Filter persen_bersih (qc_persen_min / qc_persen_max) ────────────────
+    _persen_min = entities.get("qc_persen_min")
+    _persen_max = entities.get("qc_persen_max")
+    _persen_min_valid = isinstance(_persen_min, (int, float)) and _persen_min is not False
+    _persen_max_valid = isinstance(_persen_max, (int, float)) and _persen_max is not False
+    if _persen_min_valid or _persen_max_valid:
+        range_clause: dict = {}
+        if _persen_min_valid:
+            range_clause["gte"] = float(_persen_min)
+        if _persen_max_valid:
+            range_clause["lte"] = float(_persen_max)
+        filters.append({"range": {"qc_score.persen_bersih": range_clause}})
+        logger.debug("[AGG_CORE] persen_bersih filter: %s", range_clause)
 
     return filters
  

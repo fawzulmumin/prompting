@@ -35,7 +35,7 @@ _NARRATOR_WAIT_FOR_GRACE     = 5    # detik ekstra untuk asyncio.wait_for di ata
 NARRATOR_TOKENS_PROFILE      = 1500
 NARRATOR_TOKENS_AGGREGATION  = 1200
 NARRATOR_TOKENS_COMPARISON   = 1000
-NARRATOR_TOKENS_LIST         = 1200
+NARRATOR_TOKENS_LIST         = 1500  # Dinaikkan untuk list dengan banyak masalah per sekolah
 NARRATOR_TOKENS_OOC          = 800
 
 # ── TEMP CONFIG ──
@@ -116,22 +116,20 @@ def _benchmark_label(total: int, level: str) -> str:
 
 def _validate_numbers_in_narasi(narasi: str, expected_numbers) -> Optional[str]:
     """
-    Return narasi jika semua angka kritis masih ada di teks.
-    Return None jika ada angka yang hilang — caller harus fallback ke template.
-    Menerima format: 1234, 1.234, 1,234, 1 234 (pemisah ribuan berbeda-beda).
-    Menerima expected_numbers sebagai dict {label: value} atau list [value, ...].
-    """
+    Return narasi jika semua angka kritis ada di teks.
+    Return None jika ada angka kritis yang hilang.
 
+    Menerima variasi format angka Indonesia:
+    - 4414, 4.414, 4,414 (pemisah ribuan)
+    - Angka dibulatkan (4.400 untuk 4.414) — toleransi ±2%
+    """
     import re as _re
 
     def _normalize(text: str) -> str:
-        # Hapus semua pemisah ribuan (titik, koma, spasi)
         return _re.sub(r"[.,\s]", "", text)
 
-    # Normalisasi narasi
     narasi_normalized = _normalize(narasi)
 
-    # Normalise ke list of (label, val) pairs agar bisa terima dict atau list
     if isinstance(expected_numbers, dict):
         items = list(expected_numbers.items())
     else:
@@ -141,14 +139,28 @@ def _validate_numbers_in_narasi(narasi: str, expected_numbers) -> Optional[str]:
         if val is None:
             continue
 
-        val_str = _normalize(str(int(val)))
+        val_int = int(val)
+        val_str = _normalize(str(val_int))
 
-        if val_str not in narasi_normalized:
-            logger.warning(
-                "[Narrator] Angka kritis hilang dari narasi — label=%s expected=%s",
-                label, val
+        # Cek exact match (setelah normalisasi)
+        if val_str in narasi_normalized:
+            continue
+
+        # Toleransi ±2% untuk pembulatan LLM (khusus angka besar > 100)
+        if val_int > 100:
+            tolerance = max(1, int(val_int * 0.02))
+            found = any(
+                _normalize(str(v)) in narasi_normalized
+                for v in range(val_int - tolerance, val_int + tolerance + 1)
             )
-            return None
+            if found:
+                continue
+
+        logger.warning(
+            "[Narrator] Angka kritis hilang dari narasi — label=%s expected=%s",
+            label, val
+        )
+        return None
 
     return narasi
 
@@ -178,6 +190,29 @@ def _enrich_template_on_validation_fail(
     )
     catatan = f"\n\n> _Data ringkas: {angka_str}._" if angka_str else ""
     return f"{template_md}{catatan}"
+
+
+def _build_wilayah_display_name(wilayah: str, wilayah_level: str) -> tuple:
+    """
+    Bangun nama tampilan wilayah yang jelas membedakan Kab vs Kota.
+
+    Returns:
+        (display_name: str, is_ambiguous: bool)
+        is_ambiguous=True jika level=kabupaten tapi tidak ada prefix kota/kab.
+    """
+    w_lower = wilayah.lower().strip()
+    if w_lower.startswith("kota "):
+        return wilayah.title(), False
+    elif w_lower.startswith(("kabupaten ", "kab. ", "kab ")):
+        return wilayah.title(), False
+    elif wilayah_level == "kabupaten":
+        return f"Kabupaten/Kota {wilayah.title()}", True
+    elif wilayah_level == "provinsi":
+        return f"Provinsi {wilayah.title()}", False
+    elif wilayah_level == "kecamatan":
+        return f"Kecamatan {wilayah.title()}", False
+    else:
+        return wilayah.title(), False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -888,18 +923,13 @@ def _prompt_school_list(
     wilayah_level: str = "",
     qc_summary: Optional[str] = None,
 ) -> str:
-    _LEVEL_LABEL = {
-        "provinsi": "Provinsi",
-        "kabupaten": "Kabupaten/Kota",
-        "kecamatan": "Kecamatan",
-        "desa_kelurahan": "Desa/Kelurahan",
-    }
-    level_desc = _LEVEL_LABEL.get(wilayah_level, "")
-    _wilayah_lower = wilayah.lower()
-    if _wilayah_lower.startswith("kabupaten ") or _wilayah_lower.startswith("kota "):
-        wilayah_full = wilayah.title()
-    else:
-        wilayah_full = f"{level_desc} {wilayah}".strip() if level_desc else wilayah
+    wilayah_full, _is_ambiguous = _build_wilayah_display_name(wilayah, wilayah_level)
+    _nama_clean = wilayah.title()
+    _ambiguity_disclaimer = (
+        f"\n\n*Catatan: Pencarian ini mencakup Kabupaten {_nama_clean} dan "
+        f"Kota {_nama_clean} sekaligus. "
+        f"Gunakan prefix \"kota\" atau \"kabupaten\" untuk memfilter lebih spesifik.*"
+    ) if _is_ambiguous else ""
     # Gunakan breakdown dari ES aggregation jika tersedia,
     # fallback ke hitung dari sampel
     if breakdown_jenjang:
@@ -1005,6 +1035,9 @@ def _prompt_school_list(
             "Sertakan dalam narasi:\n"
             "- Jumlah total sekolah bermasalah yang ditemukan\n"
             + contoh_instruksi +
+            "- Untuk setiap sekolah: sebutkan nama, lokasi, dan maksimal 3 masalah utama. "
+            "Jika lebih dari 3 masalah, tulis 'dan N masalah lainnya'.\n"
+            "- Jangan ulangi masalah yang sama di banyak sekolah — fokus pada yang unik/parah.\n"
             "- Jangan sebutkan breakdown akreditasi kecuali diminta\n"
             f"\nData masalah:\n{qc_summary}"
         )
@@ -1027,6 +1060,7 @@ INSTRUKSI NARASI:
 2. Tulis 3-4 kalimat ringkasan: sebutkan total {total:,} sekolah, filter aktif, dan komposisi dominan.
 3. Jika {ditampilkan} < {total:,}: informasikan bahwa masih ada data lain dan sarankan filter lebih spesifik.
 4. JANGAN tulis narasi panjang tentang distribusi wilayah atau implikasi — user minta LIST, bukan analisis.
+5. Sertakan catatan berikut di akhir respons jika ada:{_ambiguity_disclaimer}
 
 NARASI:"""
 
@@ -1616,8 +1650,15 @@ async def narrate_school_profile(
     profile_data: Dict[str, Any],
     template_md: str,
     query: str = "",
+    is_weak_match: bool = False,
 ) -> str:
     """Narasi profil sekolah. profile_data adalah dict hasil dari ES."""
+    _weak_disclaimer = (
+        "\n\n> ⚠️ **Catatan:** Hasil ini merupakan kecocokan terdekat berdasarkan nama "
+        "dan lokasi. Jika bukan sekolah yang dimaksud, coba tambahkan kecamatan, "
+        "kabupaten, atau gunakan NPSN untuk pencarian yang lebih akurat."
+    ) if is_weak_match else ""
+
     if not profile_data:
         return _zero_result_message(
             profile_data.get("nama", "sekolah yang dimaksud") if profile_data else "sekolah yang dimaksud",
@@ -1641,7 +1682,7 @@ async def narrate_school_profile(
                                 )
 
     if not narasi:
-        return template_md
+        return f"{template_md}{_weak_disclaimer}"
 
     # Validasi angka kritis: guru dan siswa wajib ada di narasi
     f_check = _extract_profile_fields(profile_data)
@@ -1651,7 +1692,7 @@ async def narrate_school_profile(
     }.items() if v}
     if expected and not _validate_numbers_in_narasi(narasi, expected):
         logger.warning("[Narrator] Validasi angka gagal (profile), pakai template")
-        return template_md
+        return f"{template_md}{_weak_disclaimer}"
 
     # Validasi: nama sekolah wajib ada persis di narasi (tanpa diubah LLM)
     nama_sekolah = (profile_data or {}).get("nama", "")
@@ -1660,9 +1701,9 @@ async def narrate_school_profile(
             "[Narrator] Nama sekolah '%s' tidak ditemukan di narasi, pakai template",
             nama_sekolah,
         )
-        return template_md
+        return f"{template_md}{_weak_disclaimer}"
 
-    return f"{template_md}\n\n---\n\n{narasi}"
+    return f"{template_md}\n\n---\n\n{narasi}{_weak_disclaimer}"
 
 
 def narrate_qc_percentage(

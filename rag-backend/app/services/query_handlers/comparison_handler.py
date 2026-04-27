@@ -16,6 +16,7 @@ from app.services.core.aggregation_core import (
     execute_aggregation_query,
     normalize_entity_hierarchy,
     execute_nested_aggregation_query,
+    _build_provinsi_filter,
 )
 from app.services.query_handlers import profile_handler
 from app.services.core.es_query_builder import extract_filters_from_intent
@@ -23,7 +24,15 @@ from app.services.confidence_engine import compute_comparison_confidence
 from app.utils.location_utils import fuzzy_match_location, fuzzy_correct_words
  
 logger = logging.getLogger(__name__)
- 
+
+
+def _canonicalize_provinsi(raw: str) -> str:
+    """Add 'prov. ' prefix if missing — ES stores provinsi as 'prov. jawa tengah'."""
+    s = raw.lower().strip()
+    if not s.startswith("prov.") and not s.startswith("prov "):
+        return f"prov. {s}"
+    return s
+
 
 def _build_school_vs_school_response(school_a, school_b, query):
     return {
@@ -95,7 +104,13 @@ def detect_status_sekolah(text: str) -> Optional[str]:
 # =====================================================
  
 # Separator untuk memisahkan dua sisi lokasi
-VS_SEPARATORS = [" vs ", " versus ", " dan ", " with ", " dengan ", ", "]
+# "atau" harus ada di VS_SEPARATORS untuk deteksi school-vs-school
+VS_SEPARATORS = [" vs ", " versus ", " atau ", " dan ", " with ", " dengan ", ", "]
+
+# Strong = separator eksplisit untuk perbandingan dua hal berbeda
+_STRONG_SEPARATORS = [" atau ", " vs ", " versus ", " dibanding ", " dibandingkan dengan "]
+# Weak = bisa juga kalimat biasa; hanya dipilih jika tidak ada strong separator
+_WEAK_SEPARATORS   = [" dan ", " with ", " dengan ", ", "]
  
 COMPARISON_KEYWORDS = (
     "vs", "versus", "bandingkan", "dibandingkan",
@@ -226,26 +241,65 @@ def graceful_error_response() -> Dict[str, Any]:
     }
  
  
-def _build_comparison_agg_query(entities: dict, jenjang: str = None) -> dict:
+def _build_comparison_agg_query(
+    entities: dict,
+    jenjang: str = None,
+    qf: dict = None,
+) -> dict:
+    import json as _json
     filters = []
 
     for field in ["provinsi", "kabupaten", "kecamatan", "desa_kelurahan"]:
-        if entities.get(field):
-            filters.append({"term": {field: entities[field]}})
+        val = entities.get(field)
+        if val:
+            if field == "provinsi":
+                filters.append(_build_provinsi_filter(val))
+            else:
+                filters.append({"term": {field: val}})
 
     if jenjang:
         filters.append({"term": {"bentuk_pendidikan": jenjang}})
 
+    # ── QC Filters ──────────────────────────────────────────────────────────
+    if qf:
+        if qf.get("qc_masalah_only"):
+            filters.append({"range": {"qc_score.total_masalah": {"gte": 1}}})
+
+        if qf.get("qc_min_masalah") is not None:
+            _qc_gte = max(1, int(qf["qc_min_masalah"]))
+            # Merge with existing total_masalah range if already added
+            filters = [
+                f for f in filters
+                if not (isinstance(f, dict) and "range" in f and "qc_score.total_masalah" in f.get("range", {}))
+            ]
+            filters.append({"range": {"qc_score.total_masalah": {"gte": _qc_gte}}})
+
+        if qf.get("qc_field") is not None:
+            _qf_num = int(qf["qc_field"])
+            if 1 <= _qf_num <= 13:
+                filters.append({"range": {f"qc.qc_{_qf_num}": {"gte": 2}}})
+
+        for _qf_num in (qf.get("qc_field_list") or []):
+            if isinstance(_qf_num, int) and 1 <= _qf_num <= 13:
+                filters.append({"range": {f"qc.qc_{_qf_num}": {"gte": 2}}})
+
+        if qf.get("qc_persen_max") is not None:
+            filters.append({"range": {"qc_score.persen_bersih": {"lte": float(qf["qc_persen_max"])}}})
+        elif qf.get("qc_persen_min") is not None:
+            filters.append({"range": {"qc_score.persen_bersih": {"gte": float(qf["qc_persen_min"])}}})
+
     # pakai npsn langsung (karena sudah keyword)
     count_field = "npsn"
 
-    return {
+    query_body = {
         "size": 0,
         "query": {"bool": {"filter": filters}},
         "aggs": {
             "total_sekolah": {"value_count": {"field": count_field}},
         }
     }
+    logger.debug("[COMPARISON_AGG] ES query: %s", _json.dumps(query_body, default=str)[:800])
+    return query_body
 # =====================================================
 # MAIN HANDLER
 # =====================================================
@@ -394,11 +448,17 @@ async def handle_comparison_query(
         )
  
     if _intent_has_both:
+        _w1 = _iw["wilayah_1"]
+        _w2 = _iw["wilayah_2"]
+        _scope = _iw["scope"]
+        if _scope == "provinsi":
+            _w1 = _canonicalize_provinsi(_w1)
+            _w2 = _canonicalize_provinsi(_w2)
         logger.info(
             "[COMPARISON] intent.wilayah trusted: w1=%s w2=%s scope=%s → skip resolver",
-            _iw["wilayah_1"], _iw["wilayah_2"], _iw["scope"],
+            _w1, _w2, _scope,
         )
-        locations = [{_iw["scope"]: _iw["wilayah_1"]}, {_iw["scope"]: _iw["wilayah_2"]}]
+        locations = [{_scope: _w1}, {_scope: _w2}]
     elif vs_result and isinstance(vs_result, list) and len(vs_result) >= 2:
         locations = vs_result
     else:
@@ -477,7 +537,7 @@ async def handle_comparison_query(
         # Ambil jenjang untuk avg comparison
         jenjang = qf.get("bentuk_pendidikan")
 
-        agg_query = _build_comparison_agg_query(entities, jenjang)
+        agg_query = _build_comparison_agg_query(entities, jenjang, qf=qf)
 
         es_result = await es_client.search(
             index=os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc"),
@@ -780,12 +840,17 @@ async def _resolve_vs_query(
         # fallback ke logic separator lama
         left_raw, right_raw = None, None
     
-    # Cari separator yang ada
+    # Cari separator: strong separator lebih diprioritaskan dari weak separator
     sep = None
-    for s in VS_SEPARATORS:
+    for s in _STRONG_SEPARATORS:
         if s in q:
             sep = s
             break
+    if not sep:
+        for s in _WEAK_SEPARATORS:
+            if s in q:
+                sep = s
+                break
     if not sep:
         return None
  
@@ -793,7 +858,8 @@ async def _resolve_vs_query(
         parts = q.split(sep, 1)
         if len(parts) != 2:
             return None
-        left_raw, right_raw = parts[0].strip(), parts[1].strip()
+        left_raw  = parts[0].strip()
+        right_raw = parts[1].strip().rstrip("?!., ")
  
     # ── FIX: Deteksi status sekolah SEBELUM membuang kata ─────
     status_left  = detect_status_sekolah(left_raw)
@@ -801,7 +867,45 @@ async def _resolve_vs_query(
  
     left_clean  = _clean_location_part(left_raw)
     right_clean = _clean_location_part(right_raw)
- 
+
+    # ── Deteksi dual-entity atau sisi terlalu panjang ─────────────────────
+    # Case 1: salah satu sisi masih mengandung " atau " setelah split
+    #   → kedua lokasi ada dalam satu sisi (terjadi saat sep bukan " atau ")
+    # Case 2: satu sisi > 5 token DAN ada koma di raw-nya
+    #   → sisi sebelah kiri adalah deskripsi + lokasi; ambil bagian setelah koma
+    for _side_attr in ("left", "right"):
+        _side_clean = left_clean if _side_attr == "left" else right_clean
+        _side_raw   = left_raw   if _side_attr == "left" else right_raw
+
+        if " atau " in _side_clean:
+            sub = _side_clean.split(" atau ", 1)
+            cand_a = sub[0].strip().rstrip("?!., ")
+            cand_b = sub[1].strip().rstrip("?!., ")
+            if (1 <= len(cand_a.split()) <= 4 and
+                    1 <= len(cand_b.split()) <= 4 and
+                    len(cand_a) > 2 and len(cand_b) > 2):
+                left_clean  = cand_a
+                right_clean = cand_b
+                logger.info(
+                    "[VS_RESOLVE] Dual-location in one side: '%s' → '%s' | '%s'",
+                    _side_clean, left_clean, right_clean,
+                )
+                break
+
+        elif len(_side_clean.split()) > 5 and "," in _side_raw:
+            after_comma = _side_raw.rsplit(",", 1)[-1].strip()
+            candidate   = _clean_location_part(after_comma).rstrip("?!., ")
+            if candidate and 1 <= len(candidate.split()) <= 4:
+                if _side_attr == "left":
+                    left_clean = candidate
+                else:
+                    right_clean = candidate
+                logger.info(
+                    "[VS_RESOLVE] Extracted location after comma from long side: '%s' → '%s'",
+                    _side_raw, candidate,
+                )
+    # ─────────────────────────────────────────────────────────────────────
+
     logger.debug("[VS_RESOLVE] sep=%r left=%r right=%r status_left=%s status_right=%s",
                  sep, left_clean, right_clean, status_left, status_right)
  
@@ -951,7 +1055,15 @@ async def _resolve_vs_query(
     for loc_text in [left_clean, right_clean]:
         if not loc_text:
             continue
- 
+
+        # Guard: teks > 5 token hampir pasti bukan nama lokasi
+        if len(loc_text.strip().split()) > 5:
+            logger.info(
+                "[VS_RESOLVE] Skipping non-location text (%d tokens): '%s'",
+                len(loc_text.split()), loc_text,
+            )
+            continue
+
         # ── Fuzzy correction untuk typo single-word location ────────────
         # Contoh: "parunpanjang" → "parungpanjang"
         # Hanya berlaku jika loc_text adalah satu kata (typo sederhana)

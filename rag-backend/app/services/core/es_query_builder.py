@@ -548,5 +548,24 @@ def extract_filters_from_intent(intent) -> Dict[str, Any]:
     if getattr(intent, "yayasan", None):
         filters["penyelenggara"] = intent.yayasan
 
+    # ── QC Filters ──────────────────────────────────────────────────────────
+    if getattr(intent, "qc_masalah_only", False):
+        filters["qc_masalah_only"] = True
+
+    if getattr(intent, "qc_min_masalah", None) is not None:
+        filters["qc_min_masalah"] = intent.qc_min_masalah
+
+    if getattr(intent, "qc_field", None) is not None:
+        filters["qc_field"] = intent.qc_field
+
+    if getattr(intent, "qc_field_list", None):
+        filters["qc_field_list"] = list(intent.qc_field_list)
+
+    if getattr(intent, "qc_persen_min", None) is not None:
+        filters["qc_persen_min"] = float(intent.qc_persen_min)
+
+    if getattr(intent, "qc_persen_max", None) is not None:
+        filters["qc_persen_max"] = float(intent.qc_persen_max)
+
     return filters
 

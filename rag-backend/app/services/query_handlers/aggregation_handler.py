@@ -157,8 +157,13 @@ _JAKARTA_KABUPATEN_CANONICAL: dict = {
     "jakarta utara":   "kota adm. jakarta utara",
     "jakarta":         "kota adm. jakarta pusat",   # fallback jika standalone
 }
-_JAKARTA_PROVINSI_CANONICAL = "prov. dki jakarta"
-_JAKARTA_PROVINSI_ALIASES: frozenset = frozenset({"dki jakarta", "dki", "jakarta"})
+_JAKARTA_PROVINSI_CANONICAL = "prov. d.k.i. jakarta"  # Format aktual di ES index
+_JAKARTA_PROVINSI_ALIASES: frozenset = frozenset({
+    "dki jakarta", "dki", "jakarta",
+    "prov. dki jakarta",
+    "d.k.i. jakarta",
+    "dki jakarta raya",
+})
 
 # Nama kota yang ambigu: ada kab. X dan kota X sekaligus.
 # Untuk nama ini tanpa prefix eksplisit, jangan auto-trust → biarkan resolver
@@ -372,7 +377,10 @@ async def handle_aggregation_query(
 
                 if getattr(w, "provinsi", None):
                     prov_raw = w.provinsi.lower().strip()
-                    if prov_raw in _JAKARTA_PROVINSI_ALIASES or "dki" in prov_raw:
+                    if (prov_raw in _JAKARTA_PROVINSI_ALIASES
+                            or "dki" in prov_raw
+                            or "d.k.i" in prov_raw
+                            or prov_raw == "jakarta"):
                         wilayah_from_intent["provinsi"] = _JAKARTA_PROVINSI_CANONICAL
                         logger.info(
                             "[AGG] DKI Jakarta provinsi remap: '%s' → '%s'",
@@ -580,6 +588,22 @@ async def handle_aggregation_query(
         if getattr(intent, 'qc_min_masalah', None) is not None:
             entities['qc_min_masalah'] = intent.qc_min_masalah
             logger.debug("[AGG_BRIDGE_EARLY] qc_min_masalah: %s", intent.qc_min_masalah)
+
+        if getattr(intent, 'qc_field', None) is not None:
+            entities['qc_field'] = intent.qc_field
+            logger.debug("[AGG_BRIDGE_EARLY] qc_field: %s", intent.qc_field)
+
+        if getattr(intent, 'qc_field_list', None):
+            entities['qc_field_list'] = list(intent.qc_field_list)
+            logger.debug("[AGG_BRIDGE_EARLY] qc_field_list: %s", intent.qc_field_list)
+
+        if getattr(intent, 'qc_persen_min', None) is not None:
+            entities['qc_persen_min'] = float(intent.qc_persen_min)
+            logger.debug("[AGG_BRIDGE_EARLY] qc_persen_min: %s", intent.qc_persen_min)
+
+        if getattr(intent, 'qc_persen_max', None) is not None:
+            entities['qc_persen_max'] = float(intent.qc_persen_max)
+            logger.debug("[AGG_BRIDGE_EARLY] qc_persen_max: %s", intent.qc_persen_max)
 
         if getattr(intent, 'metric_target', None):
             entities['metric_target'] = intent.metric_target

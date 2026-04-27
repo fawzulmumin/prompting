@@ -18,23 +18,21 @@ class ProfileSearchService:
     # SEARCH BY NPSN
     # =====================================================
     async def search_by_npsn(self, npsn: str, year: int | None = None) -> dict:
- 
-        filters = [{"term": {"npsn": npsn}}]
- 
-        if year:
-            filters.append({"term": {"tahun": year}})
- 
+        """
+        Cari sekolah berdasarkan NPSN.
+        NPSN adalah identifier unik — hasilnya pasti 0 atau 1 dokumen,
+        tidak perlu sort. Field 'tahun' tidak ada di ES mapping idx_sekolah_qc,
+        sehingga sort by 'tahun' menyebabkan BadRequestError 400.
+        Parameter year dipertahankan di signature untuk backward compatibility.
+        """
         query = {
             "query": {
                 "bool": {
-                    "filter": filters
+                    "filter": [{"term": {"npsn": npsn}}]
                 }
-            },
-            "sort": [
-                {"tahun": {"order": "desc"}}
-            ]
+            }
         }
- 
+
         return await self._execute(query)
  
     # =====================================================

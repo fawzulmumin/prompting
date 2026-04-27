@@ -990,6 +990,24 @@ class ListSchoolHandler:
                 _wil_val   = _intent_wil.desa.lower().strip()
                 _wil_level = "desa_kelurahan"
 
+            # Override: router mungkin memberi bare name (tanpa "kota" prefix)
+            # tapi query original user mengandung "kota X" secara eksplisit
+            if (
+                _wil_level == "kabupaten"
+                and _wil_val
+                and not _wil_val.startswith("kota ")
+            ):
+                _q_lower = query.lower()
+                if (
+                    re.search(r"\bkota\b", _q_lower)
+                    and not re.search(r"\b(kabupaten|kab\.?)\b", _q_lower)
+                ):
+                    _wil_val = f"kota {_wil_val}"
+                    logger.info(
+                        "[LIST] Override want_kota=True dari query original: '%s' → wilayah='%s'",
+                        query[:60], _wil_val,
+                    )
+
             if _wil_val and _wil_level:
                 parsed["wilayah"]       = _wil_val
                 parsed["wilayah_level"] = _wil_level
