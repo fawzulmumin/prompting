@@ -22,20 +22,21 @@ logger = logging.getLogger(__name__)
 
 # Timeout khusus narasi — lebih pendek dari total request budget (~30s)
 # Dengan retry_strategy di deepseek.py (2 attempts, 1s wait):
-#   worst-case = TIMEOUT * 2 + 1 ≈ 25s (simple) / 31s (aggregation with breakdown)
+#   worst-case = TIMEOUT + 1 + TIMEOUT ≈ 35s (simple) / 41s (aggregation with breakdown)
 # asyncio.wait_for di _call_narrator memastikan hard-cap tidak terlampaui.
 # Grace period +5s antara call_deepseek(timeout=T) dan wait_for(timeout=T+5)
 # mencegah race condition: asyncio membunuh coroutine SEBELUM tenacity sempat retry.
+# call_deepseek meneruskan timeout sebagai httpx read timeout — tidak perlu ubah deepseek.py.
 # ── TIMEOUT CONFIG ──
-NARRATOR_TIMEOUT             = 20   # simple narasi — hard cap 20s (naik dari 10s)
-NARRATOR_TIMEOUT_AGGREGATION = 25   # aggregation + breakdown — lebih longgar (naik dari 13s)
+NARRATOR_TIMEOUT             = 35   # simple narasi — hard cap 35s (naik dari 20s)
+NARRATOR_TIMEOUT_AGGREGATION = 40   # aggregation + breakdown — lebih longgar (naik dari 25s)
 _NARRATOR_WAIT_FOR_GRACE     = 5    # detik ekstra untuk asyncio.wait_for di atas timeout LLM
 
 # ── TOKEN CONFIG ──
 NARRATOR_TOKENS_PROFILE      = 1500
-NARRATOR_TOKENS_AGGREGATION  = 1200
+NARRATOR_TOKENS_AGGREGATION  = 1400
 NARRATOR_TOKENS_COMPARISON   = 1000
-NARRATOR_TOKENS_LIST         = 1500  # Dinaikkan untuk list dengan banyak masalah per sekolah
+NARRATOR_TOKENS_LIST         = 2000  # Dinaikkan untuk list dengan banyak masalah per sekolah
 NARRATOR_TOKENS_OOC          = 800
 
 # ── TEMP CONFIG ──
@@ -77,8 +78,8 @@ _SYSTEM_BASE = (
     "- Tulis dalam paragraf, bukan poin-poin (kecuali diminta atau untuk daftar nama).\n"
     "- Jika ada data tabular, sajikan dalam tabel Markdown sebelum analisis.\n"
     "- Gunakan heading ### hanya jika ada 2+ sub-topik yang perlu dibedakan.\n"
-    "- Panjang respons: 150-300 kata untuk query sederhana, "
-    "  300-500 kata untuk query multi-modul atau kompleks.\n\n"
+    "- Panjang respons: 200-400 kata untuk query sederhana, "
+    "  400-700 kata untuk query multi-modul, QC data, atau kompleks.\n\n"
 
     "LARANGAN KERAS:\n"
     "- Dilarang menambahkan angka, nama sekolah, atau fakta baru di luar konteks.\n"
@@ -128,7 +129,11 @@ def _validate_numbers_in_narasi(narasi: str, expected_numbers) -> Optional[str]:
     def _normalize(text: str) -> str:
         return _re.sub(r"[.,\s]", "", text)
 
-    narasi_normalized = _normalize(narasi)
+    def _normalize_for_validation(text: str) -> str:
+        """Hapus titik pemisah ribuan Indonesia (digit.3digit) sebelum normalisasi penuh."""
+        return _re.sub(r'(\d)\.(\d{3})(?!\d)', r'\1\2', text)
+
+    narasi_normalized = _normalize(_normalize_for_validation(narasi))
 
     if isinstance(expected_numbers, dict):
         items = list(expected_numbers.items())
@@ -462,7 +467,24 @@ def _prompt_aggregation(
             + pct_instruksi
             + drilldown_instruksi +
             "\n\n## Implikasi\n"
-            "Satu kalimat nilai praktis untuk perencanaan pendidikan."
+            "Satu kalimat nilai praktis untuk perencanaan pendidikan.\n\n"
+            "LARANGAN (jangan lakukan ini):\n"
+            "- JANGAN tulis bagian dengan header \"Implikasi\", \"Rekomendasi Kebijakan\", "
+            "\"Saran\", atau sejenisnya.\n"
+            "- JANGAN tulis analisis makro tentang dampak kebijakan pemerintah daerah, "
+            "ketimpangan pendidikan, atau rekomendasi strategis.\n"
+            "- JANGAN menggunakan frasa seperti \"Data ini dapat menjadi acuan bagi pemerintah\", "
+            "\"diperlukan intervensi\", atau sejenisnya.\n"
+            "- JANGAN menyisipkan analisis atau opini di dalam paragraf komposisi, "
+            "misalnya kalimat seperti: "
+            "\"yang mungkin memerlukan perhatian khusus\", "
+            "\"yang perlu mendapat perhatian pemerintah\", "
+            "\"menunjukkan ketimpangan yang perlu diatasi\", "
+            "\"mengindikasikan perlunya intervensi\".\n"
+            "- Setiap paragraf harus berisi FAKTA DAN ANGKA SAJA dari data yang disuplai. "
+            "Tidak boleh ada interpretasi makro atau rekomendasi tersembunyi di dalam paragraf data.\n"
+            "- Boleh menulis 1 kalimat penutup yang mengundang pertanyaan lanjutan dari user, "
+            "tapi isinya harus terbatas pada data yang sudah disuplai (jenjang, status, wilayah, dsb)."
         )
     else:
         instruksi = (
@@ -472,7 +494,24 @@ def _prompt_aggregation(
             "Kalimat 2: Bandingkan dengan benchmark — gunakan label konteks yang "
             "sudah disediakan (banyak/sedang/sedikit).\n"
             "Kalimat 3: Satu implikasi praktis bagi perencanaan pendidikan di wilayah ini.\n"
-            f"LARANGAN KERAS: Jangan tulis angka selain {total:,} untuk jumlah {metric_label}."
+            f"LARANGAN KERAS: Jangan tulis angka selain {total:,} untuk jumlah {metric_label}.\n\n"
+            "LARANGAN (jangan lakukan ini):\n"
+            "- JANGAN tulis bagian dengan header \"Implikasi\", \"Rekomendasi Kebijakan\", "
+            "\"Saran\", atau sejenisnya.\n"
+            "- JANGAN tulis analisis makro tentang dampak kebijakan pemerintah daerah, "
+            "ketimpangan pendidikan, atau rekomendasi strategis.\n"
+            "- JANGAN menggunakan frasa seperti \"Data ini dapat menjadi acuan bagi pemerintah\", "
+            "\"diperlukan intervensi\", atau sejenisnya.\n"
+            "- JANGAN menyisipkan analisis atau opini di dalam paragraf komposisi, "
+            "misalnya kalimat seperti: "
+            "\"yang mungkin memerlukan perhatian khusus\", "
+            "\"yang perlu mendapat perhatian pemerintah\", "
+            "\"menunjukkan ketimpangan yang perlu diatasi\", "
+            "\"mengindikasikan perlunya intervensi\".\n"
+            "- Setiap paragraf harus berisi FAKTA DAN ANGKA SAJA dari data yang disuplai. "
+            "Tidak boleh ada interpretasi makro atau rekomendasi tersembunyi di dalam paragraf data.\n"
+            "- Boleh menulis 1 kalimat penutup yang mengundang pertanyaan lanjutan dari user, "
+            "tapi isinya harus terbatas pada data yang sudah disuplai (jenjang, status, wilayah, dsb)."
         )
 
     # ── Filter aktif & persentase ────────────────────────────────────────────
@@ -731,32 +770,49 @@ def _prompt_comparison_lokasi(
             breakdown_section = "\n\nBREAKDOWN PER LOKASI:\n" + "\n".join(breakdown_lines)
 
     # ── Instruksi adaptif berdasarkan intent ─────────────────────────────────
+    _tabel_instruksi = (
+        "1. Tampilkan tabel perbandingan berikut WAJIB di awal respons:\n\n"
+        "   | Metrik | [nama wilayah 1] | [nama wilayah 2] |\n"
+        "   |--------|-----------------|------------------|\n"
+        "   | Total Sekolah | [angka dari data] | [angka dari data] |\n"
+        "   | Selisih Absolut | [hitung dari data] | - |\n"
+        "   | Selisih Relatif | [hitung persen] | - |\n\n"
+        "   Isi semua nilai dari DATA yang disuplai. JANGAN mengarang angka.\n"
+    )
+
     if _wants_avg and avg_section:
         instruksi = (
-            "INSTRUKSI NARASI (4-5 kalimat, TANPA bullet point, TANPA heading):\n"
-            "1. JAWAB langsung: sebutkan rata-rata siswa/sekolah masing-masing wilayah dengan angka persis.\n"
-            "2. Nyatakan wilayah mana yang lebih padat berdasarkan rata-rata — bukan jumlah sekolah.\n"
-            f"3. Jika ada filter jenjang ({_jenjang_req or 'semua'}), sebutkan secara eksplisit.\n"
-            "4. Boleh sebut jumlah sekolah sebagai konteks pendukung, bukan jawaban utama.\n"
-            "5. Tutup dengan satu kalimat interpretasi singkat."
+            "INSTRUKSI NARASI:\n"
+            + _tabel_instruksi +
+            "2. JAWAB langsung: sebutkan rata-rata siswa/sekolah masing-masing wilayah dengan angka persis.\n"
+            "3. Nyatakan wilayah mana yang lebih padat berdasarkan rata-rata — bukan jumlah sekolah.\n"
+            f"4. Jika ada filter jenjang ({_jenjang_req or 'semua'}), sebutkan secara eksplisit.\n"
+            "5. Tutup dengan 1 kalimat yang mengundang pertanyaan lanjutan.\n"
+            "6. JANGAN tulis analisis implikasi kebijakan, opini, atau rekomendasi di luar data yang disuplai."
         )
     elif _jenjang_req:
         instruksi = (
-            f"INSTRUKSI NARASI (4-5 kalimat, TANPA bullet point, TANPA heading):\n"
-            f"1. Fokus pada jenjang {_jenjang_req}: sebutkan jumlahnya di masing-masing wilayah.\n"
-            "2. JANGAN jadikan total sekolah semua jenjang sebagai jawaban utama.\n"
-            "3. Sebutkan selisih dan interpretasikan signifikansinya.\n"
-            "4. Jika ada breakdown status: sebutkan proporsi negeri vs swasta.\n"
-            "5. Tutup dengan catatan praktis."
+            "INSTRUKSI NARASI:\n"
+            + _tabel_instruksi +
+            f"2. Fokus pada jenjang {_jenjang_req}: sebutkan jumlahnya di masing-masing wilayah.\n"
+            "   JANGAN jadikan total sekolah semua jenjang sebagai jawaban utama.\n"
+            "3. Jika ada breakdown jenjang atau status dari data: sebutkan dalam 1-2 kalimat tambahan.\n"
+            "4. Tutup dengan 1 kalimat yang mengundang pertanyaan lanjutan.\n"
+            "5. JANGAN tulis analisis implikasi kebijakan, opini, atau rekomendasi di luar data yang disuplai."
         )
     else:
         instruksi = (
-            "INSTRUKSI NARASI (4-5 kalimat, TANPA bullet point, TANPA heading):\n"
-            "1. Sebutkan kedua wilayah dan jumlah sekolah masing-masing secara eksplisit.\n"
-            "2. Sebutkan selisih absolut dan persentase — interpretasikan signifikansinya.\n"
-            "3. Jika ada breakdown jenjang: sebutkan jenjang dominan di masing-masing wilayah.\n"
-            "4. Jika ada breakdown status: interpretasikan proporsi negeri vs swasta.\n"
-            "5. Tutup dengan catatan praktis: apa yang perlu didalami lebih lanjut."
+            "INSTRUKSI NARASI:\n"
+            + _tabel_instruksi +
+            "2. Tulis paragraf analisis singkat (2-3 kalimat): sebutkan mana\n"
+            "   yang lebih banyak/besar, selisih absolutnya berapa, dan\n"
+            "   selisih relatifnya berapa persen.\n"
+            "3. Jika ada breakdown jenjang atau status dari data: sebutkan\n"
+            "   dalam 1-2 kalimat tambahan.\n"
+            "4. Tutup dengan 1 kalimat yang mengundang pertanyaan lanjutan,\n"
+            "   misalnya: rincian berdasarkan jenjang, status, atau kecamatan.\n"
+            "5. JANGAN tulis analisis implikasi kebijakan, opini, atau\n"
+            "   rekomendasi di luar data yang sudah disuplai."
         )
 
     return f"""{_SYSTEM_BASE}
@@ -880,13 +936,23 @@ DATA KOMPOSISI SEKOLAH:
 - Total          : {total:,} sekolah
 - Dominasi       : {dominan} lebih banyak sebesar {abs(pct_diff)}%
 
-INSTRUKSI NARASI (3 kalimat + 1 tabel ringkas, TANPA bullet point di narasi):
-- Tampilkan tabel markdown 2 kolom (Status | Jumlah) SEBELUM narasi.
-- Kalimat 1: Gambaran total dan komposisi negeri vs swasta secara eksplisit.
-- Kalimat 2: Interpretasi dominasi — sebutkan mana yang lebih banyak dan \
-seberapa jauh selisihnya.
-- Kalimat 3: Konteks singkat mengapa pola ini umum terjadi \
-(mis. kota besar cenderung banyak swasta).
+INSTRUKSI NARASI:
+1. Tampilkan tabel perbandingan berikut WAJIB di awal respons:
+
+   | Metrik | Negeri | Swasta |
+   |--------|--------|--------|
+   | Jumlah Sekolah | [angka dari data] | [angka dari data] |
+   | Persentase | [pct dari data]% | [pct dari data]% |
+   | Selisih Absolut | [hitung dari data] | - |
+
+   Isi semua nilai dari DATA yang disuplai. JANGAN mengarang angka.
+2. Tulis paragraf analisis singkat (2-3 kalimat): sebutkan mana yang
+   lebih banyak, selisih absolutnya berapa, dan persentasenya.
+3. Jika ada breakdown jenjang atau konteks tambahan dari data: sebutkan
+   dalam 1-2 kalimat tambahan.
+4. Tutup dengan 1 kalimat yang mengundang pertanyaan lanjutan.
+5. JANGAN tulis analisis implikasi kebijakan, opini, atau rekomendasi
+   di luar data yang disuplai.
 
 NARASI:"""
 
@@ -1039,6 +1105,12 @@ def _prompt_school_list(
             "Jika lebih dari 3 masalah, tulis 'dan N masalah lainnya'.\n"
             "- Jangan ulangi masalah yang sama di banyak sekolah — fokus pada yang unik/parah.\n"
             "- Jangan sebutkan breakdown akreditasi kecuali diminta\n"
+            "- Untuk setiap sekolah bermasalah: jelaskan MENGAPA data tersebut bermasalah, "
+            "bukan hanya MENYEBUTKAN bahwa ada masalah.\n"
+            "- Kelompokkan masalah jika ada pola serupa (mis. banyak sekolah tanpa koordinat GPS, "
+            "atau banyak yang foto sekolah kosong).\n"
+            "- Tulis rekomendasi 1 kalimat apa yang bisa dilakukan "
+            "(mis. verifikasi lapangan, update data di Dapodik).\n"
             f"\nData masalah:\n{qc_summary}"
         )
 
@@ -1056,11 +1128,14 @@ DAFTAR SEKOLAH:
 {school_table}
 
 INSTRUKSI NARASI:
-1. Tampilkan tabel di atas PERSIS seperti adanya di bagian pertama respons.
-2. Tulis 3-4 kalimat ringkasan: sebutkan total {total:,} sekolah, filter aktif, dan komposisi dominan.
-3. Jika {ditampilkan} < {total:,}: informasikan bahwa masih ada data lain dan sarankan filter lebih spesifik.
-4. JANGAN tulis narasi panjang tentang distribusi wilayah atau implikasi — user minta LIST, bukan analisis.
-5. Sertakan catatan berikut di akhir respons jika ada:{_ambiguity_disclaimer}
+1. Tampilkan tabel daftar sekolah (dari DAFTAR SEKOLAH di atas) PERSIS seperti adanya — jangan ubah format, urutan, atau isi tabel.
+2. Tulis paragraf pembuka (2-3 kalimat): sebutkan wilayah, filter aktif, total sekolah yang ditemukan, dan konteks apakah jumlah ini banyak atau sedikit untuk wilayah tersebut.
+3. Tulis paragraf komposisi (2-3 kalimat): bahas komposisi jenjang dan status yang dominan. Sertakan angka dan persentase persis dari data.
+4. Jika {ditampilkan} < {total}: tulis kalimat yang menginformasikan ada {total - ditampilkan:,} sekolah lagi yang tidak ditampilkan. Sarankan user memfilter lebih spesifik: berdasarkan jenjang, status, akreditasi, atau nama kecamatan.
+5. [HANYA jika ini query QC/residu]: Bahas masalah data secara mendalam. Untuk setiap sekolah yang disebutkan, jelaskan masalahnya secara spesifik — jangan hanya menyebut nama sekolah tanpa konteks masalahnya.
+6. Tutup dengan 1 kalimat yang mengundang pertanyaan lanjutan, misalnya: "Apabila Anda membutuhkan informasi lebih detail mengenai sekolah tertentu, silakan tanyakan."
+7. JANGAN tulis analisis kebijakan, opini, atau komentar di luar data yang disuplai.
+8. JANGAN ulangi data yang sudah ada di tabel dalam bentuk bullet point.{_ambiguity_disclaimer}
 
 NARASI:"""
 
@@ -1499,7 +1574,7 @@ async def narrate_aggregation(
         )
         return _enrich_template_on_validation_fail(template_md, expected, context="aggregation")
 
-    return f"{template_md}\n\n---\n\n{narasi}"
+    return narasi
 
 
 async def narrate_comparison_lokasi(
@@ -1532,7 +1607,7 @@ async def narrate_comparison_lokasi(
         )
         return _enrich_template_on_validation_fail(template_md, expected, context="comparison_lokasi")
 
-    return f"{template_md}\n\n---\n\n{narasi}"
+    return narasi
 
 
 async def narrate_comparison_status(
@@ -1570,7 +1645,7 @@ async def narrate_comparison_status(
             template_md, {"negeri": negeri, "swasta": swasta}, context="comparison_status"
         )
 
-    return f"{template_md}\n\n---\n\n{narasi}"
+    return narasi
 
 
 async def narrate_school_list(
@@ -1643,7 +1718,7 @@ async def narrate_school_list(
                 template_md, {"total ditemukan": total}, context="school_list"
             )
 
-    return f"{template_md}\n\n---\n\n{narasi}"
+    return narasi
 
 
 async def narrate_school_profile(

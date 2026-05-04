@@ -214,6 +214,7 @@ class AskResponse(BaseModel):
     completeness_score: Optional[float] = None
     user_id: str
     num_docs: int
+    suggestions: Optional[List[str]] = None
 
 
 # =================================================
@@ -285,6 +286,7 @@ def _base_response(
     completeness_score: Optional[float] = None,
     num_docs: int = 0,
     from_cache: bool = False,
+    suggestions: Optional[List[str]] = None,
 ) -> AskResponse:
     """
     Helper — bangun AskResponse lengkap dengan semua field wajib.
@@ -305,6 +307,7 @@ def _base_response(
         completeness_score=completeness_score,
         user_id=user_id,
         num_docs=num_docs,
+        suggestions=suggestions,
     )
 
 
@@ -1445,9 +1448,23 @@ async def ask_question(
 
     await trigger_background_jobs(response_data, background_tasks)
 
+    _suggestions: Optional[List[str]] = None
+    try:
+        from app.background.suggestion import generate_suggestions, get_suggestions
+        await asyncio.wait_for(
+            generate_suggestions({"query": query}, max_suggestions=4),
+            timeout=1.2,
+        )
+        _sug_result = await get_suggestions(query, max_suggestions=4)
+        _sug_list = _sug_result.get("suggestions", [])
+        _suggestions = _sug_list if _sug_list else None
+    except Exception:
+        pass
+
     return AskResponse(
         **response_data,
         answer_html=markdown_to_safe_html(final_response),
+        suggestions=_suggestions,
     )
 
 

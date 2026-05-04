@@ -141,83 +141,48 @@ async def generate_suggestions(
     if cached:
         return True
 
-    es = await get_es_client()
-
+    # Skip ES path — idx_sekolah_qc bukan index FAQ,
+    # langsung ke contextual fallback
     suggestions: List[Dict[str, Any]] = []
-
-    # ---------------- Elasticsearch path ----------------
-    if es:
-        try:
-            index_name = os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc")
-
-            body = {
-                "query": {
-                    "bool": {
-                        "should": [
-                            {"match": {"content": {"query": normalized, "boost": 2.0}}},
-                            {"match": {"title": {"query": normalized, "boost": 1.5}}},
-                            {"match": {"content": {"query": normalized, "fuzziness": "AUTO", "boost": 0.7}}}
-                        ],
-                        "minimum_should_match": 1
-                    }
-                },
-                "size": max_suggestions * 3,
-                "_source": ["title", "metadata.level"],
-                "sort": [{"_score": {"order": "desc"}}]
-            }
-
-            res = await es.search(index=index_name, body=body)
-
-            seen: Set[str] = set()
-
-            for hit in res.get("hits", {}).get("hits", []):
-                src = hit.get("_source", {})
-                raw_title = src.get("title", "")
-                level = src.get("metadata", {}).get("level", "")
-
-                cleaned = clean_title(raw_title)
-
-                if not cleaned or cleaned in seen:
-                    continue
-
-                if is_too_similar(cleaned, query):
-                    continue
-
-                display = f"{cleaned} ({level})" if level and level not in ["FAQ","General"] else cleaned
-
-                suggestions.append({
-                    "title": display,
-                    "score": hit.get("_score", 0),
-                    "source": "elasticsearch"
-                })
-
-                seen.add(cleaned)
-
-                if len(suggestions) >= max_suggestions:
-                    break
-
-        except Exception as e:
-            logger.warning(f"[Suggestion] Elasticsearch failed, fallback used: {e}")
 
     # ---------------- Fallback path ----------------
     if not suggestions:
+        q_lower = query.lower()
         keywords = extract_keywords(query)
-        templates = [
-            "Apa syarat untuk {}?", "Bagaimana cara {}?", "Berapa biaya {}?",
-            "Kapan jadwal {}?", "Apa keuntungan {}?", "Bagaimana prosedur {}?"
-        ]
+        lokasi = next((w for w in keywords if len(w) > 4), None)
+        lokasi_str = lokasi.capitalize() if lokasi else "wilayah ini"
 
-        for kw in keywords[:3]:
-            for t in templates:
-                suggestions.append({
-                    "title": t.format(kw),
-                    "score": 0.4,
-                    "source": "fallback"
-                })
-                if len(suggestions) >= max_suggestions:
-                    break
-            if len(suggestions) >= max_suggestions:
-                break
+        if any(k in q_lower for k in ("qc", "masalah", "koordinat", "error", "salah", "tidak valid")):
+            fallback_titles = [
+                f"Sekolah mana di {lokasi_str} yang koordinatnya kosong?",
+                f"Berapa sekolah di {lokasi_str} yang datanya tidak lengkap?",
+                "Bagaimana cara memeriksa NPSN sekolah yang tidak valid?",
+                "Apa saja kriteria QC data sekolah yang gagal?",
+            ]
+        elif any(k in q_lower for k in ("jumlah", "berapa", "total", "statistik", "banyak")):
+            fallback_titles = [
+                f"Berapa total sekolah negeri di {lokasi_str}?",
+                f"Apa distribusi jenjang sekolah di {lokasi_str}?",
+                f"Berapa sekolah swasta aktif di {lokasi_str}?",
+                "Bagaimana perbandingan sekolah SD, SMP, SMA di Indonesia?",
+            ]
+        elif any(k in q_lower for k in ("daftar", "list", "tampilkan", "sebutkan", "cari")):
+            fallback_titles = [
+                f"Daftar sekolah negeri di {lokasi_str}",
+                f"Sekolah SMA terbaik di {lokasi_str}",
+                f"Sekolah yang memiliki akreditasi A di {lokasi_str}",
+                "Bagaimana cara mencari sekolah berdasarkan NPSN?",
+            ]
+        else:
+            fallback_titles = [
+                f"Apa informasi terbaru tentang sekolah di {lokasi_str}?",
+                "Bagaimana cara mendaftar ke sekolah negeri?",
+                "Apa perbedaan sekolah negeri dan swasta?",
+                "Berapa total sekolah yang terdaftar di Indonesia?",
+            ]
+
+        for title in fallback_titles[:max_suggestions]:
+            suggestions.append({"title": title, "score": 0.3, "source": "fallback"})
 
     if not suggestions:
         return False

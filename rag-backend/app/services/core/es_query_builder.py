@@ -139,6 +139,7 @@ def build_es_query(
     es_filters: Dict[str, Any],
     size: int = 10,
     from_: int = 0,
+    query_vector: Optional[List[float]] = None,
 ) -> Dict:
     """
     Builder ES query utama (optimized: filter vs scoring dipisah)
@@ -209,20 +210,36 @@ def build_es_query(
     if intent.npsn:
         hard_filters.append({"term": {"npsn": intent.npsn}})
 
-    query = {
-        "query": {
-            "bool": {
-                "must": must_clauses if must_clauses else [{"match_all": {}}],
-                "filter": hard_filters,
-            }
-        },
+    bool_query = {
+        "bool": {
+            "must": must_clauses if must_clauses else [{"match_all": {}}],
+            "filter": hard_filters,
+        }
+    }
+
+    if query_vector and from_ == 0:
+        return {
+            "sub_searches": [
+                {"query": bool_query},
+                {"knn": {
+                    "field": "content_vector",
+                    "query_vector": query_vector,
+                    "k": max(10, size),
+                    "num_candidates": max(100, size * 10),
+                    **({"filter": hard_filters} if hard_filters else {}),
+                }},
+            ],
+            "rank": {"rrf": {"window_size": 50, "rank_constant": 20}},
+            "size": size,
+            "_source": {"excludes": ["content_vector"]},
+        }
+
+    return {
+        "query": bool_query,
         "size": size,
         "from": from_,
-        # Jangan kirim vektor embedding ke LLM — hemat bandwidth & token
         "_source": {"excludes": ["content_vector"]},
     }
-    
-    return query
 
 
 def build_aggregation_query(intent_or_filters, es_filters: Dict = None) -> Dict:

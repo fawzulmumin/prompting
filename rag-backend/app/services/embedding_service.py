@@ -135,3 +135,23 @@ async def get_embeddings(texts: List[str]) -> List[List[float]]:
     except Exception:
         logger.exception("Batch embedding failed")
         return []
+
+
+async def get_cached_embedding(text: str) -> List[float]:
+    """Return embedding with Redis cache (key: embed:md5(text), TTL 3600)."""
+    import hashlib as _hashlib
+    from app.utils.cache import get_cache, set_cache
+    cache_key = f"embed:{_hashlib.md5(text.encode()).hexdigest()}"
+    try:
+        cached = await get_cache(cache_key)
+        if cached:
+            return cached
+    except Exception:
+        pass
+    vector = await get_embedding(text)
+    try:
+        if vector:
+            await set_cache(cache_key, vector, ttl=3600)
+    except Exception:
+        pass
+    return vector

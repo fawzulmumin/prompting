@@ -5,6 +5,7 @@ import logging
 from typing import Dict, List, Optional, Tuple, Set
 from elasticsearch import AsyncElasticsearch
 from app.services.core.es_query_builder import extract_filters_from_intent, build_qc_filter
+from app.services.embedding_service import get_cached_embedding
 from app.services.core.jenjang_constants import JENJANG_MAP
 from app.services.entity_service import strip_loc_prefix
 
@@ -823,6 +824,36 @@ def _intent_to_legacy_parsed(filters: dict) -> dict:
 
     return parsed
 
+def _hybridize_query(query_body: Dict, qv: List[float]) -> None:
+    """In-place: wrap existing bool query with function_score for vector similarity boost.
+
+    Compatible with collapse, sort, track_total_hits — unlike RRF sub_searches.
+    Docs without content_vector get a neutral multiply factor of 1.0.
+    """
+    existing = query_body.get("query")
+    if not existing:
+        return
+    query_body["query"] = {
+        "function_score": {
+            "query": existing,
+            "functions": [{
+                "script_score": {
+                    "script": {
+                        "source": (
+                            "doc['content_vector'].size() > 0 "
+                            "? cosineSimilarity(params.qv, 'content_vector') + 1.0 "
+                            ": 1.0"
+                        ),
+                        "params": {"qv": qv},
+                    }
+                }
+            }],
+            "boost_mode": "multiply",
+        }
+    }
+    logger.info("[HYBRID] query injected, vector_dims=%d", len(qv))
+
+
 class ListSchoolHandler:
 
     def __init__(self, es: AsyncElasticsearch, index_name: str):
@@ -940,6 +971,14 @@ class ListSchoolHandler:
                 "sort": _build_sort_clause(_sort_mode_nas, intent=intent),
             }
             _query_body_nasional.update(LIST_AGGS_SNIPPET)
+            _qvec_nas = None
+            try:
+                _qvec_nas = await get_cached_embedding(query)
+            except Exception:
+                pass
+            logger.info("[LIST] Nasional hybrid: qvec_len=%d", len(_qvec_nas) if _qvec_nas else 0)
+            if _qvec_nas:
+                _hybridize_query(_query_body_nasional, _qvec_nas)
             logger.info("[LIST] Nasional ES QUERY: %s", _query_body_nasional)
 
             _result_nas    = await self.es.search(
@@ -1342,9 +1381,17 @@ class ListSchoolHandler:
         if _intent_filters.get("status_sekolah") and not parsed.get("status"):
             parsed["status"] = _intent_filters["status_sekolah"]
 
+        _qvec = None
+        try:
+            _qvec = await get_cached_embedding(query)
+        except Exception:
+            pass
+        logger.info("[LIST] Single-wilayah hybrid: qvec_len=%d", len(_qvec) if _qvec else 0)
         es_query = self._build_query(parsed, wilayah_level, query_raw=query, intent=intent)
         # Tambahkan aggregation breakdown
         es_query.update(LIST_AGGS_SNIPPET)
+        if _qvec:
+            _hybridize_query(es_query, _qvec)
         result   = await self.es.search(index=self.index, body=es_query, request_timeout=5)
 
         hits      = result["hits"]["hits"]
@@ -1548,6 +1595,14 @@ class ListSchoolHandler:
             "sort": _build_sort_clause(_detect_sort_mode(query, intent=intent), intent=intent),
         }
 
+        _qvec_mw = None
+        try:
+            _qvec_mw = await get_cached_embedding(query)
+        except Exception:
+            pass
+        logger.info("[LIST] Multi-wilayah hybrid: qvec_len=%d", len(_qvec_mw) if _qvec_mw else 0)
+        if _qvec_mw:
+            _hybridize_query(query_body, _qvec_mw)
         logger.info("[LIST] Multi-wilayah ES QUERY: %s", query_body)
         result    = await self.es.search(index=self.index, body=query_body, request_timeout=5)
         hits      = result["hits"]["hits"]
@@ -1903,8 +1958,7 @@ class ListSchoolHandler:
             "sort": _build_sort_clause(_detect_sort_mode(query_raw, intent=intent), intent=intent),
         }
 
-        logger.info("LIST ES QUERY: %s", query_body)
-        print("LIST ES QUERY:", query_body)
+        logger.debug("[LIST] _build_query (pre-hybrid): %s", query_body)
         return query_body
 
     def _strip_prefix(self, text: str) -> str:

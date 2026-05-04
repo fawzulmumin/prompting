@@ -146,26 +146,78 @@ def prepare_analytics(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 # ================= PIPELINE =================
+def _append_to_eval_log(doc: Dict[str, Any]) -> None:
+    """Append satu baris ke rag_eval_log.csv untuk keperluan generate_weekly_report()."""
+    try:
+        _EVAL_LOG.parent.mkdir(parents=True, exist_ok=True)
+        write_header = not _EVAL_LOG.exists()
+        fields = [
+            "timestamp", "query", "provider", "duration_ms",
+            "context_sufficiency_score", "quality_score",
+            "answer_confident", "category", "performance_tier",
+            "from_cache", "num_docs", "response_length", "is_successful",
+        ]
+        with open(_EVAL_LOG, "a", newline="", encoding="utf-8") as f:
+            writer = _csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+            if write_header:
+                writer.writeheader()
+            writer.writerow(doc)
+    except Exception as e:
+        logger.warning("[Analytics] eval_log write failed: %s", e)
+
+
+def _log_analytics_to_csv(payload: Dict[str, Any]) -> bool:
+    """Fallback: simpan analytics ke CSV lokal jika ES_INDEX tidak dikonfigurasi."""
+    try:
+        doc = prepare_analytics(payload)
+        log_path = _Path(__file__).parent.parent.parent / "logs" / "analytics_local.csv"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        write_header = not log_path.exists()
+        fields = list(doc.keys())
+
+        with open(log_path, "a", newline="", encoding="utf-8") as f:
+            writer = _csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+            if write_header:
+                writer.writeheader()
+            writer.writerow(doc)
+
+        logger.info("[Analytics] Logged to CSV fallback | Q=%.2f", doc.get("quality_score", 0))
+        _append_to_eval_log(doc)
+        return True
+    except Exception as e:
+        logger.error("[Analytics] CSV fallback failed: %s", e)
+        return False
+
+
 async def run_analytics(payload: Dict[str, Any]) -> bool:
+    if not ES_INDEX:
+        logger.warning("[Analytics] ELASTICSEARCH_ANALYTICS_INDEX not set, falling back to CSV")
+        return _log_analytics_to_csv(payload)
+
     try:
         client = await get_es_client()
         if not client:
             return False
 
         doc = prepare_analytics(payload)
-
         await client.index(index=ES_INDEX, document=doc)
 
-        logger.info(f"[Analytics] indexed | {doc['category']} | {doc['performance_tier']} | Q={doc['quality_score']}")
+        _append_to_eval_log(doc)
+
+        logger.info(
+            "[Analytics] indexed | %s | %s | Q=%.2f",
+            doc["category"], doc["performance_tier"], doc["quality_score"],
+        )
         return True
 
     except (ConnectionError, TransportError) as e:
-        logger.warning(f"[Analytics] ES down: {e}")
+        logger.warning("[Analytics] ES down: %s", e)
         return False
     except Exception as e:
-        if hasattr(e, 'body'):
-            logger.error(f"[Analytics] ES Detailed Error: {e.body}") 
-        logger.error(f"[Analytics] error: {e}", exc_info=True)
+        if hasattr(e, "body"):
+            logger.error("[Analytics] ES Detailed Error: %s", e.body)
+        logger.error("[Analytics] error: %s", e, exc_info=True)
         return False
 
 # ================= BULK =================
