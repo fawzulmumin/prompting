@@ -1358,6 +1358,24 @@ async def ask_question(
     )
 
     retrieval_score = compute_context_sufficiency_score(hits)
+
+    # ── Retrieval retry: expand scope sebelum menyerah ────────────────
+    if retrieval_score < 0.3 and _loc_filter:
+        try:
+            from app.background.retrieval_retry_handler import retry_with_expanded_query
+            retry_hits, was_retried = await retry_with_expanded_query(
+                es_client=es_client,
+                query=query,
+                original_loc_filter=_loc_filter,
+                size=5,
+                score_before=retrieval_score,
+            )
+            if was_retried and retry_hits:
+                hits = retry_hits
+                retrieval_score = compute_context_sufficiency_score(hits)
+        except Exception:
+            logger.debug("[RETRY] Retrieval retry failed", exc_info=True)
+
     # Budget 4500 char (~1500 token) dibagi rata per dokumen.
     # Field numerik penting (siswa_l/p, tendik, nilai_akhir, kode_pos) TIDAK ada
     # di field `content` (hanya ringkasan teks) — ditambahkan secara eksplisit

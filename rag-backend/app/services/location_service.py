@@ -340,6 +340,12 @@ def enrich_hierarchy_from_index(entities: dict) -> dict:
         key     = result["desa_kelurahan"].lower()
         entries = LOCATION_HIERARCHY.get("desa_kelurahan", {}).get(key, [])
         if entries:
+            if len(entries) > 1:
+                # Ambiguous: desa name exists in multiple kecamatan/kabupaten.
+                # Flag it and store all candidates; still fill hierarchy from
+                # entries[0] as a display fallback so callers don't break.
+                result["_desa_ambiguous"] = True
+                result["_desa_candidates"] = entries
             p = entries[0]
             result.setdefault("kecamatan", p.get("kecamatan"))
             result.setdefault("kabupaten", p.get("kabupaten"))

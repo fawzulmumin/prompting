@@ -988,6 +988,8 @@ def _prompt_school_list(
     active_filters: Optional[Dict[str, str]] = None,
     wilayah_level: str = "",
     qc_summary: Optional[str] = None,
+    desa_ambiguous: bool = False,
+    desa_candidates: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     wilayah_full, _is_ambiguous = _build_wilayah_display_name(wilayah, wilayah_level)
     _nama_clean = wilayah.title()
@@ -996,6 +998,18 @@ def _prompt_school_list(
         f"Kota {_nama_clean} sekaligus. "
         f"Gunakan prefix \"kota\" atau \"kabupaten\" untuk memfilter lebih spesifik.*"
     ) if _is_ambiguous else ""
+
+    if desa_ambiguous and desa_candidates:
+        _kand_str = "; ".join(
+            f"{c.get('kecamatan','?')} ({c.get('kabupaten','?')})"
+            for c in desa_candidates[:4]
+        )
+        _ambiguity_disclaimer += (
+            f"\n\n*Catatan: Nama desa/kelurahan \"{_nama_clean}\" ditemukan di "
+            f"beberapa wilayah: {_kand_str}. "
+            f"Hasil mencakup semua lokasi tersebut. "
+            f"Sebutkan kecamatan atau kabupaten untuk hasil yang lebih spesifik.*"
+        )
     # Gunakan breakdown dari ES aggregation jika tersedia,
     # fallback ke hitung dari sampel
     if breakdown_jenjang:
@@ -1181,28 +1195,29 @@ def _extract_profile_fields(profile_data: Dict[str, Any]) -> Dict[str, Any]:
             return None
 
     # ── Guru ──────────────────────────────────────────────────────────────────
-    # Field dari profile_builder: tenaga_pendidik.total_guru (bukan total_ptk)
-    guru_total = _int(["tenaga_pendidik.total_guru", "jumlah_ptk", "total_ptk", "total_guru"])
-    guru_l     = _int(["tenaga_pendidik.laki_laki",  "guru_l"])
-    guru_p     = _int(["tenaga_pendidik.perempuan",  "guru_p"])
-    guru_pns   = _int(["tenaga_pendidik.guru_pns",   "guru_pns"])
-    guru_honor = _int(["tenaga_pendidik.guru_honor", "guru_honor"])
-    guru_serti = _int(["tenaga_pendidik.guru_sertifikasi", "guru_sertifikasi"])
+    # Prioritas: guru.* (profile_builder nested) → tenaga_pendidik.* (legacy) → flat
+    guru_total = _int(["guru.total",      "tenaga_pendidik.total_guru", "jumlah_ptk", "total_ptk", "total_guru"])
+    guru_l     = _int(["guru.laki_laki",  "tenaga_pendidik.laki_laki",  "guru_l"])
+    guru_p     = _int(["guru.perempuan",  "tenaga_pendidik.perempuan",  "guru_p"])
+    guru_pns   = _int(["guru.pns",        "tenaga_pendidik.guru_pns",   "guru_pns"])
+    guru_honor = _int(["guru.honor",      "tenaga_pendidik.guru_honor", "guru_honor"])
+    guru_serti = _int(["guru.sertifikasi","tenaga_pendidik.guru_sertifikasi", "guru_sertifikasi"])
+    guru_s1    = _int(["guru.s1_keatas",  "guru_s1_keatas"])
 
     if guru_total == 0 and (guru_pns + guru_honor) > 0:
         guru_total = guru_pns + guru_honor
 
     # ── Tendik ────────────────────────────────────────────────────────────────
-    tendik_total = _int(["tenaga_kependidikan.total_tendik", "tendik_total"])
-    tendik_l     = _int(["tenaga_kependidikan.laki_laki",    "tendik_l"])
-    tendik_p     = _int(["tenaga_kependidikan.perempuan",    "tendik_p"])
+    tendik_total = _int(["tendik.total",    "tenaga_kependidikan.total_tendik", "tendik_total"])
+    tendik_l     = _int(["tendik.laki_laki","tenaga_kependidikan.laki_laki",    "tendik_l"])
+    tendik_p     = _int(["tendik.perempuan","tenaga_kependidikan.perempuan",    "tendik_p"])
     if tendik_total == 0 and (tendik_l + tendik_p) > 0:
         tendik_total = tendik_l + tendik_p
 
     # ── Siswa ─────────────────────────────────────────────────────────────────
-    siswa_total = _int(["peserta_didik.total_siswa", "total_siswa", "jumlah_siswa"])
-    siswa_l     = _int(["peserta_didik.laki_laki",   "siswa_l"])
-    siswa_p     = _int(["peserta_didik.perempuan",   "siswa_p"])
+    siswa_total = _int(["siswa.total", "peserta_didik.total_siswa", "total_siswa", "jumlah_siswa"])
+    siswa_l     = _int(["siswa.laki_laki", "peserta_didik.laki_laki",   "siswa_l"])
+    siswa_p     = _int(["siswa.perempuan", "peserta_didik.perempuan",   "siswa_p"])
 
     return {
         "nama":       _get(["identitas.nama", "identitas.nama_sekolah", "nama"], "Tidak diketahui"),
@@ -1222,6 +1237,7 @@ def _extract_profile_fields(profile_data: Dict[str, Any]) -> Dict[str, Any]:
         "guru_pns":   guru_pns,
         "guru_honor": guru_honor,
         "guru_serti": guru_serti,
+        "guru_s1_keatas": guru_s1,
         "tendik_total": tendik_total,
         "tendik_l":     tendik_l,
         "tendik_p":     tendik_p,
@@ -1241,6 +1257,88 @@ def _extract_profile_fields(profile_data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+QC_CONTEXT_LIBRARY: Dict[str, Dict[str, str]] = {
+    "qc_1": {
+        "nama": "NPSN unik",
+        "penyebab_umum": "NPSN terdaftar lebih dari satu kali di sistem Dapodik atau duplikasi entri saat migrasi data.",
+        "dampak": "Menyebabkan data sekolah ganda dan laporan agregat tidak akurat.",
+        "rekomendasi": "Laporkan ke operator Dapodik untuk deduplication atau merge data.",
+    },
+    "qc_2": {
+        "nama": "format nama sekolah",
+        "penyebab_umum": "Nama sekolah mengandung karakter tidak valid, singkatan tidak baku, atau format berbeda dari standar (misal: huruf kecil semua, tanda baca berlebih).",
+        "dampak": "Mengganggu pencarian dan pencocokan otomatis nama sekolah.",
+        "rekomendasi": "Perbaiki nama sekolah sesuai format standar Dapodik (huruf kapital di awal setiap kata).",
+    },
+    "qc_3": {
+        "nama": "nama sekolah tidak kosong",
+        "penyebab_umum": "Field nama sekolah dikosongkan atau hanya berisi spasi saat entry data.",
+        "dampak": "Sekolah tidak dapat ditemukan melalui pencarian nama.",
+        "rekomendasi": "Isi nama resmi sekolah sesuai SK pendirian.",
+    },
+    "qc_4": {
+        "nama": "alamat jalan",
+        "penyebab_umum": "Alamat jalan tidak diisi, diisi generik ('jl tidak diketahui'), atau terlalu singkat.",
+        "dampak": "Layanan berbasis lokasi (pengiriman surat dinas, verifikasi lapangan) terhambat.",
+        "rekomendasi": "Isi alamat lengkap termasuk nama jalan, nomor, dan RT/RW.",
+    },
+    "qc_5": {
+        "nama": "kode wilayah",
+        "penyebab_umum": "Kode wilayah (kecamatan/kabupaten) tidak sesuai referensi Kemendikbud atau belum diperbarui saat pemekaran daerah.",
+        "dampak": "Data tidak masuk agregasi wilayah yang benar; laporan per kecamatan/kabupaten menjadi tidak akurat.",
+        "rekomendasi": "Perbarui kode wilayah menggunakan referensi terbaru dari Kemendikbud/BPS.",
+    },
+    "qc_6": {
+        "nama": "koordinat lintang",
+        "penyebab_umum": "Koordinat lintang (latitude) tidak diisi, bernilai 0, atau berada di luar batas wilayah Indonesia (-11° hingga 6°).",
+        "dampak": "Sekolah tidak muncul pada peta, layanan geo-search tidak dapat menemukan sekolah terdekat.",
+        "rekomendasi": "Perbarui koordinat menggunakan GPS ponsel atau Google Maps di lokasi sekolah.",
+    },
+    "qc_7": {
+        "nama": "koordinat bujur",
+        "penyebab_umum": "Koordinat bujur (longitude) tidak diisi, bernilai 0, atau di luar batas wilayah Indonesia (95° hingga 141°).",
+        "dampak": "Sama dengan qc_6 — sekolah tidak terlokasi di peta.",
+        "rekomendasi": "Perbarui koordinat bersamaan dengan qc_6.",
+    },
+    "qc_8": {
+        "nama": "SK izin operasional",
+        "penyebab_umum": "Nomor SK izin operasional tidak diisi atau dokumen belum diunggah ke Dapodik.",
+        "dampak": "Legalitas operasional sekolah tidak terdokumentasi; berpotensi masalah saat audit atau akreditasi.",
+        "rekomendasi": "Unggah dokumen SK izin operasional dari Dinas Pendidikan setempat.",
+    },
+    "qc_9": {
+        "nama": "tanggal SK izin operasional",
+        "penyebab_umum": "Tanggal SK izin operasional tidak diisi atau formatnya tidak valid.",
+        "dampak": "Tidak dapat menghitung masa berlaku izin operasional secara otomatis.",
+        "rekomendasi": "Isi tanggal dalam format DD-MM-YYYY sesuai dokumen SK.",
+    },
+    "qc_10": {
+        "nama": "SK pendirian sekolah",
+        "penyebab_umum": "Nomor SK pendirian tidak diisi; umum pada sekolah yang berdiri sebelum era digitalisasi.",
+        "dampak": "Sejarah legal sekolah tidak terdokumentasi; diperlukan saat perpanjangan akreditasi.",
+        "rekomendasi": "Cari arsip SK pendirian di Dinas Pendidikan atau arsip yayasan, lalu unggah.",
+    },
+    "qc_11": {
+        "nama": "tanggal SK pendirian",
+        "penyebab_umum": "Tanggal SK pendirian tidak diisi atau hanya berisi tahun tanpa tanggal/bulan.",
+        "dampak": "Perhitungan usia sekolah tidak akurat.",
+        "rekomendasi": "Isi tanggal lengkap dari dokumen SK pendirian.",
+    },
+    "qc_12": {
+        "nama": "foto sekolah",
+        "penyebab_umum": "Foto tampak depan sekolah belum diunggah ke Dapodik, atau file foto rusak/format tidak didukung.",
+        "dampak": "Profil sekolah di portal resmi tidak memiliki gambar; mengurangi kepercayaan publik.",
+        "rekomendasi": "Unggah foto tampak depan sekolah resolusi minimal 640×480 piksel.",
+    },
+    "qc_13": {
+        "nama": "data yayasan",
+        "penyebab_umum": "Informasi yayasan pengelola tidak diisi; wajib untuk sekolah swasta.",
+        "dampak": "Status kepemilikan tidak dapat diverifikasi; berpotensi masalah legalitas sekolah swasta.",
+        "rekomendasi": "Isi nama yayasan, nomor akta notaris, dan kontak yayasan di Dapodik.",
+    },
+}
+
+
 def _prompt_school_profile(profile_data: Dict[str, Any], query: str = "") -> str:
     f          = _extract_profile_fields(profile_data)
     nama       = f["nama"]
@@ -1250,6 +1348,14 @@ def _prompt_school_profile(profile_data: Dict[str, Any], query: str = "") -> str
     nilai_akhir = f["nilai_akhir"]
     lokasi_str = ", ".join(filter(None, [f["kec"], f["kab"], f["prov"]])) or "-"
     kode_pos   = f["kode_pos"]
+
+    guru_total = f["guru_total"]
+    guru_l     = f["guru_l"]
+    guru_p     = f["guru_p"]
+    guru_pns   = f["guru_pns"]
+    guru_honor = f["guru_honor"]
+    guru_serti = f["guru_serti"]
+    guru_s1    = f.get("guru_s1_keatas", 0)
 
     tendik_total = f["tendik_total"]
     tendik_l     = f["tendik_l"]
@@ -1278,6 +1384,32 @@ def _prompt_school_profile(profile_data: Dict[str, Any], query: str = "") -> str
         siswa_gender_str = f"L: {siswa_l}, P: {siswa_p} ({pct_p}% perempuan)"
     else:
         siswa_gender_str = "data gender tidak tersedia"
+
+    # Guru string dengan rasio dan persentase
+    if guru_total > 0:
+        pct_serti = round(guru_serti / guru_total * 100) if guru_serti else 0
+        pct_s1    = round(guru_s1    / guru_total * 100) if guru_s1    else 0
+        rasio_guru = f", rasio 1:{round(siswa_total / guru_total)}" if siswa_total else ""
+        guru_str  = (
+            f"{guru_total} (L: {guru_l}, P: {guru_p}) — "
+            f"PNS: {guru_pns}, Honorer: {guru_honor}, "
+            f"Sertifikasi: {guru_serti} ({pct_serti}%), "
+            f"S1+: {guru_s1} ({pct_s1}%){rasio_guru}"
+        )
+    else:
+        guru_str  = "belum tercatat"
+        pct_serti = 0
+        pct_s1    = 0
+
+    siswa_str = f"{siswa_total} ({siswa_gender_str})" if siswa_total else "belum tercatat"
+
+    _kapasitas_narasi = (
+        f"PTK {guru_total} guru — Sertifikasi {pct_serti}%, S1+ {pct_s1}%, "
+        f"PNS {guru_pns} vs Honorer {guru_honor}. "
+        f"Interpretasikan kualitas SDM dan rasio guru:siswa."
+        if guru_total > 0 else
+        "PTK belum tercatat — sampaikan tanpa menyimpulkan tidak ada guru."
+    )
 
     # Catatan kritis
     catatan_kritis = []
@@ -1347,11 +1479,28 @@ def _prompt_school_profile(profile_data: Dict[str, Any], query: str = "") -> str
             f"Kolom bermasalah: {', '.join(masalah_list)}."
         )
         masalah_joined = ", ".join(masalah_list) if masalah_list else "lihat tabel kualitas"
+
+        # Bangun konteks per-field dari QC_CONTEXT_LIBRARY
+        _qc_context_lines = []
+        for qc_key, qc_val in qc_labels.items():
+            if qc_val and qc_val != "OK" and not (qc_key == "qc_13" and _is_negeri):
+                ctx = QC_CONTEXT_LIBRARY.get(qc_key)
+                if ctx:
+                    _qc_context_lines.append(
+                        f"  • {ctx['nama'].upper()}: "
+                        f"Penyebab — {ctx['penyebab_umum']} "
+                        f"Dampak — {ctx['dampak']} "
+                        f"Rekomendasi — {ctx['rekomendasi']}"
+                    )
+        _qc_context_block = "\n".join(_qc_context_lines) if _qc_context_lines else ""
+
         qc_narasi_instruksi = f"""
 
 ## Kualitas & Kelengkapan Data (WAJIB — ada {total_masalah_qc} masalah)
 Tulis paragraf ini. Sebutkan EKSPLISIT kolom yang bermasalah: {masalah_joined}.
 Gunakan kalimat: "Data yang perlu dilengkapi meliputi: {masalah_joined}."
+Jelaskan MENGAPA setiap field bermasalah (gunakan konteks di bawah), BUKAN hanya menyebut bahwa bermasalah.
+{_qc_context_block}
 """
         n_paragraf = "5"
     elif total_masalah_qc == 0:
@@ -1380,9 +1529,9 @@ DATA SEKOLAH:
 - Nama       : {nama}
 - Jenjang    : {bentuk} | Status: {status} | Akreditasi: {akreditasi} ({akred_konteks}){nilai_akhir_str}
 - Lokasi     : {lokasi_str} | Kode Pos: {kode_pos_str}
-- Guru (PTK) : data tidak tersedia di indeks ini
+- Guru (PTK) : {guru_str}
 - Tendik     : {tendik_str}
-- Siswa      : data tidak tersedia di indeks ini
+- Siswa      : {siswa_str}
 - Internet   : {internet} | Listrik: {listrik} | Air: {air}
 - Sanitasi   : Tipe Jamban: {jamban} | Kecukupan Air: {kec_air} | Air Minum Siswa: {minum} unit
 - Toilet     : Laki-laki {toilet_l} | Perempuan {toilet_p}
@@ -1401,10 +1550,8 @@ Jika nilai_akhir tersedia: sebutkan sebagai skor akreditasi numerik.
 
 ## Kapasitas Siswa & Pengajar
 Sebutkan total siswa beserta breakdown gender ({siswa_gender_str}).
-Lalu bahas PTK dan tendik:
-- Jika PTK=0: sampaikan data belum tercatat, JANGAN simpulkan tidak ada guru.
-- Jika PTK>0: interpretasikan rasio guru:siswa, persentase sertifikasi.
-- Jika tendik>0: sebutkan jumlah tenaga kependidikan.
+{_kapasitas_narasi}
+Jika tendik>0: sebutkan jumlah tenaga kependidikan.
 
 ## Komposisi & Stabilitas SDM
 (Hanya jika PTK>0) Interpretasikan proporsi PNS vs honorer.

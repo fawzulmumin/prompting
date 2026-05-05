@@ -227,6 +227,9 @@ def build_filters(entities: Dict[str, Any]) -> List[Dict[str, Any]]:
         "bentuk_pendidikan",
         "_area_group",
         "_kecamatan_list",
+        # Desa ambiguity metadata — ditangani secara eksplisit di bawah
+        "_desa_ambiguous",
+        "_desa_candidates",
         # Field QC — ditangani secara eksplisit di bawah
         "qc_masalah_only",
         "qc_field",
@@ -242,9 +245,33 @@ def build_filters(entities: Dict[str, Any]) -> List[Dict[str, Any]]:
     if kec_list and isinstance(kec_list, list):
         filters.append({"terms": {"kecamatan": kec_list}})
 
+    # ── Desa ambiguity: gunakan OR atas wilayah_key semua kandidat ──────
+    _desa_ambiguous   = entities.get("_desa_ambiguous", False)
+    _desa_candidates  = entities.get("_desa_candidates", [])
+    if _desa_ambiguous and _desa_candidates:
+        desa_name = (entities.get("desa_kelurahan") or "").lower()
+        wilayah_terms = []
+        for candidate in _desa_candidates:
+            prov = (candidate.get("provinsi") or "").lower()
+            kab  = (candidate.get("kabupaten") or "").lower()
+            kec  = (candidate.get("kecamatan") or "").lower()
+            if prov and kab and kec and desa_name:
+                wilayah_terms.append(f"{prov}|{kab}|{kec}|{desa_name}")
+        if len(wilayah_terms) == 1:
+            filters.append({"term": {"wilayah_key": wilayah_terms[0]}})
+        elif len(wilayah_terms) > 1:
+            filters.append({"bool": {
+                "should": [{"term": {"wilayah_key": wk}} for wk in wilayah_terms],
+                "minimum_should_match": 1,
+            }})
+        logger.debug("[FILTERS] desa_ambiguous OR wilayah_key: %s", wilayah_terms)
+
     for field, value in entities.items():
 
         if field in _SKIP_KEYS:
+            continue
+        # Skip desa_kelurahan when handled by ambiguous wilayah_key filter
+        if field == "desa_kelurahan" and _desa_ambiguous:
             continue
 
         # MULTI VALUE (PAUD / multi-jenjang)

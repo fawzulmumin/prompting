@@ -3,28 +3,49 @@
 import re
 import logging
 import json
-from app.config import ELASTICSEARCH_INDEX
+from app.config import ELASTICSEARCH_PROFILE_INDEX
 
 logger = logging.getLogger(__name__)
- 
- 
+
+
 class ProfileSearchService:
- 
+
     def __init__(self, es_client):
         self.es = es_client
-        self.index = ELASTICSEARCH_INDEX
- 
+        self.index = ELASTICSEARCH_PROFILE_INDEX
+
+    # =====================================================
+    # GET BY NPSN (fast-path: _id lookup)
+    # =====================================================
+    async def get_by_npsn(self, npsn: str) -> dict | None:
+        """
+        Fast-path: get dokumen langsung by _id = npsn.
+        Hanya bekerja di idx_sekolah_profile (karena _id = npsn).
+        Return None jika tidak ditemukan atau error.
+        """
+        try:
+            response = await self.es.get(index=self.index, id=npsn)
+            if response.get("found"):
+                return response
+            return None
+        except Exception:
+            return None
+
     # =====================================================
     # SEARCH BY NPSN
     # =====================================================
     async def search_by_npsn(self, npsn: str, year: int | None = None) -> dict:
         """
         Cari sekolah berdasarkan NPSN.
-        NPSN adalah identifier unik — hasilnya pasti 0 atau 1 dokumen,
-        tidak perlu sort. Field 'tahun' tidak ada di ES mapping idx_sekolah_qc,
-        sehingga sort by 'tahun' menyebabkan BadRequestError 400.
+        Mencoba fast-path _id lookup dulu (idx_sekolah_profile),
+        fallback ke query filter untuk backward compatibility.
         Parameter year dipertahankan di signature untuk backward compatibility.
         """
+        direct = await self.get_by_npsn(npsn)
+        if direct:
+            logger.debug("[PROFILE] fast-path hit for npsn=%s", npsn)
+            return {"total": 1, "total_found": 1, "hits": [direct]}
+
         query = {
             "query": {
                 "bool": {
@@ -135,7 +156,6 @@ class ProfileSearchService:
                 "fields": [
                     "kabupaten.text^1",
                     "kecamatan.text^0.5",
-                    "content"
                 ],
                 "type": "best_fields",
                 "fuzziness": "AUTO",
@@ -196,16 +216,6 @@ class ProfileSearchService:
                     "fuzziness": "AUTO",
                     "prefix_length": 2,
                     "boost": 1
-                }
-            }
-        })
- 
-        queries.append({
-            "match": {
-                "content": {
-                    "query": school_name,
-                    "fuzziness": "AUTO",
-                    "boost": 0.5
                 }
             }
         })

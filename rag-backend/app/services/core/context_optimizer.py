@@ -44,6 +44,10 @@ _BUDGET_CONFIGS = {
     "comparison": BudgetConfig(
         primary_max=3000, secondary_max=1200, history_max=600, query_max=200
     ),
+    # Profile — data kaya (guru/siswa/sarpras/QC), butuh budget lebih besar
+    "profile_rich": BudgetConfig(
+        primary_max=5500, secondary_max=0, history_max=400, query_max=300
+    ),
 }
 
 
@@ -53,6 +57,8 @@ def select_budget(intent, secondary_modules: List[str]) -> BudgetConfig:
         return _BUDGET_CONFIGS["multi_module"]
     if intent.module == "comparison":
         return _BUDGET_CONFIGS["comparison"]
+    if not secondary_modules and intent.module == "profile":
+        return _BUDGET_CONFIGS["profile_rich"]
     if intent.scope == "nasional":
         return _BUDGET_CONFIGS["single_national"]
     return _BUDGET_CONFIGS["single_local"]
@@ -186,8 +192,9 @@ def build_narrator_context(
     
     full_context = "\n\n---\n\n".join(sections)
     
-    # Safety check — tidak boleh melebihi 5200 char total
-    if len(full_context) > 5200:
+    # Safety check — profile dapat ceiling lebih tinggi karena data kaya
+    _safety_ceiling = 6500 if intent.module == "profile" else 5200
+    if len(full_context) > _safety_ceiling:
         # Kompres agresif: potong primary lebih pendek
         primary_emergency = _smart_truncate(primary_trimmed, budget.primary_max // 2)
         sections[1] = f"[{primary_label}]\n{primary_emergency}"

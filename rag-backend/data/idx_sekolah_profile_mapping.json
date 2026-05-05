@@ -1,0 +1,207 @@
+{
+  "settings": {
+    "number_of_shards": 3,
+    "number_of_replicas": 1,
+    "refresh_interval": "30s",
+    "analysis": {
+      "normalizer": {
+        "lowercase_normalizer": {
+          "type": "custom",
+          "filter": ["lowercase"]
+        }
+      },
+      "analyzer": {
+        "indonesian_text": {
+          "type": "custom",
+          "tokenizer": "standard",
+          "filter": ["lowercase", "asciifolding"]
+        },
+        "edge_ngram_analyzer": {
+          "type": "custom",
+          "tokenizer": "edge_ngram_tokenizer",
+          "filter": ["lowercase"]
+        }
+      },
+      "tokenizer": {
+        "edge_ngram_tokenizer": {
+          "type": "edge_ngram",
+          "min_gram": 2,
+          "max_gram": 20,
+          "token_chars": ["letter", "digit"]
+        }
+      }
+    }
+  },
+  "mappings": {
+    "dynamic": "strict",
+    "properties": {
+
+      "npsn": { "type": "keyword" },
+      "sekolah_id": { "type": "keyword", "index": false, "doc_values": false },
+      "nama": {
+        "type": "text",
+        "analyzer": "indonesian_text",
+        "fields": {
+          "autocomplete": {
+            "type": "text",
+            "analyzer": "edge_ngram_analyzer",
+            "search_analyzer": "indonesian_text"
+          },
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 256,
+            "normalizer": "lowercase_normalizer"
+          }
+        }
+      },
+      "bentuk_pendidikan": { "type": "keyword", "eager_global_ordinals": true },
+      "status_sekolah": { "type": "keyword", "eager_global_ordinals": true },
+      "keaktifan": { "type": "keyword" },
+      "akreditasi": { "type": "keyword", "eager_global_ordinals": true },
+      "waktu_penyelenggaraan": { "type": "keyword" },
+      "sertifikasi_iso": { "type": "keyword" },
+      "partisipasi_bos": { "type": "boolean" },
+      "status_kepemilikan": { "type": "keyword" },
+      "yayasan": {
+        "type": "text",
+        "analyzer": "indonesian_text",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 256,
+            "normalizer": "lowercase_normalizer"
+          }
+        }
+      },
+
+      "alamat_jalan": { "type": "text", "index_options": "docs", "analyzer": "indonesian_text" },
+      "desa_kelurahan": {
+        "type": "keyword",
+        "eager_global_ordinals": true,
+        "normalizer": "lowercase_normalizer",
+        "fields": { "text": { "type": "text", "analyzer": "indonesian_text" } }
+      },
+      "kecamatan": {
+        "type": "keyword",
+        "eager_global_ordinals": true,
+        "normalizer": "lowercase_normalizer",
+        "fields": { "text": { "type": "text", "analyzer": "indonesian_text" } }
+      },
+      "kabupaten": {
+        "type": "keyword",
+        "eager_global_ordinals": true,
+        "normalizer": "lowercase_normalizer",
+        "fields": { "text": { "type": "text", "analyzer": "indonesian_text" } }
+      },
+      "provinsi": {
+        "type": "keyword",
+        "eager_global_ordinals": true,
+        "normalizer": "lowercase_normalizer",
+        "fields": { "text": { "type": "text", "analyzer": "indonesian_text" } }
+      },
+      "kode_pos": { "type": "keyword", "index": false, "doc_values": false },
+      "kode_wilayah": { "type": "keyword", "index": false, "doc_values": false },
+      "wilayah_key": { "type": "keyword" },
+      "wilayah_terpencil": { "type": "boolean" },
+      "wilayah_perbatasan": { "type": "boolean" },
+      "lintang": { "type": "float", "index": false },
+      "bujur": { "type": "float", "index": false },
+      "lokasi": { "type": "geo_point" },
+
+      "nomor_telepon": { "type": "keyword" },
+      "email": { "type": "keyword" },
+      "website": { "type": "keyword", "index": false, "doc_values": false },
+
+      "sk_pendirian_sekolah": { "type": "keyword", "index": false, "doc_values": false },
+      "tanggal_sk_pendirian": {
+        "type": "date",
+        "format": "yyyy-MM-dd||yyyy-MM-dd HH:mm:ss||yyyy-MM-dd HH.mm.ss.SSS||yyyy-MM-dd'T'HH:mm:ss.SSS'Z'||epoch_millis"
+      },
+      "sk_izin_operasional": { "type": "keyword", "index": false, "doc_values": false },
+      "tanggal_sk_izin_operasional": {
+        "type": "date",
+        "format": "yyyy-MM-dd||yyyy-MM-dd HH:mm:ss||yyyy-MM-dd HH.mm.ss.SSS||yyyy-MM-dd'T'HH:mm:ss.SSS'Z'||epoch_millis"
+      },
+
+      "akses_internet": { "type": "keyword" },
+      "sumber_listrik": { "type": "keyword" },
+
+      "qc": {
+        "properties": {
+          "qc_1":  { "type": "byte" }, "qc_2":  { "type": "byte" },
+          "qc_3":  { "type": "byte" }, "qc_4":  { "type": "byte" },
+          "qc_5":  { "type": "byte" }, "qc_6":  { "type": "byte" },
+          "qc_7":  { "type": "byte" }, "qc_8":  { "type": "byte" },
+          "qc_9":  { "type": "byte" }, "qc_10": { "type": "byte" },
+          "qc_11": { "type": "byte" }, "qc_12": { "type": "byte" },
+          "qc_13": { "type": "byte" }, "qc_14": { "type": "byte" },
+          "qc_15": { "type": "byte" }
+        }
+      },
+      "qc_score": {
+        "properties": {
+          "total_masalah": { "type": "integer" },
+          "persen_bersih":  { "type": "float" }
+        }
+      },
+
+      "content": { "type": "text", "analyzer": "indonesian_text" },
+      "content_vector": {
+        "type": "dense_vector",
+        "dims": 384,
+        "index": true,
+        "similarity": "cosine",
+        "index_options": { "type": "int8_hnsw", "m": 16, "ef_construction": 100 }
+      },
+
+      "semester_id": { "type": "keyword" },
+      "tahun": { "type": "integer" },
+      "penyelenggara": {
+        "type": "keyword",
+        "normalizer": "lowercase_normalizer",
+        "fields": { "text": { "type": "text", "analyzer": "indonesian_text" } }
+      },
+      "nilai_akhir": { "type": "float" },
+
+      "siswa_total":        { "type": "integer" },
+      "siswa_l":            { "type": "integer" },
+      "siswa_p":            { "type": "integer" },
+      "siswa_baru_l":       { "type": "integer" },
+      "siswa_baru_p":       { "type": "integer" },
+      "siswa_lulus_l":      { "type": "integer" },
+      "siswa_lulus_p":      { "type": "integer" },
+      "siswa_mengulang_l":  { "type": "integer" },
+      "siswa_mengulang_p":  { "type": "integer" },
+
+      "guru_total":         { "type": "integer" },
+      "guru_l":             { "type": "integer" },
+      "guru_p":             { "type": "integer" },
+      "guru_pns":           { "type": "integer" },
+      "guru_p3k":           { "type": "integer" },
+      "guru_honor":         { "type": "integer" },
+      "guru_sertifikasi":   { "type": "integer" },
+      "guru_s1_keatas":     { "type": "integer" },
+
+      "tendik_l":           { "type": "integer" },
+      "tendik_p":           { "type": "integer" },
+
+      "tipe_jamban":              { "type": "integer" },
+      "kecukupan_air":            { "type": "integer" },
+      "minum_siswa":              { "type": "integer" },
+      "sumber_air":               { "type": "keyword" },
+      "toilet_siswa_laki":        { "type": "integer" },
+      "toilet_siswa_perempuan":   { "type": "integer" },
+      "total_komputer":           { "type": "integer" },
+
+      "last_update_sekolah": { "type": "date", "index": false, "doc_values": false },
+      "sk_penetapan": { "type": "keyword", "index": false, "doc_values": false },
+
+      "_meta_sync": {
+        "properties": {
+          "synced_at": { "type": "date" },
+          "source":    { "type": "keyword", "index": false, "doc_values": false }
+        }
+      }
+    }
+  }
+}

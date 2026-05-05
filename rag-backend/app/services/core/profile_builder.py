@@ -167,6 +167,57 @@ def build_profile(source: Dict[str, Any], parsed: Dict[str, Any]) -> Dict[str, A
         },
     }
 
+    profile["guru"] = {
+        "total":       source.get("guru_total"),
+        "laki_laki":   source.get("guru_l"),
+        "perempuan":   source.get("guru_p"),
+        "pns":         source.get("guru_pns"),
+        "p3k":         source.get("guru_p3k"),
+        "honor":       source.get("guru_honor"),
+        "sertifikasi": source.get("guru_sertifikasi"),
+        "s1_keatas":   source.get("guru_s1_keatas"),
+    }
+
+    profile["tendik"] = {
+        "laki_laki": source.get("tendik_l"),
+        "perempuan": source.get("tendik_p"),
+        "total": (
+            _safe_int(source.get("tendik_l") or 0) + _safe_int(source.get("tendik_p") or 0)
+        ) or None,
+    }
+
+    profile["siswa"] = {
+        "total":              source.get("siswa_total"),
+        "laki_laki":          source.get("siswa_l"),
+        "perempuan":          source.get("siswa_p"),
+        "baru_laki":          source.get("siswa_baru_l"),
+        "baru_perempuan":     source.get("siswa_baru_p"),
+        "lulus_laki":         source.get("siswa_lulus_l"),
+        "lulus_perempuan":    source.get("siswa_lulus_p"),
+        "mengulang_laki":     source.get("siswa_mengulang_l"),
+        "mengulang_perempuan": source.get("siswa_mengulang_p"),
+    }
+
+    profile["sarana_prasarana"].update({
+        "tipe_jamban":      _jamban_label(source.get("tipe_jamban")),
+        "kecukupan_air":    _air_label(source.get("kecukupan_air")),
+        "minum_siswa":      source.get("minum_siswa"),
+        "sumber_air":       source.get("sumber_air"),
+        "toilet_laki":      source.get("toilet_siswa_laki"),
+        "toilet_perempuan": source.get("toilet_siswa_perempuan"),
+        "total_komputer":   source.get("total_komputer"),
+    })
+
+    profile["semester"] = {
+        "semester_id": source.get("semester_id"),
+        "tahun":       source.get("tahun"),
+        "nilai_akhir": source.get("nilai_akhir"),
+    }
+
+    profile["_meta_sync"] = source.get("_meta_sync")
+
+    return profile
+
 
 # ==========================================================
 # PROFILE COMPLETENESS
