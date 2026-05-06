@@ -308,6 +308,32 @@ def _build_qc_summary_context(schools: list) -> str:
     return header + "\n".join(lines)
 
 
+def _build_geo_qc_note(schools: list, max_schools: int = 3) -> str:
+    """
+    Ringkasan QC untuk geo search — sebutkan max 3 sekolah dengan total_masalah > 0.
+    Gunakan QC_CONTEXT_LIBRARY untuk nama field yang mudah dibaca.
+    Return "" jika semua sekolah bersih.
+    """
+    bermasalah = [s for s in schools if (s.get("total_masalah") or 0) > 0]
+    if not bermasalah:
+        return ""
+
+    lines = []
+    for s in bermasalah[:max_schools]:
+        nama  = s.get("nama", "?")
+        total = s.get("total_masalah", 0)
+        keys  = s.get("masalah_keys") or []
+        deskripsi = [
+            QC_CONTEXT_LIBRARY[k]["nama"]
+            for k in keys
+            if k in QC_CONTEXT_LIBRARY
+        ]
+        daftar = ", ".join(deskripsi) if deskripsi else "masalah tidak teridentifikasi"
+        lines.append(f"- {nama}: {total} masalah ({daftar})")
+
+    return "CATATAN QC SEKOLAH:\n" + "\n".join(lines)
+
+
 def _zero_result_message(
     wilayah: str,
     active_filters: dict = None,
@@ -992,6 +1018,7 @@ def _prompt_school_list(
     qc_summary: Optional[str] = None,
     desa_ambiguous: bool = False,
     desa_candidates: Optional[List[Dict[str, Any]]] = None,
+    qc_note: Optional[str] = None,
 ) -> str:
     wilayah_full, _is_ambiguous = _build_wilayah_display_name(wilayah, wilayah_level)
     _nama_clean = wilayah.title()
@@ -1130,6 +1157,14 @@ def _prompt_school_list(
             f"\nData masalah:\n{qc_summary}"
         )
 
+    _qc_note_section = f"\n\n{qc_note}" if qc_note else ""
+    _qc_note_instruksi = (
+        "\n5b. Ada catatan QC di bawah tabel. Sebutkan setiap sekolah bermasalah "
+        "dalam format: '(⚠️ [nama sekolah] memiliki X masalah data: [daftar masalah])'. "
+        "Maksimal 3 sekolah. Jika tidak ada catatan QC, lewati poin ini."
+        if qc_note else ""
+    )
+
     return f"""{_SYSTEM_BASE}{_qc_instruksi_str}
 
 DATA DAFTAR SEKOLAH:
@@ -1141,14 +1176,14 @@ DATA DAFTAR SEKOLAH:
 - Komposisi status (TOTAL) : {status_str}
 
 DAFTAR SEKOLAH:
-{school_table}
+{school_table}{_qc_note_section}
 
 INSTRUKSI NARASI:
 1. Tampilkan tabel daftar sekolah (dari DAFTAR SEKOLAH di atas) PERSIS seperti adanya — jangan ubah format, urutan, atau isi tabel.
 2. Tulis paragraf pembuka (2-3 kalimat): sebutkan wilayah, filter aktif, total sekolah yang ditemukan, dan konteks apakah jumlah ini banyak atau sedikit untuk wilayah tersebut.
 3. Tulis paragraf komposisi (2-3 kalimat): bahas komposisi jenjang dan status yang dominan. Sertakan angka dan persentase persis dari data.
 4. Jika {ditampilkan} < {total}: tulis kalimat yang menginformasikan ada {total - ditampilkan:,} sekolah lagi yang tidak ditampilkan. Sarankan user memfilter lebih spesifik: berdasarkan jenjang, status, akreditasi, atau nama kecamatan.
-5. [HANYA jika ini query QC/residu]: Bahas masalah data secara mendalam. Untuk setiap sekolah yang disebutkan, jelaskan masalahnya secara spesifik — jangan hanya menyebut nama sekolah tanpa konteks masalahnya.
+5. [HANYA jika ini query QC/residu]: Bahas masalah data secara mendalam. Untuk setiap sekolah yang disebutkan, jelaskan masalahnya secara spesifik — jangan hanya menyebut nama sekolah tanpa konteks masalahnya.{_qc_note_instruksi}
 6. Tutup dengan 1 kalimat yang mengundang pertanyaan lanjutan, misalnya: "Apabila Anda membutuhkan informasi lebih detail mengenai sekolah tertentu, silakan tanyakan."
 7. JANGAN tulis analisis kebijakan, opini, atau komentar di luar data yang disuplai.
 8. JANGAN ulangi data yang sudah ada di tabel dalam bentuk bullet point.{_ambiguity_disclaimer}
@@ -1834,12 +1869,20 @@ async def narrate_school_list(
     )
     _qc_summary = _build_qc_summary_context(schools) if _qc_mode else None
 
+    # Geo QC: sekolah dengan total_masalah > 0 (bukan mode QC residu)
+    _geo_qc_note = (
+        _build_geo_qc_note(schools)
+        if not _qc_mode and any((s.get("total_masalah") or 0) > 0 for s in schools)
+        else None
+    )
+
     prompt = _prompt_school_list(
         wilayah, total, len(schools), schools,
         breakdown_jenjang, breakdown_status,
         active_filters,
         wilayah_level,
         qc_summary=_qc_summary,
+        qc_note=_geo_qc_note,
     )
     narasi = await _call_narrator(
                                 prompt,

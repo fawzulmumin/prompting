@@ -450,6 +450,13 @@ async def ask_question(
             _schools = []
             for h in _geo_hits:
                 s = h["_source"]
+                _qc           = s.get("qc_score") or {}
+                _total_masalah = int(_qc.get("total_masalah") or 0)
+                _masalah_keys  = (
+                    [k for k, v in _qc.items()
+                     if k.startswith("qc_") and k != "total_masalah" and v]
+                    if _total_masalah > 0 else []
+                )
                 _schools.append({
                     "nama":           s.get("nama"),
                     "npsn":           s.get("npsn"),
@@ -461,6 +468,8 @@ async def ask_question(
                     "kabupaten":      s.get("kabupaten"),
                     "provinsi":       s.get("provinsi"),
                     "jarak_km":       h.get("jarak_km"),
+                    "total_masalah":  _total_masalah,
+                    "masalah_keys":   _masalah_keys,
                 })
 
             _displayed = len(_schools)

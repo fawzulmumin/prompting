@@ -470,10 +470,10 @@ class ProfileHandler:
         return await get_cache(key)
  
     async def _set_cache(self, query, data):
- 
+
         key = self._cache_key(query)
- 
-        await set_cache(key, data, ttl=3600)
+
+        await set_cache(key, data, ttl=21600)
  
     def _cache_key(self, query):
  

@@ -138,7 +138,7 @@ async def get_embeddings(texts: List[str]) -> List[List[float]]:
 
 
 async def get_cached_embedding(text: str) -> List[float]:
-    """Return embedding with Redis cache (key: embed:md5(text), TTL 3600)."""
+    """Return embedding with Redis cache (key: embed:md5(text), TTL 86400)."""
     import hashlib as _hashlib
     from app.utils.cache import get_cache, set_cache
     cache_key = f"embed:{_hashlib.md5(text.encode()).hexdigest()}"
@@ -151,7 +151,7 @@ async def get_cached_embedding(text: str) -> List[float]:
     vector = await get_embedding(text)
     try:
         if vector:
-            await set_cache(cache_key, vector, ttl=3600)
+            await set_cache(cache_key, vector, ttl=86400)
     except Exception:
         pass
     return vector
