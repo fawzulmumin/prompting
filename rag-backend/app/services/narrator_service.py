@@ -28,8 +28,8 @@ logger = logging.getLogger(__name__)
 # mencegah race condition: asyncio membunuh coroutine SEBELUM tenacity sempat retry.
 # call_deepseek meneruskan timeout sebagai httpx read timeout — tidak perlu ubah deepseek.py.
 # ── TIMEOUT CONFIG ──
-NARRATOR_TIMEOUT             = 35   # simple narasi — hard cap 35s (naik dari 20s)
-NARRATOR_TIMEOUT_AGGREGATION = 40   # aggregation + breakdown — lebih longgar (naik dari 25s)
+NARRATOR_TIMEOUT             = 60   # simple narasi — hard cap 60s (naik dari 35s)
+NARRATOR_TIMEOUT_AGGREGATION = 65   # aggregation + breakdown — lebih longgar (naik dari 40s)
 _NARRATOR_WAIT_FOR_GRACE     = 5    # detik ekstra untuk asyncio.wait_for di atas timeout LLM
 
 # ── TOKEN CONFIG ──
@@ -369,6 +369,7 @@ def _prompt_aggregation(
         "kecamatan":      "kecamatan",
         "kabupaten":      "kabupaten/kota",
         "provinsi":       "provinsi",
+        "nasional":       "nasional",
     }.get(level, level)
 
     # ── Breakdown jenjang ────────────────────────────────────────────────────
@@ -388,19 +389,18 @@ def _prompt_aggregation(
             key = k.upper() if k.lower() in ("swasta", "negeri") else k
             status_clean[key] = status_clean.get(key, 0) + v
 
-        status_lines = ", ".join(
-            f"{k}: {v:,}"
-            for k, v in sorted(status_clean.items(), key=lambda x: -x[1])
-            if k in ("NEGERI", "SWASTA")  # hanya tampilkan dua utama
-        )
-        total_ns  = status_clean.get("NEGERI", 0) + status_clean.get("SWASTA", 0)
+        negeri_ct = status_clean.get("NEGERI", 0)
         swasta_ct = status_clean.get("SWASTA", 0)
+        total_ns  = negeri_ct + swasta_ct
         pct_sw    = round(swasta_ct / total_ns * 100) if total_ns else 0
+        pct_ng    = (100 - pct_sw) if total_ns else 0
         breakdown_section += (
-            f"\n- Breakdown status: {status_lines} ({pct_sw}% swasta)"
+            f"\n- Breakdown status:"
+            f" NEGERI: {negeri_ct:,} ({pct_ng}%),"
+            f" SWASTA: {swasta_ct:,} ({pct_sw}%)"
         )
 
-    # ── Drilldown top 3 ──────────────────────────────────────────────────────
+    # ── Drilldown top N ──────────────────────────────────────────────────────
     drilldown_section = ""
     if drilldown_top3 and drilldown_field:
         drilldown_label = {
@@ -409,12 +409,13 @@ def _prompt_aggregation(
             "desa_kelurahan": "Desa/Kelurahan",
         }.get(drilldown_field, drilldown_field.title())
 
+        n_drilldown = len(drilldown_top3)
         drilldown_lines = "\n".join(
             f"  {i+1}. {item['name'].title()}: {item['count']:,} {metric_label}"
-            for i, item in enumerate(drilldown_top3[:3])
+            for i, item in enumerate(drilldown_top3)
         )
         drilldown_section = (
-            f"\n- Top 3 {drilldown_label} terbanyak:\n{drilldown_lines}"
+            f"\n- Top {n_drilldown} {drilldown_label} terbanyak:\n{drilldown_lines}"
         )
 
     has_breakdown = bool(breakdown_section or drilldown_section)
@@ -425,7 +426,7 @@ def _prompt_aggregation(
         if drilldown_section:
             drilldown_instruksi = (
                 "\n\n## Distribusi Wilayah\n"
-                f"Sebutkan top 3 {drilldown_label} dengan jumlah {metric_label} "
+                f"Sebutkan semua {n_drilldown} {drilldown_label} dengan jumlah {metric_label} "
                 "terbanyak beserta angkanya — gunakan PERSIS data yang disuplai."
             )
 
@@ -462,8 +463,9 @@ def _prompt_aggregation(
             "dan apakah tergolong banyak/sedang/sedikit.\n\n"
             + jenjang_instruksi + "\n\n"
             "## Komposisi Status\n"
-            "Interpretasikan proporsi negeri vs swasta — angka dan persentase "
-            "harus persis dari data."
+            "Sebutkan angka PERSIS NEGERI dan SWASTA beserta persentase masing-masing. "
+            "Format: 'Negeri: X (Y%), Swasta: A (B%)'. "
+            "Angka dan persentase harus PERSIS dari data di atas — jangan hitung ulang."
             + pct_instruksi
             + drilldown_instruksi +
             "\n\n## Implikasi\n"
@@ -1565,6 +1567,15 @@ Tutup dengan satu kalimat insight keseluruhan.{qc_narasi_instruksi}
 PENTING: Gunakan nama "{nama}" PERSIS. JANGAN tulis "Sekolah dengan NPSN X" atau "Sekolah ini".
 PENTING: Jangan ulang angka yang sudah ada di tabel — fokus pada INTERPRETASI.
 
+INSTRUKSI FORMAT OUTPUT:
+- Tulis narasi dalam SATU output terpadu, bukan dua bagian.
+- Awali dengan paragraf pembuka berisi identitas sekolah (nama, jenjang, status, lokasi lengkap).
+- Lanjutkan dengan paragraf tentang SDM (guru, tendik, siswa) — sertakan angka persis.
+- Lanjutkan dengan paragraf tentang fasilitas (sumber air, listrik, internet, jamban, toilet, komputer).
+- Jika ada masalah QC, jelaskan di paragraf tersendiri: penyebab, dampak, dan rekomendasi.
+- Akhiri dengan kalimat penutup yang mengundang pertanyaan lanjutan.
+- Jangan tulis heading '## Identitas', '## Lokasi', atau bullet list — tulis paragraf mengalir.
+
 NARASI:"""
 
 
@@ -1643,7 +1654,7 @@ def detect_level(entities: Dict[str, Any]) -> str:
     for lvl in ("desa_kelurahan", "kecamatan", "kabupaten", "provinsi"):
         if entities.get(lvl):
             return lvl
-    return "provinsi"
+    return "nasional"
 
 # narrator_service.py
 # GANTI narrate_aggregation():
@@ -1925,7 +1936,7 @@ async def narrate_school_profile(
         )
         return f"{template_md}{_weak_disclaimer}"
 
-    return f"{template_md}\n\n---\n\n{narasi}{_weak_disclaimer}"
+    return f"{narasi}{_weak_disclaimer}"
 
 
 def narrate_qc_percentage(

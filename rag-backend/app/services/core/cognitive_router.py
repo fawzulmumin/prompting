@@ -232,6 +232,19 @@ ATURAN 1B — LIST vs AGGREGATION (Prioritas setelah OOT):
   "tampilkan semua SMP ... urutkan dari terbanyak" → module: "list"  ← BUKAN aggregation
   "berapa total SMP ..." → module: "aggregation"
 
+  aggregation JUGA jika query minta RANKING PER WILAYAH:
+    Pola: "[N] kabupaten/provinsi/kecamatan dengan [metrik] terbanyak/terbesar/tertinggi"
+    Contoh: "5 kabupaten dengan jumlah TK terbanyak" → aggregation (bukan list)
+    Contoh: "10 provinsi dengan SD terbanyak" → aggregation
+    Kunci: user minta WILAYAH mana yang paling banyak — bukan minta DAFTAR SEKOLAH
+
+  comparison JIKA query minta PERBANDINGAN PROPORSI dua kategori:
+    Pola: "berapa persen X dibanding Y", "X vs Y berapa persennya", "proporsi X dan Y"
+    Contoh: "berapa persen sekolah swasta dibanding negeri" → comparison
+    Contoh: "berapa total swasta dan berapa persen dibanding negeri" → comparison
+    Isi wilayah_bandingkan dengan kategori kedua jika relevan
+    CATATAN: jika hanya satu kategori + minta persentase total → aggregation (bukan comparison)
+
 ATURAN 2 — GEO vs LIST:
   geo HANYA jika user menyebut: "dari sini", "posisi saya", "posisi ku", "koordinat",
   "radius X km", "dekat sini", "sekitar sini", "terdekat dari sini/rumah/saya"
@@ -244,6 +257,8 @@ ATURAN 3 — COMPARISON vs AGGREGATION:
   lebih banyak, mana yang lebih, mana lebih, perbedaan, selisih
   BAHKAN JIKA ada kata aggregation (jumlah/berapa/total) dalam query yang sama
   Isi wilayah_bandingkan untuk wilayah kedua
+  PENGECUALIAN: jika perbandingan adalah antara DUA STATUS (negeri vs swasta),
+  gunakan aggregation (bukan comparison) karena comparison_handler hanya support dua wilayah.
 
 KASUS KHUSUS — COMPARISON + SPK:
   "perbandingan SPK SMA di Aceh dan Bali"
@@ -618,6 +633,12 @@ Query: "SMK swasta di Jawa Barat yang koordinatnya kosong dan foto belum ada"
 
 Query: "Berapa persen sekolah yang sudah data bersih di seluruh Indonesia?"
 {"module":"aggregation","secondary":[],"scope":"nasional","sub_queries":{},"entities":{"jenjang":null,"jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":null,"kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_field_list":[],"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null,"qc_persen_query":true},"is_oot":false,"oot_reason":null}
+
+Query: "5 kabupaten dengan jumlah TK terbanyak di jawa timur"
+{"module":"aggregation","secondary":[],"scope":"provinsi","sub_queries":{},"entities":{"jenjang":"TK","jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":"jawa timur","kabupaten":null,"kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null},"is_oot":false,"oot_reason":null}
+
+Query: "berapa total sekolah swasta di indonesia dan berapa persen dibanding negeri"
+{"module":"aggregation","secondary":[],"scope":"nasional","sub_queries":{},"entities":{"jenjang":null,"jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":null,"kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null},"is_oot":false,"oot_reason":null}
 
 ═══════════════════════════════════════════════════════════
 ATURAN sub_queries:

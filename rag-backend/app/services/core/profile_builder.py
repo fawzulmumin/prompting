@@ -116,7 +116,7 @@ def build_profile(source: Dict[str, Any], parsed: Dict[str, Any]) -> Dict[str, A
     Prioritas: source > parsed.
     Field numerik dan detail SELALU dari source karena content hanya ringkasan.
     """
-    return {
+    profile = {
         "identitas": {
             "nama": source.get("nama"),
             "npsn": source.get("npsn"),

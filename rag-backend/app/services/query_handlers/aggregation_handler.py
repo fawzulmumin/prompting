@@ -127,6 +127,24 @@ def is_ranking_query(query: str) -> bool:
     q = query.lower()
     return any(k in q for k in RANKING_KEYWORDS)
 
+
+def _extract_ranking_size(query: str, default: int = 10, max_size: int = 20) -> int:
+    """
+    Ekstrak angka top-N dari ranking query.
+    Contoh: "5 kabupaten dengan TK terbanyak" → 5
+            "10 provinsi dengan SD terbanyak" → 10
+            "kabupaten dengan SMK terbanyak"  → 10 (default)
+    """
+    m = re.search(
+        r'\b(\d+)\s*(?:kabupaten|provinsi|kecamatan|kota)\b',
+        query, re.IGNORECASE
+    )
+    if not m:
+        m = re.search(r'\b(\d+)\s*(?:terbanyak|terbesar|tertinggi)\b', query, re.IGNORECASE)
+    if m:
+        return max(1, min(int(m.group(1)), max_size))
+    return default
+
 RANKING_LEVEL_KEYWORDS = {
     "provinsi": ["provinsi"],
     "kabupaten": ["kabupaten", "kota"],
@@ -763,6 +781,15 @@ async def handle_aggregation_query(
                 body=es_query
             )
 
+            logger.debug(
+                "[AGG_NASIONAL_DEBUG] by_status raw buckets: %s",
+                result.get("aggregations", {}).get("by_status", {}).get("buckets", [])
+            )
+            logger.debug(
+                "[AGG_NASIONAL_DEBUG] by_jenjang raw buckets count: %d",
+                len(result.get("aggregations", {}).get("by_jenjang", {}).get("buckets", []))
+            )
+
             total = (
                 result.get("aggregations", {})
                 .get("total", {})
@@ -774,6 +801,33 @@ async def handle_aggregation_query(
                 .get("by_provinsi", {})
                 .get("buckets", [])
             )
+
+            status_buckets = (
+                result.get("aggregations", {})
+                .get("by_status", {})
+                .get("buckets", [])
+            )
+            # Sum values per uppercase key — ES may have both "Swasta" and "SWASTA"
+            # as separate keyword buckets; dict comprehension would overwrite the larger
+            # count with the smaller one (last write wins). Use accumulation instead.
+            breakdown_status_nasional: Dict[str, int] = {}
+            for b in status_buckets:
+                k = b.get("key", "").upper()
+                if k in ("NEGERI", "SWASTA"):
+                    breakdown_status_nasional[k] = (
+                        breakdown_status_nasional.get(k, 0) + b["doc_count"]
+                    )
+
+            jenjang_buckets = (
+                result.get("aggregations", {})
+                .get("by_jenjang", {})
+                .get("buckets", [])
+            )
+            breakdown_jenjang_nasional: Dict[str, int] = {
+                b["key"]: b["doc_count"]
+                for b in jenjang_buckets
+                if b.get("key")
+            }
 
             confidence = compute_aggregation_confidence(
                 query=query,
@@ -790,6 +844,8 @@ async def handle_aggregation_query(
                 "provider": "ELASTICSEARCH_AGGREGATION_NASIONAL",
                 "total": total,
                 "ranking": prov_buckets,
+                "breakdown_status": breakdown_status_nasional or None,
+                "breakdown_jenjang": breakdown_jenjang_nasional or None,
                 "entities": {},
                 "active_filters": query_filters,
                 "confidence": confidence,
@@ -867,11 +923,18 @@ async def handle_aggregation_query(
 
 
     if not validate_hierarchy_consistency(query, entities):
-        return _validation(
-            "LOCATION_LEVEL_MISMATCH",
-            query,
-            resolution,
-            ranking_gap
+        # Ranking queries use level words ("kabupaten", "provinsi") as aggregation axis,
+        # not as a location filter — e.g. "5 kabupaten dengan TK terbanyak di jawa timur".
+        # Skip the mismatch guard so execution continues to the nested-agg path.
+        if not is_ranking_query(query):
+            return _validation(
+                "LOCATION_LEVEL_MISMATCH",
+                query,
+                resolution,
+                ranking_gap
+            )
+        logger.info(
+            "[AGG] Skipping LOCATION_LEVEL_MISMATCH for ranking query: '%s'", query
         )
 
     # ===============================
@@ -1067,8 +1130,11 @@ async def handle_aggregation_query(
         nested_task = execute_nested_aggregation_query(
             es_client, normalized, metric_target=_metric_target
         )
+        _drilldown_size = (
+            _extract_ranking_size(query) if is_ranking_query(query) else 3
+        )
         drilldown_task = (
-            execute_drilldown_query(es_client, normalized, drilldown_field, size=3)
+            execute_drilldown_query(es_client, normalized, drilldown_field, size=_drilldown_size)
             if drilldown_field
             else asyncio.sleep(0, result=[])
         )

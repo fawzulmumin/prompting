@@ -355,5 +355,5 @@ def build_location_label(context: Dict[str, Any]) -> str:
     ]
     available = [lvl for lvl in levels if lvl]
     if not available:
-        return "Tidak diketahui"
+        return "Seluruh Indonesia"
     return ", ".join(prettify_location_label(lvl) for lvl in available)

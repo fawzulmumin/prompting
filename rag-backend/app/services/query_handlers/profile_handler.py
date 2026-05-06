@@ -88,7 +88,7 @@ class ProfileHandler:
                         "[ProfileHandler] QC field error building NPSN profile: %s", _qc_err
                     )
                     _npsn_profile = build_profile(_npsn_hit.get("_source", {}), {})
-                _npsn_response = self._build_response(_npsn_profile, _npsn_hit)
+                _npsn_response = self._build_response(_npsn_profile, _npsn_hit, is_npsn=True)
                 await self._set_cache(query, _npsn_response)
                 return _npsn_response
             # ─────────────────────────────────────────────────────────────────────
@@ -304,6 +304,24 @@ class ProfileHandler:
         )
  
         # ── Keputusan ──────────────────────────────────────────────────────────
+
+        # Guard: jika wilayah disebutkan user tapi tidak dikenali ES (wilayah_resolved=False)
+        # DAN total hasil sangat besar (> 50.000 = pool nasional tanpa filter),
+        # gap score antar kandidat tidak bermakna → paksa ambiguous.
+        # Ini mencegah auto-resolve ke sekolah yang salah provinsi.
+        # Contoh: "sdn 1 pujon malang" → Kapuas, bukan Malang (total 147.422).
+        LARGE_POOL_THRESHOLD = 50_000
+        if (
+            wilayah                           # user menyebut wilayah
+            and not wilayah_resolved          # tapi ES tidak mengenalinya
+            and total > LARGE_POOL_THRESHOLD  # pool hasil sangat besar
+        ):
+            logger.info(
+                "[DECIDE] Force ambiguous: wilayah='%s' tidak resolved, total=%d > %d",
+                wilayah, total, LARGE_POOL_THRESHOLD,
+            )
+            return self._ambiguous(hits, total, is_count_exact)
+
         if top_score < MIN_CONFIDENT_SCORE:
             return self._ambiguous(hits, total, is_count_exact)
  
@@ -417,23 +435,28 @@ class ProfileHandler:
     # RESPONSE
     # =====================================================
  
-    def _build_response(self, profile, hit, weak_match: bool = False):
+    def _build_response(self, profile, hit, weak_match: bool = False, is_npsn: bool = False):
 
         completeness = compute_profile_completeness(profile)
 
         quality = analyze_profile_quality(profile)
 
-        score = hit.get("_custom_score", 0)
-
-        confidence = min(0.95, score / 100)
+        if is_npsn:
+            confidence       = 0.95
+            answer_confident = True
+        else:
+            score            = hit.get("_custom_score", 0)
+            confidence       = min(0.95, score / 100)
+            answer_confident = confidence >= 0.7
 
         return {
-            "status": "success",
-            "data": profile,
-            "confidence": confidence,
+            "status":             "success",
+            "data":               profile,
+            "confidence":         confidence,
+            "answer_confident":   answer_confident,
             "completeness_score": completeness,
-            "quality": quality,
-            "weak_match": weak_match,
+            "quality":            quality,
+            "weak_match":         weak_match,
         }
  
     # =====================================================
