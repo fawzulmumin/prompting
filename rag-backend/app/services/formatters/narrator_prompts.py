@@ -119,7 +119,7 @@ def _build_school_table(schools: list, max_rows: int = 20) -> str:
         nama     = _safe(s.get('nama'))
         jenjang  = _safe(s.get('bentuk_pendidikan') or s.get('bentuk'))
         akred    = _safe(s.get('akreditasi'))
-        siswa    = '-'
+        siswa    = _safe(s.get('siswa_total'))
         kec      = _safe(s.get('kecamatan'))
         rows.append(f"| {i} | {nama} | {jenjang} | {akred} | {siswa} | {kec} |")
 

@@ -12,14 +12,25 @@ logger = logging.getLogger(__name__)
 
 
 def _build_provinsi_filter(provinsi_value: str) -> dict:
-    """Build ES filter untuk field provinsi, dengan handling khusus Jakarta."""
-    if "jakarta" in provinsi_value.lower():
+    """Build ES filter untuk field provinsi, dengan handling khusus Jakarta dan Yogyakarta."""
+    v = provinsi_value.lower()
+    if "jakarta" in v:
         return {
             "bool": {
                 "should": [
                     {"term": {"provinsi": "prov. d.k.i. jakarta"}},
                     {"term": {"provinsi": "prov. dki jakarta"}},
                     {"match": {"provinsi.text": "jakarta"}},
+                ],
+                "minimum_should_match": 1,
+            }
+        }
+    if "yogyakarta" in v:
+        return {
+            "bool": {
+                "should": [
+                    {"term": {"provinsi": "prov. d.i. yogyakarta"}},
+                    {"term": {"provinsi": "prov. yogyakarta"}},
                 ],
                 "minimum_should_match": 1,
             }

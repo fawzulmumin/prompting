@@ -1041,11 +1041,31 @@ async def run_ask_pipeline(
 
     query_level = level
 
-    # ── 1. GEO FAST PATH ──────────────────────────────────────────────────────
+    # ── 1. GEO FAST PATH (no cache — koordinat berubah) ──────────────────────
     _lat, _lon, _radius_km = _resolve_geo_params(query, lat, lon, radius_km)
     if (_lat is not None and _lon is not None) or detect_geo_query(query):
         return await _run_geo_fastpath(
             query, es_client, _lat, _lon, _radius_km, start_time, user_id, on_step)
+
+    # ── 1.5. GLOBAL CACHE CHECK ───────────────────────────────────────────────
+    # Dilakukan setelah geo bypass agar geo query tidak ter-cache.
+    # RAG fallback punya cache internal sendiri; routes lain dicache di sini.
+    _global_cache_key = build_cache_key(query, level)
+    _cached_resp = await get_cache(_global_cache_key)
+    if _cached_resp:
+        logger.info("[CACHE] hit key=%s query=%r", _global_cache_key[:24], query[:60])
+        _cached_resp["from_cache"]  = True
+        _cached_resp["duration_ms"] = 0
+        return {**_cached_resp, "_bg_tasks": [], "_bg_queue": [], "_bg_trigger": None}
+
+    # Helper: enqueue cache save untuk hasil confident
+    def _enqueue_cache(res: dict) -> dict:
+        if res and res.get("answer_confident") and not res.get("from_cache"):
+            payload = {k: v for k, v in res.items() if not k.startswith("_")}
+            res.setdefault("_bg_queue", []).append(
+                (set_cache, [_global_cache_key, payload, 600], {})
+            )
+        return res
 
     # ── 2. FAST OOT GUARD ─────────────────────────────────────────────────────
     if is_clearly_oot(query) and not is_education_query(query):
@@ -1078,12 +1098,13 @@ async def run_ask_pipeline(
         merged_md = await narrate_multi_module(
             query=query, merged_context=orch_result["merged_context"], intent=intent,
         )
-        return _base(query, start_time, user_id, merged_md,
-                     "+".join(orch_result["providers"]),
-                     num_docs=orch_result["total_docs"],
-                     confidence_score=orch_result["confidence"],
-                     context_sufficiency_score=orch_result["confidence"],
-                     answer_confident=orch_result["confidence"] >= 0.6)
+        return _enqueue_cache(_base(
+            query, start_time, user_id, merged_md,
+            "+".join(orch_result["providers"]),
+            num_docs=orch_result["total_docs"],
+            confidence_score=orch_result["confidence"],
+            context_sufficiency_score=orch_result["confidence"],
+            answer_confident=orch_result["confidence"] >= 0.6))
 
     route = QueryRoute(intent.primary)
 
@@ -1092,7 +1113,7 @@ async def run_ask_pipeline(
         result = await _handle_comparison_route(
             query, intent, es_client, profile_handler, start_time, user_id, on_step)
         if result is not None:
-            return result
+            return _enqueue_cache(result)
         route = QueryRoute.LIST  # fall-through
 
     # ── 7. AGGREGATION ─────────────────────────────────────────────────────────
@@ -1100,21 +1121,21 @@ async def run_ask_pipeline(
         result = await _handle_aggregation_route(
             query, intent, es_client, user_id, start_time, on_step)
         if result is not None:
-            return result
+            return _enqueue_cache(result)
         route = QueryRoute.LIST  # fall-through
 
     # ── 8. PROFILE ─────────────────────────────────────────────────────────────
     if route == QueryRoute.PROFILE:
-        return await _handle_profile_route(
-            query, intent, profile_handler, start_time, user_id, on_step)
+        return _enqueue_cache(await _handle_profile_route(
+            query, intent, profile_handler, start_time, user_id, on_step))
 
     # ── 9. LIST ────────────────────────────────────────────────────────────────
     if route in (QueryRoute.LIST, QueryRoute.PROFILE):
         result = await _handle_list_route(
             query, intent, list_handler, start_time, user_id, on_step)
         if result is not None:
-            return result
+            return _enqueue_cache(result)
 
-    # ── 10. RAG FALLBACK ───────────────────────────────────────────────────────
+    # ── 10. RAG FALLBACK (has its own internal cache) ─────────────────────────
     return await _handle_rag_fallback(
         query, intent, query_level, es_client, user_id, start_time, on_step)

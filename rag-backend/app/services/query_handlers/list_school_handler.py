@@ -20,6 +20,7 @@ from app.services.core.list_location_detector import (
     _is_multikata_with_context,
     _has_province_siblings,
 )
+from app.services.core.cognitive_router import CognitiveIntent, WilayahEntities
 
 logger = logging.getLogger(__name__)
 
@@ -484,40 +485,66 @@ class ListSchoolHandler:
         if _depth != 0:
             return None
         dan_parts = _split_dan_query(query)
-        if not dan_parts or len(dan_parts) != 2:
+        if not dan_parts or len(dan_parts) < 2:
             return None
         logger.info("[LIST] Dan-split detected: %s", dan_parts)
-        result_a = await self.handle(dan_parts[0], intent=intent, filters=filters, _depth=1)
-        result_b = await self.handle(dan_parts[1], intent=intent, filters=filters, _depth=1)
-        if (result_a.get("status") == "success"
-                and result_b.get("status") == "success"):
-            merged_schools = result_a["schools"] + result_b["schools"]
-            merged_total   = result_a["total"] + result_b["total"]
-            wilayah_a = result_a.get("parsed", {}).get("wilayah", "")
-            wilayah_b = result_b.get("parsed", {}).get("wilayah", "")
-            merged_parsed  = dict(result_a.get("parsed", {}))
-            if wilayah_a.lower() != wilayah_b.lower():
-                merged_wilayah_label = f"{wilayah_a} dan {wilayah_b}"
+
+        # Untuk setiap sub-query, inject scope=kabupaten agar resolver langsung
+        # ke level kab/kota dan tidak jatuh ke multi-level clarification
+        # (mis. "bandung" → 24 kandidat kecamatan/desa dari berbagai provinsi).
+        ok_results = []
+        for part in dan_parts:
+            loc_kw = _extract_location_keyword(part)
+            if loc_kw:
+                hint_wil    = WilayahEntities(kabupaten=loc_kw)
+                hint_intent = CognitiveIntent(
+                    module="list",
+                    scope="kabupaten",
+                    wilayah=hint_wil,
+                    jenjang=getattr(intent, "jenjang", None) if intent else None,
+                    jenjang_list=getattr(intent, "jenjang_list", []) if intent else [],
+                    status=getattr(intent, "status", None) if intent else None,
+                    akreditasi=getattr(intent, "akreditasi", None) if intent else None,
+                )
+                r = await self.handle(part, intent=hint_intent, filters=filters, _depth=1)
             else:
-                merged_wilayah_label = wilayah_a
-            merged_parsed["wilayah"] = merged_wilayah_label
-            merged_parsed["dan_split_breakdown"] = {
-                wilayah_a: result_a["total"],
-                wilayah_b: result_b["total"],
-            }
-            merged_parsed["dan_split_total"] = merged_total
-            logger.info("[LIST] Dan-split merged: %d + %d = %d schools",
-                        result_a["total"], result_b["total"], merged_total)
-            return {
-                "status": "success", "intent": "school_list",
-                "total": merged_total, "schools": merged_schools,
-                "parsed": merged_parsed,
-                "wilayah_level": result_a.get("wilayah_level", "desa_kelurahan"),
-                "is_ambiguous": False, "candidates": [],
-                "breakdown_jenjang": result_a.get("breakdown_jenjang"),
-                "breakdown_status":  result_a.get("breakdown_status"),
-            }
-        return None
+                r = await self.handle(part, intent=None, filters=filters, _depth=1)
+            if r.get("status") == "success":
+                ok_results.append(r)
+
+        if len(ok_results) < 2:
+            return None
+
+        merged_schools = []
+        merged_total   = 0
+        breakdown      = {}
+        for r in ok_results:
+            merged_schools += r["schools"]
+            merged_total   += r["total"]
+            wilayah = r.get("parsed", {}).get("wilayah", "")
+            breakdown[wilayah] = r["total"]
+
+        # Buat label wilayah tanpa duplikat
+        wilayah_labels = list(dict.fromkeys(
+            r.get("parsed", {}).get("wilayah", "") for r in ok_results
+        ))
+        merged_wilayah_label = " dan ".join(w for w in wilayah_labels if w)
+
+        merged_parsed = dict(ok_results[0].get("parsed", {}))
+        merged_parsed["wilayah"]             = merged_wilayah_label
+        merged_parsed["dan_split_breakdown"] = breakdown
+        merged_parsed["dan_split_total"]     = merged_total
+        logger.info("[LIST] Dan-split merged: %s = %d schools",
+                    " + ".join(str(r["total"]) for r in ok_results), merged_total)
+        return {
+            "status": "success", "intent": "school_list",
+            "total": merged_total, "schools": merged_schools,
+            "parsed": merged_parsed,
+            "wilayah_level": ok_results[0].get("wilayah_level", "desa_kelurahan"),
+            "is_ambiguous": False, "candidates": [],
+            "breakdown_jenjang": ok_results[0].get("breakdown_jenjang"),
+            "breakdown_status":  ok_results[0].get("breakdown_status"),
+        }
 
     async def _handle_nasional_list(self, query: str, parsed: dict, intent) -> dict:
         logger.info("[LIST] Trusted intent scope=nasional → no wilayah filter, QC only")

@@ -26,5 +26,8 @@ ELASTICSEARCH_PASSWORD = os.getenv("ELASTICSEARCH_PASSWORD")
 ELASTICSEARCH_INDEX = os.getenv("ELASTICSEARCH_INDEX")
 ELASTICSEARCH_AGENT_INDEX = os.getenv("ELASTICSEARCH_AGENT_INDEX", "idx_prompting_agent")
 ELASTICSEARCH_PROFILE_INDEX = os.getenv("ELASTICSEARCH_PROFILE_INDEX", "idx_sekolah_profile")
+# idx_sekolah_profile = merge qc + prompting_agent; punya siswa_total, guru_total, tidak duplikat.
+# Default ke ELASTICSEARCH_PROFILE_INDEX (bukan ELASTICSEARCH_INDEX) agar siswa/guru tersedia.
+ELASTICSEARCH_LIST_INDEX = os.getenv("ELASTICSEARCH_LIST_INDEX", ELASTICSEARCH_PROFILE_INDEX)
 
 ENV = PROD

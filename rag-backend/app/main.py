@@ -18,7 +18,13 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Depends, Security
 from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse as _BaseJSONResponse
+
+
+class JSONResponse(_BaseJSONResponse):
+    """Override default response to include charset=utf-8 in Content-Type.
+    Prevents emoji/multi-byte Unicode corruption in clients that default to Latin-1."""
+    media_type = "application/json; charset=utf-8"
 from pydantic import BaseModel, Field, field_validator  # noqa: F401 — kept for back-compat
 
 from app.api.models import AskRequest, AskResponse  # noqa: E402
@@ -131,10 +137,12 @@ es_client = AsyncElasticsearch(
 
 profile_handler = ProfileHandler(es_client)
 
+from app.config import ELASTICSEARCH_LIST_INDEX  # default: idx_sekolah_profile
 list_handler = ListSchoolHandler(
     es_client,
-    os.getenv("ELASTICSEARCH_INDEX")
+    ELASTICSEARCH_LIST_INDEX
 )
+logger.info("ListSchoolHandler index: %s", ELASTICSEARCH_LIST_INDEX)
 
 
 @asynccontextmanager
@@ -177,6 +185,7 @@ app = FastAPI(
     title="RAG API Server",
     version="2.0.0",
     lifespan=lifespan,
+    default_response_class=JSONResponse,
 )
 
 _ALLOWED_ORIGINS = [

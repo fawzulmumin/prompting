@@ -246,48 +246,61 @@ def _detect_implicit_multi_wilayah(query: str) -> Optional[Dict]:
 # ================================================================
 def _split_dan_query(query: str) -> Optional[List[str]]:
     """
-    Deteksi pola dua lokasi dipisah "dan"/"serta".
-    Contoh: "cibunar parungpanjang dan lumpang parungpanjang"
-            → ["paud di cibunar parungpanjang", "paud di lumpang parungpanjang"]
+    Deteksi pola dua atau lebih lokasi dipisah "dan"/"serta" (atau koma+dan).
+    Contoh 2 lokasi: "cibunar parungpanjang dan lumpang parungpanjang"
+    Contoh 3 lokasi: "sekolah di bandung, bogor, dan bekasi"
     """
     # GUARD: jangan split jika "dan" ada di antara dua token akreditasi/jenjang
-    _AKRED_TOKENS = {"terakreditasi", "akreditasi", "tidak terakreditasi"}
     q_low = query.lower()
-    # Deteksi pola: "terakreditasi X dan terakreditasi Y"
     if re.search(r'terakreditasi\s+\w+\s+dan\s+terakreditasi', q_low):
         return None
-    q_clean = re.sub(r"[^\w\s]", " ", query.lower()).strip()
-    # Split pada berbagai kata penghubung
-    _SPLITTERS = r"\b(dan|serta|atau|dengan|beserta|maupun|juga|ataupun|sama)\b"
-    parts = re.split(_SPLITTERS, q_clean)
-    chunks = [p.strip() for i, p in enumerate(parts) if i % 2 == 0 and p.strip()]
-    if len(chunks) != 2:
-        return None
-    sw = {"di", "daftar", "sekolah", "paud", "sd", "smp", "sma",
-          "smk", "tk", "ra", "kb", "dan", "serta", "atau"}
-    def has_loc_token(chunk: str) -> bool:
-        return any(len(t) >= 3 and t not in sw for t in chunk.split())
-    if not (has_loc_token(chunks[0]) and has_loc_token(chunks[1])):
-        return None
-    # Guard: jangan split jika ada kata filter di salah satu chunk
-    # (mis. "paud dengan akreditasi A di kuningan")
+
+    # Guard: jangan split jika ada kata filter di query
     _FILTER_WORDS = {"akreditasi", "negeri", "swasta", "status", "jumlah",
                      "terbanyak", "urutkan", "minimal", "maksimal"}
-    for chunk in chunks:
-        if any(fw in chunk.split() for fw in _FILTER_WORDS):
-            return None
-    # Ambil prefix jenjang/kata sebelum nama lokasi pertama
-    prefix_match = re.match(
-        r"^(.*?\bdi\b\s*)", query.lower()
-    )
+    if any(fw in q_low.split() for fw in _FILTER_WORDS):
+        return None
+
+    sw = {"di", "daftar", "sekolah", "paud", "sd", "smp", "sma",
+          "smk", "tk", "ra", "kb", "dan", "serta", "atau"}
+
+    def has_loc_token(chunk: str) -> bool:
+        return any(len(t) >= 3 and t not in sw for t in chunk.split())
+
+    # Ambil prefix (bagian sebelum nama lokasi, mis. "sekolah di ")
+    prefix_match = re.match(r"^(.*?\bdi\b\s*)", q_low)
     prefix = prefix_match.group(1) if prefix_match else ""
-    # Bersihkan chunk dari prefix yang sudah ada (hindari "paud di paud di ...")
+
     def _clean_chunk(chunk: str) -> str:
         p = prefix.strip()
         c = chunk.strip()
         if p and c.startswith(p):
             c = c[len(p):].strip()
         return c
+
+    # ── PATH A: Koma + "dan/serta" (3+ lokasi) ──────────────────────────
+    # Contoh: "bandung, bogor, dan bekasi" → ["bandung", "bogor", "bekasi"]
+    if "," in query and re.search(r",\s*(?:dan|serta)\s+", q_low):
+        # Ganti ", dan " / ", serta " dengan koma biasa, lalu split pada koma
+        normalized = re.sub(r",\s*(?:dan|serta)\s+", ",", q_low)
+        # Juga split pada koma yang tersisa
+        raw_parts = [p.strip() for p in normalized.split(",") if p.strip()]
+        if len(raw_parts) >= 2:
+            locs = [_clean_chunk(p) for p in raw_parts]
+            locs = [l for l in locs if has_loc_token(l)]
+            if len(locs) >= 2:
+                logger.debug("[DAN_SPLIT] comma+dan path: %d locs", len(locs))
+                return [prefix + loc for loc in locs]
+
+    # ── PATH B: Dua bagian dipisah "dan/serta/atau" (pola lama) ─────────
+    q_clean = re.sub(r"[^\w\s]", " ", q_low).strip()
+    _SPLITTERS = r"\b(dan|serta|atau|dengan|beserta|maupun|juga|ataupun|sama)\b"
+    parts = re.split(_SPLITTERS, q_clean)
+    chunks = [p.strip() for i, p in enumerate(parts) if i % 2 == 0 and p.strip()]
+    if len(chunks) != 2:
+        return None
+    if not (has_loc_token(chunks[0]) and has_loc_token(chunks[1])):
+        return None
     return [prefix + _clean_chunk(chunks[0]), prefix + _clean_chunk(chunks[1])]
 
 
