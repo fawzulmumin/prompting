@@ -642,6 +642,84 @@ async def execute_drilldown_query(
         logger.exception("Drilldown query failed")
         return []
  
+async def handle_qc_percentage_query(
+    intent,
+    es_client: AsyncElasticsearch,
+    query: str = "",
+) -> Dict[str, Any]:
+    """
+    Hitung persentase sekolah bersih / bermasalah dari ES.
+
+    Menjalankan dua query concurrent:
+      1. Total semua sekolah (dengan filter wilayah+jenjang, tanpa filter QC)
+      2. Total sekolah bersih (total_masalah == 0)
+    Kemudian menghitung proporsinya.
+    """
+    import asyncio as _asyncio
+    from app.services.core.es_query_builder import extract_filters_from_intent, build_es_query
+    from app.services.core.result_model import ResultStatus
+
+    index = os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc")
+
+    w = getattr(intent, "wilayah", None)
+    if w and getattr(w, "kabupaten", None):
+        wilayah_label = w.kabupaten.title()
+    elif w and getattr(w, "provinsi", None):
+        wilayah_label = w.provinsi.title()
+    else:
+        wilayah_label = "seluruh Indonesia"
+
+    es_filters = extract_filters_from_intent(intent)
+
+    try:
+        q_total = build_es_query(intent, es_filters, size=0)
+        q_total["aggs"] = {"total": {"value_count": {"field": "npsn"}}}
+
+        q_bersih = build_es_query(intent, es_filters, size=0)
+        q_bersih["query"]["bool"].setdefault("filter", [])
+        q_bersih["query"]["bool"]["filter"].append(
+            {"term": {"qc_score.total_masalah": 0}}
+        )
+        q_bersih["aggs"] = {"total": {"value_count": {"field": "npsn"}}}
+
+        r_total, r_bersih = await _asyncio.gather(
+            es_client.search(index=index, body=q_total, request_timeout=10),
+            es_client.search(index=index, body=q_bersih, request_timeout=10),
+        )
+
+        total = r_total.get("aggregations", {}).get("total", {}).get("value", 0)
+        bersih = r_bersih.get("aggregations", {}).get("total", {}).get("value", 0)
+        bermasalah = total - bersih
+
+        persen_bersih = round((bersih / total) * 100, 2) if total > 0 else 0.0
+        persen_bermasalah = round((bermasalah / total) * 100, 2) if total > 0 else 0.0
+
+        return {
+            "status": ResultStatus.SUCCESS,
+            "provider": "ELASTICSEARCH_QC_PERCENTAGE",
+            "data": {
+                "qc_percentage": True,
+                "total_sekolah": total,
+                "total_bersih": bersih,
+                "total_bermasalah": bermasalah,
+                "persen_bersih": persen_bersih,
+                "persen_bermasalah": persen_bermasalah,
+                "wilayah_label": wilayah_label,
+            },
+            "confidence": 0.95,
+            "answer_confident": True,
+        }
+    except Exception as exc:
+        logger.exception("[AGG_QC_PCT] Error: %s", exc)
+        return {
+            "status": ResultStatus.VALIDATION_ERROR,
+            "provider": "SYSTEM_VALIDATION",
+            "data": {"message": "Gagal menghitung persentase kualitas data."},
+            "confidence": 0,
+            "answer_confident": False,
+        }
+
+
 async def execute_multi_aggregation_query(
     es_client: AsyncElasticsearch,
     entities_list: List[Dict[str, Any]]

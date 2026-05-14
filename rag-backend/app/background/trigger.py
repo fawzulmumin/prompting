@@ -11,7 +11,19 @@ logger = logging.getLogger(__name__)
 # ==========================================================
 # BACKGROUND JOB ORCHESTRATOR
 # ==========================================================
-async def trigger_background_jobs(payload: Dict[str, Any], background_tasks: BackgroundTasks) -> Dict[str, Any]:
+async def trigger_background_jobs(
+    payload: Dict[str, Any],
+    background_tasks: Optional[BackgroundTasks] = None,
+) -> Dict[str, Any]:
+    """
+    background_tasks=None → schedule via asyncio.create_task (SSE path).
+    """
+    def _schedule(fn, *args):
+        if background_tasks is not None:
+            background_tasks.add_task(fn, *args)
+        else:
+            asyncio.create_task(fn(*args))
+
     try:
         if not payload or not isinstance(payload, dict):
             logger.error("[Trigger] Invalid payload")
@@ -25,14 +37,14 @@ async def trigger_background_jobs(payload: Dict[str, Any], background_tasks: Bac
 
         # Analytics Job
         try:
-            background_tasks.add_task(_run_analytics_job, payload)
+            _schedule(_run_analytics_job, payload)
             jobs_scheduled += 1
         except Exception as e:
             job_errors.append({"job": "analytics", "error": str(e)})
 
         # Suggestion Job
         try:
-            background_tasks.add_task(_run_suggestion_job, payload)
+            _schedule(_run_suggestion_job, payload)
             jobs_scheduled += 1
         except Exception as e:
             job_errors.append({"job": "suggestion", "error": str(e)})
@@ -41,14 +53,14 @@ async def trigger_background_jobs(payload: Dict[str, Any], background_tasks: Bac
         try:
             context_score = payload.get("context_sufficiency_score", 0.0)
             if context_score < 0.45:
-                background_tasks.add_task(_run_low_score_job, payload, context_score)
+                _schedule(_run_low_score_job, payload, context_score)
                 jobs_scheduled += 1
         except Exception as e:
             job_errors.append({"job": "low_score_handler", "error": str(e)})
 
         # OOC Alert Job — Item #20 Feedback Loop
         try:
-            background_tasks.add_task(_run_ooc_alert_job, payload)
+            _schedule(_run_ooc_alert_job, payload)
             jobs_scheduled += 1
         except Exception as e:
             job_errors.append({"job": "ooc_alert", "error": str(e)})

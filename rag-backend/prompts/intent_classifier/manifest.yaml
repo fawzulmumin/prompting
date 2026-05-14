@@ -1,0 +1,9 @@
+# Prompt version manifest
+# Ubah 'active' untuk switch versi tanpa redeploy
+active: v1
+versions:
+  v1:
+    file: system_v1.txt
+    description: "Prompt original dari cognitive_router.py (Mei 2026)"
+    created: "2026-05"
+    status: production

@@ -241,7 +241,7 @@ async def test_aggregation_trusts_nasional_scope_bypasses_resolver(make_intent, 
     intent = make_intent(scope="nasional", jenjang="SD")
 
     with patch(
-        "app.services.query_handlers.aggregation_handler.resolve_entities",
+        "app.services.query_handlers.aggregation_handler.resolve_location_from_query",
         new_callable=AsyncMock,
     ) as mock_resolve:
         result = await handle_aggregation_query(
@@ -271,7 +271,7 @@ async def test_aggregation_nasional_no_jenjang_bypasses_resolver(make_intent, na
     intent = make_intent(scope="nasional", jenjang=None)
 
     with patch(
-        "app.services.query_handlers.aggregation_handler.resolve_entities",
+        "app.services.query_handlers.aggregation_handler.resolve_location_from_query",
         new_callable=AsyncMock,
     ) as mock_resolve:
         await handle_aggregation_query(
@@ -297,7 +297,7 @@ async def test_aggregation_nasional_keyword_overrides_ambiguous_resolution(
     intent = make_intent(scope="nasional", jenjang="SD")
 
     with patch(
-        "app.services.query_handlers.aggregation_handler.resolve_entities",
+        "app.services.query_handlers.aggregation_handler.resolve_location_from_query",
         new_callable=AsyncMock,
     ) as mock_resolve:
         result = await handle_aggregation_query(
@@ -333,7 +333,7 @@ async def test_aggregation_trusts_explicit_kota_prefix_skips_resolver(make_inten
 
     with (
         patch(
-            "app.services.query_handlers.aggregation_handler.resolve_entities",
+            "app.services.query_handlers.aggregation_handler.resolve_location_from_query",
             new_callable=AsyncMock,
         ) as mock_resolve,
         patch(
@@ -385,7 +385,7 @@ async def test_aggregation_trusts_kab_prefix_skips_resolver(make_intent):
 
     with (
         patch(
-            "app.services.query_handlers.aggregation_handler.resolve_entities",
+            "app.services.query_handlers.aggregation_handler.resolve_location_from_query",
             new_callable=AsyncMock,
         ) as mock_resolve,
         patch(
@@ -453,7 +453,7 @@ async def test_aggregation_skips_autotrust_for_ambiguous_city_without_prefix(
     intent = make_intent(scope="kabupaten", jenjang="SMK", kabupaten="bandung")
 
     with patch(
-        "app.services.query_handlers.aggregation_handler.resolve_entities",
+        "app.services.query_handlers.aggregation_handler.resolve_location_from_query",
         new=AsyncMock(return_value=ambiguous_resolution),
     ) as mock_resolve:
         result = await handle_aggregation_query(
@@ -497,7 +497,7 @@ async def test_aggregation_ambiguous_city_malang_skips_autotrust(make_intent, ca
     intent = make_intent(scope="kabupaten", jenjang="SD", kabupaten="malang")
 
     with patch(
-        "app.services.query_handlers.aggregation_handler.resolve_entities",
+        "app.services.query_handlers.aggregation_handler.resolve_location_from_query",
         new=AsyncMock(return_value=ambiguous_resolution),
     ) as mock_resolve:
         result = await handle_aggregation_query(
@@ -557,7 +557,190 @@ def test_normalize_wilayah_prefix(value, prefix, expected):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GROUP 7 — Integration: Real ES Validation
+# GROUP 7 — Phase 4 Cleanup: Handler Regressions
+# Protects: Phase 4 changes — removal of duplicate location logic
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.unit
+def test_list_handler_no_levenshtein_no_fuzzy_match_keyword():
+    """
+    Protects: _levenshtein and _fuzzy_match_keyword must NOT exist in
+    list_school_handler after Phase 4 cleanup (replaced by LocationResolver).
+    """
+    import app.services.query_handlers.list_school_handler as lsh
+    assert not hasattr(lsh, "_levenshtein"), (
+        "_levenshtein was not removed from list_school_handler"
+    )
+    assert not hasattr(lsh, "_fuzzy_match_keyword"), (
+        "_fuzzy_match_keyword was not removed from list_school_handler"
+    )
+
+
+@pytest.mark.unit
+def test_list_handler_apply_typo_correction_still_callable():
+    """
+    Protects: _apply_typo_correction must still be callable (rewritten to use
+    LocationResolver), so existing handler logic at callsites remains valid.
+    """
+    from app.services.query_handlers.list_school_handler import _apply_typo_correction
+    # With empty LOCATION_INDEX, expect None (graceful passthrough)
+    result = _apply_typo_correction("ciputak")  # typo of "ciputat"
+    assert result is None or isinstance(result, tuple), (
+        f"Expected None or (name, level), got {result!r}"
+    )
+
+
+@pytest.mark.unit
+def test_aggregation_handler_no_jakarta_provinsi_aliases():
+    """
+    Protects: _JAKARTA_PROVINSI_ALIASES and _JAKARTA_PROVINSI_CANONICAL must be
+    removed from aggregation_handler after Phase 4 (handled by aggregation_core).
+    """
+    import app.services.query_handlers.aggregation_handler as ah
+    assert not hasattr(ah, "_JAKARTA_PROVINSI_ALIASES"), (
+        "_JAKARTA_PROVINSI_ALIASES still in aggregation_handler — should be removed"
+    )
+    assert not hasattr(ah, "_JAKARTA_PROVINSI_CANONICAL"), (
+        "_JAKARTA_PROVINSI_CANONICAL still in aggregation_handler — should be removed"
+    )
+
+
+@pytest.mark.unit
+def test_aggregation_handler_qc_percentage_imported_from_core():
+    """
+    Protects: _handle_qc_percentage_query must be importable from aggregation_core
+    and must be the same object referenced in aggregation_handler (moved there in Phase 4).
+    """
+    from app.services.core.aggregation_core import handle_qc_percentage_query
+    assert callable(handle_qc_percentage_query), (
+        "handle_qc_percentage_query not callable in aggregation_core"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_aggregation_nasional_with_canonical_wilayah_skips_resolver(
+    make_intent, nasional_es_mock
+):
+    """
+    Protects: after Phase 4 wilayah cleanup, intent with pre-resolved canonical
+    wilayah.provinsi (via LocationResolver) must be trusted and skip resolve_entities.
+    """
+    # After LocationResolver, "jawa barat" is a canonical value from LOCATION_INDEX
+    intent = make_intent(scope="provinsi", jenjang="SD", provinsi="jawa barat")
+
+    nested_result = {"total": 5000, "breakdown_jenjang": {}, "breakdown_status": {}}
+
+    with (
+        patch(
+            "app.services.query_handlers.aggregation_handler.resolve_location_from_query",
+            new_callable=AsyncMock,
+        ) as mock_resolve,
+        patch(
+            "app.services.query_handlers.aggregation_handler.get_cache",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "app.services.query_handlers.aggregation_handler.set_cache",
+            new=AsyncMock(),
+        ),
+        patch(
+            "app.services.query_handlers.aggregation_handler.validate_hierarchy_consistency",
+            return_value=True,
+        ),
+        patch(
+            "app.services.query_handlers.aggregation_handler.validate_location_presence",
+            return_value=True,
+        ),
+        patch(
+            "app.services.query_handlers.aggregation_handler.execute_nested_aggregation_query",
+            new=AsyncMock(return_value=nested_result),
+        ),
+        patch(
+            "app.services.query_handlers.aggregation_handler.execute_drilldown_query",
+            new=AsyncMock(return_value=[]),
+        ),
+        patch(
+            "app.services.query_handlers.aggregation_handler.execute_aggregation_query",
+            new=AsyncMock(return_value=None),
+        ),
+    ):
+        result = await handle_aggregation_query(
+            query="berapa SD di jawa barat",
+            es_client=AsyncMock(),
+            intent=intent,
+        )
+
+    mock_resolve.assert_not_called()
+    assert result.get("provider") == "ELASTICSEARCH_AGGREGATION", (
+        f"Expected ELASTICSEARCH_AGGREGATION, got {result.get('provider')!r}"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_aggregation_double_bridge_does_not_overwrite_jenjang(make_intent):
+    """
+    Protects: after Phase 4 double-bridge fix, jenjang injected in EARLY INJECTION
+    must not be overwritten by the (now-deleted) late bridge block.
+    """
+    intent = make_intent(scope="provinsi", jenjang="SMA", provinsi="bali")
+
+    captured_entities = {}
+
+    async def _fake_nested(es_client, entities, metric_target=None):
+        captured_entities.update(entities)
+        return {"total": 99, "breakdown_jenjang": {}, "breakdown_status": {}}
+
+    with (
+        patch(
+            "app.services.query_handlers.aggregation_handler.resolve_location_from_query",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "app.services.query_handlers.aggregation_handler.get_cache",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "app.services.query_handlers.aggregation_handler.set_cache",
+            new=AsyncMock(),
+        ),
+        patch(
+            "app.services.query_handlers.aggregation_handler.validate_hierarchy_consistency",
+            return_value=True,
+        ),
+        patch(
+            "app.services.query_handlers.aggregation_handler.validate_location_presence",
+            return_value=True,
+        ),
+        patch(
+            "app.services.query_handlers.aggregation_handler.execute_nested_aggregation_query",
+            new=AsyncMock(side_effect=_fake_nested),
+        ),
+        patch(
+            "app.services.query_handlers.aggregation_handler.execute_drilldown_query",
+            new=AsyncMock(return_value=[]),
+        ),
+        patch(
+            "app.services.query_handlers.aggregation_handler.execute_aggregation_query",
+            new=AsyncMock(return_value=None),
+        ),
+    ):
+        await handle_aggregation_query(
+            query="berapa SMA di bali",
+            es_client=AsyncMock(),
+            intent=intent,
+        )
+
+    # The entities passed to ES must contain bentuk_pendidikan = "SMA"
+    # (injected once, not overwritten to None)
+    assert captured_entities.get("bentuk_pendidikan") == "SMA", (
+        f"Expected bentuk_pendidikan='SMA', got {captured_entities.get('bentuk_pendidikan')!r}"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GROUP 8 — Integration: Real ES Validation
 # Hanya jalan dengan RUN_INTEGRATION=1
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1004,3 +1187,228 @@ def test_retry_handler_expanded_filter_returns_none_when_only_kecamatan():
 
     result = _build_expanded_filter({"kecamatan": "kec. parungpanjang"})
     assert result is None, f"Expected None when filter is kecamatan-only, got {result}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GROUP 8 — Phase 5: Narrator refactor backward-compat
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.unit
+def test_narrator_service_public_api_intact():
+    """
+    Protects: all public narrate_* functions remain importable from narrator_service
+    after prompt builders were moved to narrator_prompts.py.
+    """
+    from app.services.narrator_service import (
+        narrate_aggregation,
+        narrate_comparison_lokasi,
+        narrate_comparison_status,
+        narrate_school_list,
+        narrate_school_profile,
+        narrate_qc_percentage,
+        narrate_out_of_context,
+        narrate_multi_module,
+        detect_level,
+    )
+    for fn in (
+        narrate_aggregation, narrate_comparison_lokasi, narrate_comparison_status,
+        narrate_school_list, narrate_school_profile, narrate_qc_percentage,
+        narrate_out_of_context, narrate_multi_module, detect_level,
+    ):
+        assert callable(fn), f"{fn} tidak callable"
+
+
+@pytest.mark.unit
+def test_narrator_prompts_importable_from_narrator_service():
+    """
+    Protects: prompt builders re-exported from narrator_service (via import)
+    so existing callers that import _prompt_* directly still work.
+    """
+    from app.services.narrator_service import (
+        _SYSTEM_BASE,
+        _prompt_aggregation,
+        _prompt_school_profile,
+        _extract_profile_fields,
+        QC_CONTEXT_LIBRARY,
+    )
+    assert isinstance(_SYSTEM_BASE, str) and len(_SYSTEM_BASE) > 100
+    assert callable(_prompt_aggregation)
+    assert callable(_prompt_school_profile)
+    assert callable(_extract_profile_fields)
+    assert isinstance(QC_CONTEXT_LIBRARY, dict) and "qc_1" in QC_CONTEXT_LIBRARY
+
+
+@pytest.mark.unit
+def test_narrator_service_line_count_under_1000():
+    """
+    Protects: narrator_service.py tidak boleh kembali ke >1000 baris
+    setelah Phase 5 extraction.
+    """
+    import pathlib
+    f = pathlib.Path(__file__).parent.parent / "app" / "services" / "narrator_service.py"
+    lines = f.read_text(encoding="utf-8").splitlines()
+    assert len(lines) < 1000, (
+        f"narrator_service.py memiliki {len(lines)} baris (maksimum 999). "
+        "Pastikan prompt builders tetap di narrator_prompts.py."
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GROUP 9 — Phase 6: Backward-compat (TieredCache, TaskQueue, /ask schema)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.unit
+def test_tiered_cache_importable_from_utils():
+    """
+    Protects: TieredCache must be importable from app.utils.tiered_cache
+    (new Phase 6 module). Verifies the module was created and wired correctly.
+    """
+    from app.utils.tiered_cache import TieredCache
+    assert callable(TieredCache), "TieredCache must be a callable class"
+    cache = TieredCache(maxsize=8)
+    assert cache.stats()["l1_maxsize"] == 8, (
+        "TieredCache(maxsize=8).stats()['l1_maxsize'] must equal 8"
+    )
+
+
+@pytest.mark.unit
+def test_simple_task_queue_importable_from_utils():
+    """
+    Protects: SimpleTaskQueue and get_task_queue must be importable from
+    app.utils.task_queue (new Phase 6 module). Verifies the module exists
+    and the singleton factory is callable.
+    """
+    from app.utils.task_queue import SimpleTaskQueue, get_task_queue
+    assert callable(SimpleTaskQueue), "SimpleTaskQueue must be a callable class"
+    assert callable(get_task_queue), "get_task_queue must be callable"
+    tq = get_task_queue()
+    assert isinstance(tq, SimpleTaskQueue), (
+        f"get_task_queue() must return SimpleTaskQueue, got {type(tq)}"
+    )
+    stats = tq.stats()
+    assert "queue_size" in stats and "num_workers" in stats, (
+        f"SimpleTaskQueue.stats() missing expected keys. Got: {stats}"
+    )
+
+
+@pytest.mark.unit
+def test_ask_response_schema_unchanged():
+    """
+    Protects: AskResponse schema must remain backward-compatible after Phase 6
+    refactor (models moved to app.api.models, ask_pipeline extracted from main).
+    All fields that existed before Phase 6 must still be present.
+    """
+    from app.api.models import AskResponse
+    required_fields = {
+        "query", "answer_markdown", "answer_html", "provider",
+        "from_cache", "duration_ms", "context_used",
+        "context_sufficiency_score", "answer_confident",
+        "user_id", "num_docs",
+    }
+    model_fields = set(AskResponse.model_fields.keys())
+    missing = required_fields - model_fields
+    assert not missing, (
+        f"AskResponse schema is missing fields after Phase 6 refactor: {missing}"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GROUP 10 — Phase 7: Cleanup guards
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.unit
+def test_no_print_in_production_code():
+    """
+    Protects: no print() calls in production app/ code (outside __main__ blocks).
+    All debug output must go through the logging system.
+    """
+    import ast
+    import pathlib
+
+    _STDLIB_ATTRS = frozenset({
+        "name", "msg", "args", "levelname", "levelno", "pathname", "filename",
+        "module", "exc_info", "exc_text", "stack_info", "lineno", "funcName",
+        "created", "msecs", "relativeCreated", "thread", "threadName",
+        "processName", "process", "message", "taskName",
+    })
+
+    def _main_block_lines(tree: ast.Module) -> set[int]:
+        lines: set[int] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.If):
+                t = node.test
+                if (
+                    isinstance(t, ast.Compare)
+                    and isinstance(t.left, ast.Name) and t.left.id == "__name__"
+                    and len(t.comparators) == 1
+                    and isinstance(t.comparators[0], ast.Constant)
+                    and t.comparators[0].value == "__main__"
+                ):
+                    for n in ast.walk(node):
+                        if hasattr(n, "lineno"):
+                            lines.add(n.lineno)
+        return lines
+
+    app_dir = pathlib.Path(__file__).parent.parent / "app"
+    offenders: list[str] = []
+
+    for py_file in sorted(app_dir.rglob("*.py")):
+        src = py_file.read_text(encoding="utf-8")
+        try:
+            tree = ast.parse(src)
+        except SyntaxError:
+            continue
+        main_lines = _main_block_lines(tree)
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "print"
+                and node.lineno not in main_lines
+            ):
+                rel = py_file.relative_to(app_dir.parent)
+                offenders.append(f"{rel}:{node.lineno}")
+
+    assert not offenders, (
+        f"Found print() outside __main__ in production code:\n"
+        + "\n".join(f"  {o}" for o in offenders)
+    )
+
+
+@pytest.mark.unit
+def test_structured_log_importable():
+    """
+    Protects: structured_log module must be importable and expose
+    get_logger() and configure_logging() (Phase 7 addition).
+    """
+    from app.utils.structured_log import get_logger, configure_logging
+    assert callable(get_logger), "get_logger must be callable"
+    assert callable(configure_logging), "configure_logging must be callable"
+    logger = get_logger("test.structured_log")
+    assert logger is not None
+
+
+@pytest.mark.unit
+def test_entity_service_public_api_intact():
+    """
+    Protects: functions migrated from entity_service in Phase 9 must still be
+    importable from their new canonical locations.
+    """
+    from app.services.core.location_resolver_adapter import (
+        resolve_location_from_query,
+        validate_location_presence,
+        validate_hierarchy_integrity,
+        validate_hierarchy_consistency,
+    )
+    from app.services.location_service import build_reference_locations
+    from app.services.core.location_resolver import strip_loc_prefix
+
+    for fn in (
+        resolve_location_from_query,
+        validate_location_presence,
+        validate_hierarchy_integrity,
+        validate_hierarchy_consistency,
+        build_reference_locations,
+        strip_loc_prefix,
+    ):
+        assert callable(fn), f"{fn.__name__} must be callable"

@@ -11,10 +11,10 @@ from typing import Dict, Any, Optional
 from elasticsearch import AsyncElasticsearch
 from app.services.core.result_model import ResultStatus, build_result, build_ambiguous_message
 from app.services.core.jenjang_constants import JENJANG_KEYWORDS
-from app.services.entity_service import (
-    resolve_entities,
+from app.services.core.location_resolver_adapter import (
+    resolve_location_from_query,
     validate_location_presence,
-    validate_hierarchy_consistency
+    validate_hierarchy_consistency,
 )
 from app.services.core.aggregation_core import (
     execute_aggregation_query,
@@ -26,6 +26,7 @@ from app.services.core.aggregation_core import (
     build_metric_aggs,
     build_filters,
     build_qc_aggs,
+    handle_qc_percentage_query as _handle_qc_percentage_query,
 )
 from app.services.core.es_query_builder import (
     extract_filters_from_intent,
@@ -175,13 +176,6 @@ _JAKARTA_KABUPATEN_CANONICAL: dict = {
     "jakarta utara":   "kota adm. jakarta utara",
     "jakarta":         "kota adm. jakarta pusat",   # fallback jika standalone
 }
-_JAKARTA_PROVINSI_CANONICAL = "prov. d.k.i. jakarta"  # Format aktual di ES index
-_JAKARTA_PROVINSI_ALIASES: frozenset = frozenset({
-    "dki jakarta", "dki", "jakarta",
-    "prov. dki jakarta",
-    "d.k.i. jakarta",
-    "dki jakarta raya",
-})
 
 # Nama kota yang ambigu: ada kab. X dan kota X sekaligus.
 # Untuk nama ini tanpa prefix eksplisit, jangan auto-trust → biarkan resolver
@@ -225,82 +219,577 @@ def _merge_sub_level_entities(resolution_entities: dict, all_matches: list) -> d
                 break
     return resolution_entities
 
-async def _handle_qc_percentage_query(
-    intent,
+
+
+async def _handle_nasional_scope(
+    query: str,
     es_client: AsyncElasticsearch,
-    query: str = "",
+    intent,
+    resolution: dict,
+    ranking_gap: float,
 ) -> Dict[str, Any]:
     """
-    Hitung persentase sekolah bersih / bermasalah dari ES.
-
-    Menjalankan dua query:
-      1. Total semua sekolah (dengan filter wilayah+jenjang, tanpa filter QC)
-      2. Total sekolah bersih (total_masalah == 0)
-    Kemudian menghitung proporsinya.
+    Handle agregasi nasional (tanpa filter wilayah).
+    Diekstrak dari handle_aggregation_query (Phase 11).
+    Returns dict dengan provider=ELASTICSEARCH_AGGREGATION_NASIONAL.
     """
-    from app.services.core.es_query_builder import extract_filters_from_intent, build_es_query
-    index = os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc")
+    logger.info("[AGG] Scope nasional detected")
 
-    # Wilayah label untuk narasi
-    w = getattr(intent, "wilayah", None)
-    if w and getattr(w, "kabupaten", None):
-        wilayah_label = w.kabupaten.title()
-    elif w and getattr(w, "provinsi", None):
-        wilayah_label = w.provinsi.title()
+    query_filters = extract_filters_from_intent(intent)
+
+    normalized: Dict[str, Any] = {}
+
+    if query_filters.get("bentuk_pendidikan"):
+        normalized["bentuk_pendidikan"] = query_filters["bentuk_pendidikan"]
+
+    if query_filters.get("bentuk_pendidikan_in"):
+        normalized["bentuk_pendidikan_in"] = query_filters["bentuk_pendidikan_in"]
+
+    if query_filters.get("status_sekolah"):
+        normalized["status_sekolah"] = query_filters["status_sekolah"]
+
+    if query_filters.get("akreditasi_gte"):
+        normalized["akreditasi_gte"] = query_filters["akreditasi_gte"]
+
+    if query_filters.get("akreditasi_exact"):
+        normalized["akreditasi_exact"] = query_filters["akreditasi_exact"]
+
+    es_query = build_aggregation_query(normalized)
+
+    es_query.setdefault("aggs", {})
+    es_query["aggs"]["by_provinsi"] = {
+        "terms": {
+            "field": "provinsi",
+            "size": 38
+        }
+    }
+
+    logger.debug("AGG NASIONAL QUERY: %s", es_query)
+
+    result = await es_client.search(
+        index=os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc"),
+        body=es_query
+    )
+
+    logger.debug(
+        "[AGG] by_status raw buckets: %s",
+        result.get("aggregations", {}).get("by_status", {}).get("buckets", [])
+    )
+    logger.debug(
+        "[AGG] by_jenjang raw buckets count: %d",
+        len(result.get("aggregations", {}).get("by_jenjang", {}).get("buckets", []))
+    )
+
+    total = (
+        result.get("aggregations", {})
+        .get("total", {})
+        .get("value", 0)
+    )
+
+    prov_buckets = (
+        result.get("aggregations", {})
+        .get("by_provinsi", {})
+        .get("buckets", [])
+    )
+
+    status_buckets = (
+        result.get("aggregations", {})
+        .get("by_status", {})
+        .get("buckets", [])
+    )
+    # Sum values per uppercase key — ES may have both "Swasta" and "SWASTA"
+    # as separate keyword buckets; accumulate to avoid last-write-wins overwrite.
+    breakdown_status_nasional: Dict[str, int] = {}
+    for b in status_buckets:
+        k = b.get("key", "").upper()
+        if k in ("NEGERI", "SWASTA"):
+            breakdown_status_nasional[k] = (
+                breakdown_status_nasional.get(k, 0) + b["doc_count"]
+            )
+
+    jenjang_buckets = (
+        result.get("aggregations", {})
+        .get("by_jenjang", {})
+        .get("buckets", [])
+    )
+    breakdown_jenjang_nasional: Dict[str, int] = {
+        b["key"]: b["doc_count"]
+        for b in jenjang_buckets
+        if b.get("key")
+    }
+
+    confidence = compute_aggregation_confidence(
+        query=query,
+        resolution_status=resolution["status"].value,
+        resolution_metadata=resolution.get("metadata", {}),
+        total_hits=total,
+        ranking_gap=ranking_gap
+    )
+
+    answer_confident = confidence >= 0.7
+
+    return {
+        "status": ResultStatus.SUCCESS,
+        "provider": "ELASTICSEARCH_AGGREGATION_NASIONAL",
+        "total": total,
+        "ranking": prov_buckets,
+        "breakdown_status": breakdown_status_nasional or None,
+        "breakdown_jenjang": breakdown_jenjang_nasional or None,
+        "entities": {},
+        "active_filters": query_filters,
+        "confidence": confidence,
+        "answer_confident": answer_confident,
+        "metadata": resolution.get("metadata", {})
+    }
+
+
+async def _handle_multi_entity(
+    query: str,
+    es_client: AsyncElasticsearch,
+    entities: list,
+    resolution: dict,
+    ranking_gap: float,
+) -> Dict[str, Any]:
+    """
+    Handle agregasi multi-entitas (is_multi=True).
+    Menjalankan execute_multi_aggregation_query + cache.
+    """
+    logger.info("MULTI AGGREGATION MODE: %s", entities)
+
+    cache_key = _cache_key(entities)
+    cached = await get_cache(cache_key)
+    if cached:
+        logger.info("MULTI CACHE HIT")
+        return cached
+
+    logger.debug(f"ENTITIES BEFORE QUERY: {entities}")
+    results = await execute_multi_aggregation_query(es_client, entities)
+
+    comparison = []
+    for item in results:
+        if not item:
+            continue
+        ent = item.get("entities", {})
+        total = item.get("total", 0)
+        comparison.append({"entities": ent, "total": total})
+
+    total_sum = sum(x["total"] for x in comparison)
+    if not comparison:
+        return _validation("LOCATION_NOT_FOUND", query, resolution, ranking_gap)
+
+    confidence = compute_aggregation_confidence(
+        query=query,
+        resolution_status=resolution["status"].value,
+        resolution_metadata=resolution.get("metadata", {}),
+        total_hits=total_sum,
+        ranking_gap=ranking_gap
+    )
+
+    answer_confident = confidence >= 0.7
+
+    result = {
+        "status": ResultStatus.SUCCESS,
+        "provider": "ELASTICSEARCH_MULTI_AGGREGATION",
+        "comparison": comparison,
+        "is_multi": True,
+        "confidence": confidence,
+        "answer_confident": answer_confident
+    }
+
+    await set_cache(cache_key, result, 3600)
+    return result
+
+
+async def _handle_ranking_fallback(
+    query: str,
+    es_client: AsyncElasticsearch,
+    resolution: dict,
+    ranking_gap: float,
+) -> Optional[Dict[str, Any]]:
+    """
+    Handle global ranking ketika tidak ada wilayah terdeteksi.
+    Returns None jika tidak applicable.
+    """
+    if not is_ranking_query(query):
+        return None
+
+    level = detect_ranking_level(query)
+    if not level:
+        return None
+
+    buckets = await execute_global_ranking_query(
+        es_client, group_field=level, size=5
+    )
+
+    if not buckets:
+        return None
+
+    top = buckets[0]
+
+    confidence = compute_aggregation_confidence(
+        query=query,
+        resolution_status=resolution["status"].value,
+        resolution_metadata=resolution.get("metadata", {}),
+        total_hits=top.get("doc_count", 0),
+        ranking_gap=ranking_gap
+    )
+
+    answer_confident = confidence >= 0.7
+
+    return {
+        "status": ResultStatus.SUCCESS,
+        "provider": "ELASTICSEARCH_GLOBAL_RANKING",
+        "top_location": top.get("key"),
+        "total": top.get("doc_count"),
+        "ranking": buckets,
+        "confidence": confidence,
+        "answer_confident": answer_confident
+    }
+
+
+async def _build_resolution(
+    query: str,
+    es_client: AsyncElasticsearch,
+    intent,
+    kwargs: dict,
+) -> Dict[str, Any]:
+    """Build resolution dict: trust intent scope/wilayah or call location resolver."""
+    _scope = getattr(intent, "scope", None)
+
+    if _scope == "nasional":
+        w = getattr(intent, "wilayah", None)
+        has_specific_wilayah = w is not None and any([
+            getattr(w, "provinsi", None),
+            getattr(w, "kabupaten", None),
+            getattr(w, "kecamatan", None),
+            getattr(w, "desa", None),
+        ])
+        if not has_specific_wilayah:
+            logger.info("[AGG] intent.scope=nasional (trusted) → skip location_resolver")
+            return {
+                "status": ResultStatus.SUCCESS,
+                "provider": "SYSTEM",
+                "data": {"entities": {}},
+                "reason": None,
+                "metadata": {"national_scope": True, "trigger": "intent_scope"},
+                "confidence": None,
+            }
+        logger.warning("[AGG] intent.scope=nasional BUT wilayah present → fallback location_resolver")
+        return await resolve_location_from_query(query, es_client)
+
+    # Trust intent.wilayah — bypass resolver for specific wilayah
+    _trusted = False
+    if intent is not None:
+        w = getattr(intent, "wilayah", None)
+        if w is not None:
+            wilayah_from_intent: Dict[str, str] = {}
+
+            if getattr(w, "provinsi", None):
+                wilayah_from_intent["provinsi"] = _normalize_wilayah_prefix(w.provinsi, "prov.")
+
+            kab_raw = (getattr(w, "kabupaten", None) or "").lower().strip()
+            if kab_raw:
+                has_prefix = any(kab_raw.startswith(p) for p in ("kab.", "kota ", "kabupaten ", "kota adm."))
+                if not has_prefix and kab_raw in _AMBIGUOUS_CITIES:
+                    logger.info("[AGG] ambiguous city '%s' without prefix → skip auto-trust", kab_raw)
+                elif kab_raw in _JAKARTA_KABUPATEN_CANONICAL:
+                    canonical = _JAKARTA_KABUPATEN_CANONICAL[kab_raw]
+                    wilayah_from_intent["kabupaten"] = canonical
+                    logger.info("[AGG] Jakarta remap: '%s' → '%s'", kab_raw, canonical)
+                else:
+                    wilayah_from_intent["kabupaten"] = _normalize_wilayah_prefix(w.kabupaten, "kab.")
+
+            if getattr(w, "kecamatan", None):
+                wilayah_from_intent["kecamatan"] = _normalize_wilayah_prefix(w.kecamatan, "kec.")
+            if getattr(w, "desa", None):
+                wilayah_from_intent["desa_kelurahan"] = w.desa.lower().strip()
+
+            if wilayah_from_intent:
+                logger.info("[AGG] intent.wilayah=%s (trusted) → skip location_resolver", wilayah_from_intent)
+                _trusted = True
+                return {
+                    "status": ResultStatus.SUCCESS,
+                    "provider": "SYSTEM",
+                    "data": {"entities": wilayah_from_intent},
+                    "reason": None,
+                    "metadata": {"trusted_from_intent": True, "scope": _scope},
+                    "confidence": None,
+                }
+
+    return await resolve_location_from_query(query, es_client)
+
+
+def _apply_entity_bridge(entities, data: dict, intent, kwargs: dict):
+    """Apply sub-level merge + intent bridge to entities. Returns entities (possibly modified)."""
+    # Sub-level merge: inject kecamatan from possible_matches
+    if isinstance(entities, dict):
+        all_matches = data.get("possible_matches", []) or data.get("matches", [])
+        if all_matches:
+            entities = _merge_sub_level_entities(entities, all_matches)
+            logger.debug("[AGG] after sub-level merge: %s", entities)
+
+    # EARLY INJECTION: intent fields → entities dict
+    if intent is not None and isinstance(entities, dict):
+        if getattr(intent, 'akreditasi', None):
+            entities['akreditasi'] = intent.akreditasi
+            entities['akreditasi_mode'] = getattr(intent, 'akreditasi_mode', 'exact') or 'exact'
+        if getattr(intent, 'jenjang', None) and 'bentuk_pendidikan' not in entities:
+            entities['bentuk_pendidikan'] = intent.jenjang
+        if getattr(intent, 'keaktifan', None) is not None:
+            entities['keaktifan'] = intent.keaktifan
+        if getattr(intent, 'wilayah_terpencil', None) is not None:
+            entities['wilayah_terpencil'] = intent.wilayah_terpencil
+        if getattr(intent, 'wilayah_perbatasan', None) is not None:
+            entities['wilayah_perbatasan'] = intent.wilayah_perbatasan
+        if getattr(intent, 'qc_masalah_only', False):
+            entities['qc_masalah_only'] = True
+        if getattr(intent, 'qc_min_masalah', None) is not None:
+            entities['qc_min_masalah'] = intent.qc_min_masalah
+        if getattr(intent, 'qc_field', None) is not None:
+            entities['qc_field'] = intent.qc_field
+        if getattr(intent, 'qc_field_list', None):
+            entities['qc_field_list'] = list(intent.qc_field_list)
+        if getattr(intent, 'qc_persen_min', None) is not None:
+            entities['qc_persen_min'] = float(intent.qc_persen_min)
+        if getattr(intent, 'qc_persen_max', None) is not None:
+            entities['qc_persen_max'] = float(intent.qc_persen_max)
+        if getattr(intent, 'metric_target', None):
+            entities['metric_target'] = intent.metric_target
+
+    # Second bridge: via request.cognitive_intent or kwargs
+    request_obj = kwargs.get("request")
+    _intent = None
+    if request_obj is not None:
+        _intent = getattr(request_obj, "cognitive_intent", None)
+    if _intent is None:
+        _intent = intent or kwargs.get("cognitive_intent") or kwargs.get("intent")
+    if _intent is not None and isinstance(entities, dict):
+        if getattr(_intent, 'jenjang', None) and 'bentuk_pendidikan' not in entities:
+            entities['bentuk_pendidikan'] = _intent.jenjang
+            logger.debug("[AGG_BRIDGE] jenjang dari intent: %s", _intent.jenjang)
+        if getattr(_intent, 'akreditasi', None):
+            entities['akreditasi'] = _intent.akreditasi
+            entities['akreditasi_mode'] = getattr(_intent, 'akreditasi_mode', 'exact') or 'exact'
+            logger.debug("[AGG_BRIDGE] akreditasi: %s", _intent.akreditasi)
+
+    logger.debug("DEBUG entities =%s", entities)
+    return entities
+
+
+async def _handle_single_wilayah(
+    query: str,
+    es_client: AsyncElasticsearch,
+    entities: dict,
+    intent,
+    resolution: dict,
+    ranking_gap: float,
+) -> Dict[str, Any]:
+    """
+    Handle agregasi single-wilayah (path utama).
+    Diekstrak dari handle_aggregation_query (Phase 11).
+    Returns dict dengan provider=ELASTICSEARCH_AGGREGATION.
+    """
+    query_filters = extract_filters_from_intent(intent)
+
+    cache_key = _cache_key({
+        **entities,
+        **{f"_qf_{k}": str(v) for k, v in query_filters.items()},
+        "_metric": entities.get("metric_target", "sekolah"),
+    })
+    cached = await get_cache(cache_key)
+    if cached:
+        return cached
+
+    logger.debug(f"ENTITIES BEFORE QUERY: {entities}")
+    normalized = normalize_entity_hierarchy(entities)
+
+    jenjang_label = None
+    jenjang_requested = None
+
+    if query_filters.get("bentuk_pendidikan"):
+        normalized["bentuk_pendidikan"] = query_filters["bentuk_pendidikan"]
+        logger.info("[AGG] filter jenjang: %s", query_filters["bentuk_pendidikan"])
+        jenjang_label = query_filters["bentuk_pendidikan"]
+        jenjang_requested = [jenjang_label]
+    elif query_filters.get("bentuk_pendidikan_in"):
+        multi_list = query_filters["bentuk_pendidikan_in"]
+        normalized["bentuk_pendidikan_in"] = multi_list
+        is_paud_expand = all(j in ["TK", "KB", "RA", "SPS", "TPA", "PAUDQ", "SDTK"] for j in multi_list)
+        if is_paud_expand:
+            jenjang_label = "PAUD"
+            logger.info("[AGG] filter jenjang PAUD expand: %s", multi_list)
+        else:
+            jenjang_label = ", ".join(multi_list)
+            logger.info("[AGG] filter multi jenjang: %s", multi_list)
+        jenjang_requested = multi_list
+
+    if not jenjang_requested:
+        jenjang_requested = [jenjang_label] if jenjang_label else None
+
+    if query_filters.get("status_sekolah"):
+        normalized["status_sekolah"] = query_filters["status_sekolah"]
+        logger.info("[AGG] filter status: %s", query_filters["status_sekolah"])
+
+    if query_filters.get("akreditasi_gte"):
+        normalized["akreditasi_gte"] = query_filters["akreditasi_gte"]
+        logger.info("[AGG] filter akreditasi >=: %s", query_filters["akreditasi_gte"])
+    elif query_filters.get("akreditasi_exact"):
+        normalized["akreditasi_exact"] = query_filters["akreditasi_exact"]
+        logger.info("[AGG] filter akreditasi =: %s", query_filters["akreditasi_exact"])
+
+    current_level = None
+    for lvl in ("desa_kelurahan", "kecamatan", "kabupaten", "provinsi"):
+        if lvl in normalized:
+            current_level = lvl
+            break
+
+    use_nested = current_level in ("provinsi", "kabupaten")
+    DRILLDOWN_MAP = {"provinsi": "kabupaten", "kabupaten": "kecamatan"}
+    drilldown_field = DRILLDOWN_MAP.get(current_level)
+
+    breakdown_jenjang: Dict[str, int] = {}
+    breakdown_status: Dict[str, int] = {}
+    drilldown_top3 = []
+
+    _metric_target = normalized.pop("metric_target", None) or entities.get("metric_target")
+    _qc_masalah_only = getattr(intent, 'qc_masalah_only', False) or normalized.get('qc_masalah_only', False)
+    _extra_qc_aggs: Dict[str, Any] = build_qc_aggs() if _qc_masalah_only else {}
+
+    async def _run_metric_query() -> int:
+        return await execute_aggregation_query(es_client, normalized)
+
+    if use_nested:
+        import asyncio as _asyncio
+        nested_task = execute_nested_aggregation_query(es_client, normalized, metric_target=_metric_target)
+        _drilldown_size = _extract_ranking_size(query) if is_ranking_query(query) else 3
+        drilldown_task = (
+            execute_drilldown_query(es_client, normalized, drilldown_field, size=_drilldown_size)
+            if drilldown_field else asyncio.sleep(0, result=[])
+        )
+        if _extra_qc_aggs:
+            _qc_body = {
+                "size": 0,
+                "query": {"bool": {"filter": build_filters(normalized)}},
+                "aggs": _extra_qc_aggs,
+            }
+            qc_task = es_client.search(
+                index=os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc"),
+                body=_qc_body,
+                request_timeout=10,
+            )
+            nested_result, drilldown_top3, _qc_resp = await _asyncio.gather(
+                nested_task, drilldown_task, qc_task, return_exceptions=True,
+            )
+            _qc_aggs_result = (
+                _qc_resp.get("aggregations", {}) if not isinstance(_qc_resp, Exception) else {}
+            )
+        else:
+            nested_result, drilldown_top3 = await _asyncio.gather(
+                nested_task, drilldown_task, return_exceptions=True,
+            )
+            _qc_aggs_result = {}
+
+        if isinstance(drilldown_top3, Exception):
+            drilldown_top3 = []
+        if drilldown_top3:
+            logger.info("DRILLDOWN top3 field=%s results=%s", drilldown_field, drilldown_top3)
+
+        if isinstance(nested_result, Exception) or nested_result is None:
+            logger.warning("Nested agg failed, falling back to metric/count")
+            total = await _run_metric_query()
+        else:
+            total = nested_result["total"]
+            breakdown_jenjang = nested_result["breakdown_jenjang"]
+            breakdown_status = nested_result["breakdown_status"]
+            logger.info("NESTED AGG total=%s jenjang_keys=%s status_keys=%s",
+                total, list(breakdown_jenjang.keys())[:5], list(breakdown_status.keys()))
     else:
-        wilayah_label = "seluruh Indonesia"
+        total = await _run_metric_query()
+        _qc_aggs_result = {}
 
-    es_filters = extract_filters_from_intent(intent)
+    logger.info(f"AGG TOTAL = {total}")
+    logger.info(f"AGG ENTITIES = {entities}")
 
-    try:
-        # Query 1: total semua sekolah
-        q_total = build_es_query(intent, es_filters, size=0)
-        q_total["aggs"] = {"total": {"value_count": {"field": "npsn"}}}
+    if total is None:
+        return _error("ELASTICSEARCH_ERROR")
 
-        # Query 2: sekolah bersih (total_masalah = 0)
-        q_bersih = build_es_query(intent, es_filters, size=0)
-        q_bersih["query"]["bool"].setdefault("filter", [])
-        q_bersih["query"]["bool"]["filter"].append(
-            {"term": {"qc_score.total_masalah": 0}}
-        )
-        q_bersih["aggs"] = {"total": {"value_count": {"field": "npsn"}}}
+    _is_numeric_metric = _metric_target and _metric_target != "sekolah"
+    has_operational_filter = bool(
+        query_filters.get("akreditasi_gte") or
+        query_filters.get("akreditasi_exact") or
+        query_filters.get("bentuk_pendidikan") or
+        query_filters.get("status_sekolah")
+    )
 
-        r_total, r_bersih = await asyncio.gather(
-            es_client.search(index=index, body=q_total, request_timeout=10),
-            es_client.search(index=index, body=q_bersih, request_timeout=10),
-        )
-
-        total = r_total.get("aggregations", {}).get("total", {}).get("value", 0)
-        bersih = r_bersih.get("aggregations", {}).get("total", {}).get("value", 0)
-        bermasalah = total - bersih
-
-        persen_bersih = round((bersih / total) * 100, 2) if total > 0 else 0.0
-        persen_bermasalah = round((bermasalah / total) * 100, 2) if total > 0 else 0.0
-
-        return {
-            "status": ResultStatus.SUCCESS,
-            "provider": "ELASTICSEARCH_QC_PERCENTAGE",
-            "data": {
-                "qc_percentage": True,
-                "total_sekolah": total,
-                "total_bersih": bersih,
-                "total_bermasalah": bermasalah,
-                "persen_bersih": persen_bersih,
-                "persen_bermasalah": persen_bermasalah,
-                "wilayah_label": wilayah_label,
-            },
-            "confidence": 0.95,
-            "answer_confident": True,
+    total_all = None
+    pct_of_total = None
+    if has_operational_filter and total is not None and total > 0 and not _is_numeric_metric:
+        location_only = {
+            k: v for k, v in normalized.items()
+            if k not in (
+                "bentuk_pendidikan", "status_sekolah",
+                "akreditasi_gte", "akreditasi_exact", "_akreditasi_values"
+            )
         }
-    except Exception as exc:
-        logger.exception("[AGG_QC_PCT] Error: %s", exc)
-        return {
-            "status": ResultStatus.VALIDATION_ERROR,
-            "provider": "SYSTEM_VALIDATION",
-            "data": {"message": "Gagal menghitung persentase kualitas data."},
-            "confidence": 0,
-            "answer_confident": False,
+        total_all = await execute_aggregation_query(es_client, location_only)
+        if total_all and total_all > 0:
+            pct_of_total = round(total / total_all * 100, 1)
+            logger.info("[AGG] total=%s total_all=%s pct=%.1f%%", total, total_all, pct_of_total)
+
+    if not jenjang_requested:
+        jenjang_requested = query_filters.get("jenjang_requested", [])
+
+    if jenjang_requested and breakdown_jenjang:
+        requested_upper = [j.upper() for j in jenjang_requested]
+        breakdown_jenjang_filtered = {
+            k: v for k, v in breakdown_jenjang.items()
+            if k.upper() in requested_upper
         }
+        if breakdown_jenjang_filtered:
+            breakdown_jenjang = breakdown_jenjang_filtered
+            logger.info("[AGG] breakdown filtered to requested jenjang: %s", list(breakdown_jenjang.keys()))
+
+    if total == 0:
+        result = _validation("DATA_NOT_FOUND", query, resolution, ranking_gap, entities)
+        logger.warning(f"ZERO RESULT for entities: {entities}")
+        await set_cache(cache_key, result, 600)
+        return result
+
+    confidence = compute_aggregation_confidence(
+        query=query,
+        resolution_status=(
+            resolution["status"].value
+            if hasattr(resolution["status"], "value")
+            else str(resolution["status"])
+        ),
+        resolution_metadata=resolution.get("metadata", {}),
+        total_hits=total,
+        ranking_gap=ranking_gap
+    )
+
+    answer_confident = confidence >= 0.7
+    result = {
+        "status": ResultStatus.SUCCESS,
+        "provider": "ELASTICSEARCH_AGGREGATION",
+        "total": total,
+        "metric_target": _metric_target or "sekolah",
+        "total_all": total_all,
+        "pct_of_total": pct_of_total,
+        "active_filters": query_filters,
+        "jenjang_requested": jenjang_requested,
+        "entities": entities,
+        "confidence": confidence,
+        "answer_confident": answer_confident,
+        "metadata": resolution.get("metadata", {}),
+        "breakdown_jenjang": breakdown_jenjang,
+        "breakdown_status": breakdown_status,
+        "drilldown_field": drilldown_field or "",
+        "drilldown_top3": drilldown_top3,
+        "qc_aggs": _qc_aggs_result,
+    }
+
+    await set_cache(cache_key, result, 3600)
+    return result
 
 
 async def handle_aggregation_query(
@@ -345,126 +834,8 @@ async def handle_aggregation_query(
     if getattr(intent, "qc_persen_query", False):
         return await _handle_qc_percentage_query(intent, es_client, query)
 
-    # =====================================================
-    # TRUST INTENT.SCOPE — short-circuit untuk nasional
-    # =====================================================
-    _scope = getattr(intent, "scope", None) if intent is not None else None
-
-    if _scope == "nasional":
-        w = getattr(intent, "wilayah", None)
-        has_specific_wilayah = w is not None and any([
-            getattr(w, "provinsi", None),
-            getattr(w, "kabupaten", None),
-            getattr(w, "kecamatan", None),
-            getattr(w, "desa", None),
-        ])
-        if not has_specific_wilayah:
-            logger.info(
-                "[AGG] intent.scope=nasional (trusted from cognitive router) "
-                "→ skip resolve_entities"
-            )
-            resolution = {
-                "status": ResultStatus.SUCCESS,
-                "provider": "SYSTEM",
-                "data": {"entities": {}},
-                "reason": None,
-                "metadata": {
-                    "national_scope": True,
-                    "trigger": "intent_scope",
-                },
-                "confidence": None,
-            }
-        else:
-            logger.warning(
-                "[AGG] intent.scope=nasional BUT wilayah present "
-                "(prov=%s kab=%s kec=%s) → fallback resolve_entities",
-                getattr(w, "provinsi", None),
-                getattr(w, "kabupaten", None),
-                getattr(w, "kecamatan", None),
-            )
-            resolution = await resolve_entities(query, es_client)
-    else:
-        # =====================================================
-        # TRUST INTENT.WILAYAH — bypass resolver untuk wilayah spesifik
-        # =====================================================
-        _trusted = False
-        if intent is not None:
-            w = getattr(intent, "wilayah", None)
-            if w is not None:
-                wilayah_from_intent: Dict[str, str] = {}
-
-                if getattr(w, "provinsi", None):
-                    prov_raw = w.provinsi.lower().strip()
-                    if (prov_raw in _JAKARTA_PROVINSI_ALIASES
-                            or "dki" in prov_raw
-                            or "d.k.i" in prov_raw
-                            or prov_raw == "jakarta"):
-                        wilayah_from_intent["provinsi"] = _JAKARTA_PROVINSI_CANONICAL
-                        logger.info(
-                            "[AGG] DKI Jakarta provinsi remap: '%s' → '%s'",
-                            prov_raw, _JAKARTA_PROVINSI_CANONICAL,
-                        )
-                    else:
-                        wilayah_from_intent["provinsi"] = _normalize_wilayah_prefix(
-                            w.provinsi, "prov."
-                        )
-
-                kab_raw = (getattr(w, "kabupaten", None) or "").lower().strip()
-                if kab_raw:
-                    has_prefix = any(
-                        kab_raw.startswith(p)
-                        for p in ("kab.", "kota ", "kabupaten ", "kota adm.")
-                    )
-                    if not has_prefix and kab_raw in _AMBIGUOUS_CITIES:
-                        logger.info(
-                            "[AGG] ambiguous city '%s' without prefix → "
-                            "skip auto-trust, let resolver ask for clarification",
-                            kab_raw,
-                        )
-                    elif kab_raw in _JAKARTA_KABUPATEN_CANONICAL:
-                        canonical = _JAKARTA_KABUPATEN_CANONICAL[kab_raw]
-                        wilayah_from_intent["kabupaten"] = canonical
-                        logger.info(
-                            "[AGG] Jakarta remap: '%s' → '%s'", kab_raw, canonical,
-                        )
-                    else:
-                        wilayah_from_intent["kabupaten"] = _normalize_wilayah_prefix(
-                            w.kabupaten, "kab."
-                        )
-
-                if getattr(w, "kecamatan", None):
-                    wilayah_from_intent["kecamatan"] = _normalize_wilayah_prefix(
-                        w.kecamatan, "kec."
-                    )
-                if getattr(w, "desa", None):
-                    wilayah_from_intent["desa_kelurahan"] = w.desa.lower().strip()
-
-                if wilayah_from_intent:
-                    logger.info(
-                        "[AGG] intent.wilayah=%s (trusted from cognitive router) "
-                        "→ skip resolve_entities",
-                        wilayah_from_intent,
-                    )
-                    resolution = {
-                        "status": ResultStatus.SUCCESS,
-                        "provider": "SYSTEM",
-                        "data": {"entities": wilayah_from_intent},
-                        "reason": None,
-                        "metadata": {
-                            "trusted_from_intent": True,
-                            "scope": _scope,
-                        },
-                        "confidence": None,
-                    }
-                    _trusted = True
-
-        if not _trusted:
-            resolution = await resolve_entities(query, es_client)
-
-    # ===============================
-    # DEBUG
-    # ===============================
-    logger.debug("[AGG_DEBUG] resolution=%s", resolution)
+    resolution = await _build_resolution(query, es_client, intent, kwargs)
+    logger.debug("[AGG] resolution=%s", resolution)
     ranking_gap = resolution.get("metadata", {}).get("ranking_gap", 0.0)
     
     if resolution["status"] == ResultStatus.NOT_FOUND:
@@ -566,361 +937,31 @@ async def handle_aggregation_query(
     data = resolution.get("data", {})
     entities = data.get("entities")
     is_multi = data.get("is_multi", False)
-    
-    # ===============================
-    # SUB-LEVEL MERGE (kecamatan dari possible_matches)
-    # ===============================
-    if isinstance(entities, dict):
-        all_matches = data.get("possible_matches", []) or data.get("matches", [])
-        if all_matches:
-            entities = _merge_sub_level_entities(entities, all_matches)
-            logger.debug("[AGG] after sub-level merge: %s", entities)
-            
-    # ── Bridge dari intent → entities (EARLY INJECTION) ─────────────
-    if intent is not None and isinstance(entities, dict):
-        if getattr(intent, 'akreditasi', None):
-            entities['akreditasi'] = intent.akreditasi
-            entities['akreditasi_mode'] = getattr(intent, 'akreditasi_mode', 'exact') or 'exact'
-            logger.debug("[AGG_BRIDGE_EARLY] akreditasi: %s", intent.akreditasi)
 
-        if getattr(intent, 'jenjang', None) and 'bentuk_pendidikan' not in entities:
-            entities['bentuk_pendidikan'] = intent.jenjang
-            logger.debug("[AGG_BRIDGE_EARLY] jenjang: %s", intent.jenjang)
-
-        if getattr(intent, 'keaktifan', None) is not None:
-            entities['keaktifan'] = intent.keaktifan
-            logger.debug("[AGG_BRIDGE_EARLY] keaktifan: %s", intent.keaktifan)
-
-        if getattr(intent, 'wilayah_terpencil', None) is not None:
-            entities['wilayah_terpencil'] = intent.wilayah_terpencil
-            logger.debug("[AGG_BRIDGE_EARLY] wilayah_terpencil: %s", intent.wilayah_terpencil)
-
-        if getattr(intent, 'wilayah_perbatasan', None) is not None:
-            entities['wilayah_perbatasan'] = intent.wilayah_perbatasan
-            logger.debug("[AGG_BRIDGE_EARLY] wilayah_perbatasan: %s", intent.wilayah_perbatasan)
-
-        if getattr(intent, 'qc_masalah_only', False):
-            entities['qc_masalah_only'] = True
-            logger.debug("[AGG_BRIDGE_EARLY] qc_masalah_only=True")
-
-        if getattr(intent, 'qc_min_masalah', None) is not None:
-            entities['qc_min_masalah'] = intent.qc_min_masalah
-            logger.debug("[AGG_BRIDGE_EARLY] qc_min_masalah: %s", intent.qc_min_masalah)
-
-        if getattr(intent, 'qc_field', None) is not None:
-            entities['qc_field'] = intent.qc_field
-            logger.debug("[AGG_BRIDGE_EARLY] qc_field: %s", intent.qc_field)
-
-        if getattr(intent, 'qc_field_list', None):
-            entities['qc_field_list'] = list(intent.qc_field_list)
-            logger.debug("[AGG_BRIDGE_EARLY] qc_field_list: %s", intent.qc_field_list)
-
-        if getattr(intent, 'qc_persen_min', None) is not None:
-            entities['qc_persen_min'] = float(intent.qc_persen_min)
-            logger.debug("[AGG_BRIDGE_EARLY] qc_persen_min: %s", intent.qc_persen_min)
-
-        if getattr(intent, 'qc_persen_max', None) is not None:
-            entities['qc_persen_max'] = float(intent.qc_persen_max)
-            logger.debug("[AGG_BRIDGE_EARLY] qc_persen_max: %s", intent.qc_persen_max)
-
-        if getattr(intent, 'metric_target', None):
-            entities['metric_target'] = intent.metric_target
-            logger.debug("[AGG_BRIDGE_EARLY] metric_target: %s", intent.metric_target)
-    # ── BRIDGE: merge intent → entities (akreditasi & jenjang) ─────────────
-    if intent:
-
-        def _inject(e):
-            if not isinstance(e, dict):
-                return e
-            if getattr(intent, "akreditasi", None):
-                e["akreditasi"] = intent.akreditasi
-            if getattr(intent, "akreditasi_mode", None):
-                e["akreditasi_mode"] = intent.akreditasi_mode
-            if getattr(intent, "jenjang", None):
-                e["bentuk_pendidikan"] = intent.jenjang
-            return e
-
-        if isinstance(entities, list):
-            entities = [_inject(e) for e in entities]
-        elif isinstance(entities, dict):
-            entities = _inject(entities)
-    
     if entities is None:
-        return _validation(
-            "LOCATION_NOT_FOUND",
-            query,
-            resolution,
-            ranking_gap
-        )
-    # ── Bridge filter dari CognitiveIntent → entities ────────────────────────────
-    # intent bisa berupa CognitiveIntent (LLM path) atau None (fallback path)
-    request_obj = kwargs.get("request")
-    _intent = None
+        return _validation("LOCATION_NOT_FOUND", query, resolution, ranking_gap)
 
-    if request_obj is not None:
-        _intent = getattr(request_obj, "cognitive_intent", None)
+    entities = _apply_entity_bridge(entities, data, intent, kwargs)
 
-    if _intent is None:
-        _intent = intent or kwargs.get("cognitive_intent") or kwargs.get("intent")
-
-    if _intent is not None:
-        # Merge jenjang dari intent jika belum ada di entities
-        if getattr(_intent, 'jenjang', None) and 'bentuk_pendidikan' not in entities:
-            entities['bentuk_pendidikan'] = _intent.jenjang
-            logger.debug("[AGG_BRIDGE] jenjang dari intent: %s", _intent.jenjang)
-
-        # Merge akreditasi dari intent
-        if getattr(_intent, 'akreditasi', None):
-            entities['akreditasi'] = _intent.akreditasi
-            entities['akreditasi_mode'] = getattr(_intent, 'akreditasi_mode', 'exact') or 'exact'
-            logger.debug(
-                "[AGG_BRIDGE] akreditasi dari intent: %s mode=%s",
-                _intent.akreditasi, entities['akreditasi_mode']
-            )
-    logger.debug("DEBUG entities =%s", entities)
-    
-    # ===============================
-    # MULTI-JENJANG HANDLING (FROM INTENT)
-    # ===============================
     _jenjang_multi = getattr(intent, 'jenjang_list', []) or getattr(intent, 'jenjang_multi', [])
-
     if isinstance(entities, dict) and _jenjang_multi and len(_jenjang_multi) > 1:
-        # Hapus jenjang tunggal kalau ada
         entities.pop('bentuk_pendidikan', None)
-
-        # Gunakan filter IN untuk multi jenjang
         entities['bentuk_pendidikan_in'] = _jenjang_multi
-
         logger.debug("[AGG] multi jenjang detected: %s", _jenjang_multi)
-
-
-    # ===============================
-    # PERSENTASE SUPPORT (DENOMINATOR PREP)
-    # ===============================
-    _needs_pct = bool(
-        entities.get('akreditasi') or
-        entities.get('akreditasi_gte') or
-        entities.get('akreditasi_exact')
-    )
-
-    entities_no_akred = None
-
-    if _needs_pct and isinstance(entities, dict):
-        # Copy tanpa filter akreditasi
-        entities_no_akred = {
-            k: v for k, v in entities.items()
-            if k not in (
-                'akreditasi',
-                'akreditasi_mode',
-                'akreditasi_gte',
-                'akreditasi_exact'
-            )
-        }
-
-        logger.debug("[AGG] entities_no_akred prepared: %s", entities_no_akred)
     # =====================================================
     # NASIONAL SCOPE HANDLING
     # =====================================================
-    # Tidak ada filter wilayah sama sekali → agregasi nasional
     if isinstance(entities, dict):
-
-        wilayah_keys = (
-            "provinsi",
-            "kabupaten",
-            "kecamatan",
-            "desa_kelurahan"
-        )
-
-        has_wilayah_filter = any(
-            entities.get(k) for k in wilayah_keys
-        )
-
+        wilayah_keys = ("provinsi", "kabupaten", "kecamatan", "desa_kelurahan")
+        has_wilayah_filter = any(entities.get(k) for k in wilayah_keys)
         if not has_wilayah_filter:
-
-            logger.info("[AGG] Scope nasional detected")
-
-            query_filters = extract_filters_from_intent(intent)
-
-            normalized = {}
-
-            # inject filter operasional (jenjang, status, akreditasi)
-            if query_filters.get("bentuk_pendidikan"):
-                normalized["bentuk_pendidikan"] = query_filters["bentuk_pendidikan"]
-
-            if query_filters.get("bentuk_pendidikan_in"):
-                normalized["bentuk_pendidikan_in"] = query_filters["bentuk_pendidikan_in"]
-
-            if query_filters.get("status_sekolah"):
-                normalized["status_sekolah"] = query_filters["status_sekolah"]
-
-            if query_filters.get("akreditasi_gte"):
-                normalized["akreditasi_gte"] = query_filters["akreditasi_gte"]
-
-            if query_filters.get("akreditasi_exact"):
-                normalized["akreditasi_exact"] = query_filters["akreditasi_exact"]
-
-            # build ES aggregation query
-            es_query = build_aggregation_query(normalized)
-
-            # tambahan breakdown nasional per provinsi
-            es_query.setdefault("aggs", {})
-            es_query["aggs"]["by_provinsi"] = {
-                "terms": {
-                    "field": "provinsi",
-                    "size": 38
-                }
-            }
-
-            logger.debug(
-                "AGG NASIONAL QUERY: %s",
-                es_query
-            )
-
-            result = await es_client.search(
-                index=os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc"),
-                body=es_query
-            )
-
-            logger.debug(
-                "[AGG_NASIONAL_DEBUG] by_status raw buckets: %s",
-                result.get("aggregations", {}).get("by_status", {}).get("buckets", [])
-            )
-            logger.debug(
-                "[AGG_NASIONAL_DEBUG] by_jenjang raw buckets count: %d",
-                len(result.get("aggregations", {}).get("by_jenjang", {}).get("buckets", []))
-            )
-
-            total = (
-                result.get("aggregations", {})
-                .get("total", {})
-                .get("value", 0)
-            )
-
-            prov_buckets = (
-                result.get("aggregations", {})
-                .get("by_provinsi", {})
-                .get("buckets", [])
-            )
-
-            status_buckets = (
-                result.get("aggregations", {})
-                .get("by_status", {})
-                .get("buckets", [])
-            )
-            # Sum values per uppercase key — ES may have both "Swasta" and "SWASTA"
-            # as separate keyword buckets; dict comprehension would overwrite the larger
-            # count with the smaller one (last write wins). Use accumulation instead.
-            breakdown_status_nasional: Dict[str, int] = {}
-            for b in status_buckets:
-                k = b.get("key", "").upper()
-                if k in ("NEGERI", "SWASTA"):
-                    breakdown_status_nasional[k] = (
-                        breakdown_status_nasional.get(k, 0) + b["doc_count"]
-                    )
-
-            jenjang_buckets = (
-                result.get("aggregations", {})
-                .get("by_jenjang", {})
-                .get("buckets", [])
-            )
-            breakdown_jenjang_nasional: Dict[str, int] = {
-                b["key"]: b["doc_count"]
-                for b in jenjang_buckets
-                if b.get("key")
-            }
-
-            confidence = compute_aggregation_confidence(
-                query=query,
-                resolution_status=resolution["status"].value,
-                resolution_metadata=resolution.get("metadata", {}),
-                total_hits=total,
-                ranking_gap=ranking_gap
-            )
-
-            answer_confident = confidence >= 0.7
-
-            return {
-                "status": ResultStatus.SUCCESS,
-                "provider": "ELASTICSEARCH_AGGREGATION_NASIONAL",
-                "total": total,
-                "ranking": prov_buckets,
-                "breakdown_status": breakdown_status_nasional or None,
-                "breakdown_jenjang": breakdown_jenjang_nasional or None,
-                "entities": {},
-                "active_filters": query_filters,
-                "confidence": confidence,
-                "answer_confident": answer_confident,
-                "metadata": resolution.get("metadata", {})
-            }
+            return await _handle_nasional_scope(query, es_client, intent, resolution, ranking_gap)
     # =====================================================
     # MULTI ENTITY HANDLING (WITH CACHE)
     # =====================================================
 
     if is_multi and isinstance(entities, list):
-
-        logger.info("MULTI AGGREGATION MODE: %s", entities)
-
-        # ---- CACHE CHECK ----
-        cache_key = _cache_key(entities)
-        cached = await get_cache(cache_key)
-        if cached:
-            logger.info("MULTI CACHE HIT")
-            return cached
-
-        # ---- EXECUTE MULTI ----
-        logger.debug(f"ENTITIES BEFORE QUERY: {entities}")
-        results = await execute_multi_aggregation_query(
-            es_client,
-            entities
-        )
-
-        comparison = []
-
-        for item in results:
-            if not item:
-                continue
-
-            ent = item.get("entities", {})
-            total = item.get("total", 0)
-
-            comparison.append({
-                "entities": ent,
-                "total": total
-            })
-
-        total_sum = sum(x["total"] for x in comparison)
-        if not comparison:
-            return _validation(
-                "LOCATION_NOT_FOUND",
-                query,
-                resolution,
-                ranking_gap
-            )
-
-        confidence = compute_aggregation_confidence(
-            query=query,
-            resolution_status=resolution["status"].value,
-            resolution_metadata=resolution.get("metadata", {}),
-            total_hits=total_sum,
-            ranking_gap=ranking_gap
-        )
-
-        answer_confident = confidence >= 0.7
-        
-        result = {
-            "status": ResultStatus.SUCCESS,
-            "provider": "ELASTICSEARCH_MULTI_AGGREGATION",
-            "comparison": comparison,
-            "is_multi": True,
-            "confidence": confidence,
-            "answer_confident": answer_confident
-        }
-
-        # ---- SAVE CACHE ----
-        await set_cache(cache_key, result, 3600)
-
-        return result
-
+        return await _handle_multi_entity(query, es_client, entities, resolution, ranking_gap)
 
     if not validate_hierarchy_consistency(query, entities):
         # Ranking queries use level words ("kabupaten", "provinsi") as aggregation axis,
@@ -953,357 +994,12 @@ async def handle_aggregation_query(
     # GLOBAL RANKING FALLBACK
     # ==================================
     if not validate_location_presence(entities):
+        fallback = await _handle_ranking_fallback(query, es_client, resolution, ranking_gap)
+        if fallback is not None:
+            return fallback
+        return _validation("LOCATION_NOT_FOUND", query, resolution, ranking_gap)
 
-        if is_ranking_query(query):
-            level = detect_ranking_level(query)
-
-            if not level:
-                return _validation(
-                    "LOCATION_NOT_FOUND",
-                    query,
-                    resolution,
-                    ranking_gap
-                )
-
-            group_field = level
-
-            buckets = await execute_global_ranking_query(
-                es_client,
-                group_field=group_field,
-                size=5
-            )
-
-            if not buckets:
-                return _validation(
-                    "LOCATION_NOT_FOUND",
-                    query,
-                    resolution,
-                    ranking_gap
-                )
-
-            top = buckets[0]
-
-            confidence = compute_aggregation_confidence(
-                query=query,
-                resolution_status=resolution["status"].value,
-                resolution_metadata=resolution.get("metadata", {}),
-                total_hits=top.get("doc_count", 0),
-                ranking_gap=ranking_gap
-            )
-
-            answer_confident = confidence >= 0.7
-
-
-            return {
-                "status": ResultStatus.SUCCESS,
-                "provider": "ELASTICSEARCH_GLOBAL_RANKING",
-                "top_location": top.get("key"),
-                "total": top.get("doc_count"),
-                "ranking": buckets,
-                "confidence": confidence,
-                "answer_confident": answer_confident
-            }
-            
-        return _validation(
-            "LOCATION_NOT_FOUND",
-            query,
-            resolution,
-            ranking_gap
-        )
-
-
-    # Cache key harus mencakup query filters agar tidak cache collision
-    # antara query "berapa sekolah di sleman" vs "berapa sekolah akreditasi B di sleman"
-    query_filters = extract_filters_from_intent(intent)
-    
-    cache_key = _cache_key({
-        **entities,
-        **{f"_qf_{k}": str(v) for k, v in query_filters.items()},
-        "_metric": entities.get("metric_target", "sekolah"),   
-    })
-    cached = await get_cache(cache_key)
-    if cached:
-        return cached   
-
-    logger.debug(f"ENTITIES BEFORE QUERY: {entities}")
-    normalized = normalize_entity_hierarchy(entities)
-
-    # ── Inject filter operasional dari query ─────────────────────────────────
-
-    jenjang_label = None
-    jenjang_requested = None
-    
-    if query_filters.get("bentuk_pendidikan"):
-
-        normalized["bentuk_pendidikan"] = query_filters["bentuk_pendidikan"]
-
-        logger.info(
-            "[AGG] filter jenjang: %s",
-            query_filters["bentuk_pendidikan"]
-        )
-
-        jenjang_label = query_filters["bentuk_pendidikan"]
-        jenjang_requested = [jenjang_label]
-        
-    elif query_filters.get("bentuk_pendidikan_in"):
-
-        multi_list = query_filters["bentuk_pendidikan_in"]
-        normalized["bentuk_pendidikan_in"] = multi_list
-
-        # PAUD expand (TK, KB, RA, dll.)
-        is_paud_expand = all(
-            j in ["TK", "KB", "RA", "SPS", "TPA", "PAUDQ", "SDTK"]
-            for j in multi_list
-        )
-
-        if is_paud_expand:
-            jenjang_label = "PAUD"
-            logger.info("[AGG] filter jenjang PAUD expand: %s", multi_list)
-        else:
-            # Multi-jenjang eksplisit user
-            jenjang_label = ", ".join(multi_list)
-            logger.info("[AGG] filter multi jenjang: %s", multi_list)
-
-        #  INI PENTING BANGET
-        jenjang_requested = multi_list
-
-    # pass ke narrator
-    if not jenjang_requested:
-        jenjang_requested = [jenjang_label] if jenjang_label else None
-
-    if query_filters.get("status_sekolah"):
-
-        normalized["status_sekolah"] = query_filters["status_sekolah"]
-
-        logger.info(
-            "[AGG] filter status: %s",
-            query_filters["status_sekolah"]
-        )
-    # ─────────────────────────────────────────────────────────────────────────
-    if query_filters.get("akreditasi_gte"):
-        normalized["akreditasi_gte"] = query_filters["akreditasi_gte"]
-        logger.info("[AGG] filter akreditasi >=: %s", query_filters["akreditasi_gte"])
-    elif query_filters.get("akreditasi_exact"):
-        normalized["akreditasi_exact"] = query_filters["akreditasi_exact"]
-        logger.info("[AGG] filter akreditasi =: %s", query_filters["akreditasi_exact"])
-    # ── Tentukan level saat ini ─────────────────────────────────────────────
-    # Urutan prioritas: desa > kecamatan > kabupaten > provinsi
-    current_level = None
-    for lvl in ("desa_kelurahan", "kecamatan", "kabupaten", "provinsi"):
-        if lvl in normalized:
-            current_level = lvl
-            break
-
-    # ── Nested aggregation: aktif untuk provinsi dan kabupaten ───────────────
-    # Level ini punya data cukup banyak sehingga breakdown bermakna.
-    # Kecamatan dan desa tetap pakai count API (lebih cepat).
-    use_nested = current_level in ("provinsi", "kabupaten")
-
-    # ── Drilldown level mapping ──────────────────────────────────────────────
-    # Provinsi → top 3 kabupaten/kota
-    # Kabupaten → top 3 kecamatan
-    # Kecamatan → top 3 desa (opsional, data mungkin terlalu granular)
-    DRILLDOWN_MAP = {
-        "provinsi":  "kabupaten",
-        "kabupaten": "kecamatan",
-    }
-    drilldown_field = DRILLDOWN_MAP.get(current_level)
-
-    breakdown_jenjang = {}
-    breakdown_status  = {}
-    drilldown_top3    = []
-
-    # Ekstrak metric_target sebelum cabang use_nested / kecamatan
-    _metric_target = normalized.pop("metric_target", None) or entities.get("metric_target")
-
-    # ── QC aggs: aktif jika intent minta data bermasalah ────────────────────
-    _qc_masalah_only = getattr(intent, 'qc_masalah_only', False) or normalized.get('qc_masalah_only', False)
-    _extra_qc_aggs: Dict[str, Any] = build_qc_aggs() if _qc_masalah_only else {}
-
-    async def _run_metric_query() -> int:
-        """Count dokumen sekolah — index baru hanya mendukung count."""
-        return await execute_aggregation_query(es_client, normalized)
-
-    if use_nested:
-        # Provinsi/Kabupaten: nested agg + drilldown berjalan concurrent
-        import asyncio as _asyncio
-        nested_task = execute_nested_aggregation_query(
-            es_client, normalized, metric_target=_metric_target
-        )
-        _drilldown_size = (
-            _extract_ranking_size(query) if is_ranking_query(query) else 3
-        )
-        drilldown_task = (
-            execute_drilldown_query(es_client, normalized, drilldown_field, size=_drilldown_size)
-            if drilldown_field
-            else asyncio.sleep(0, result=[])
-        )
-        # QC aggs (opsional, hanya jika qc_masalah_only)
-        if _extra_qc_aggs:
-            _qc_body = {
-                "size": 0,
-                "query": {"bool": {"filter": build_filters(normalized)}},
-                "aggs": _extra_qc_aggs,
-            }
-            qc_task = es_client.search(
-                index=os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc"),
-                body=_qc_body,
-                request_timeout=10,
-            )
-            nested_result, drilldown_top3, _qc_resp = await _asyncio.gather(
-                nested_task, drilldown_task, qc_task,
-                return_exceptions=True,
-            )
-            _qc_aggs_result = (
-                _qc_resp.get("aggregations", {})
-                if not isinstance(_qc_resp, Exception) else {}
-            )
-        else:
-            nested_result, drilldown_top3 = await _asyncio.gather(
-                nested_task, drilldown_task,
-                return_exceptions=True,
-            )
-            _qc_aggs_result = {}
-
-        if isinstance(drilldown_top3, Exception):
-            drilldown_top3 = []
-        if drilldown_top3:
-            logger.info(
-                "DRILLDOWN top3 field=%s results=%s",
-                drilldown_field, drilldown_top3
-            )
-
-        if isinstance(nested_result, Exception) or nested_result is None:
-            logger.warning("Nested agg failed, falling back to metric/count")
-            total = await _run_metric_query()
-        else:
-            total             = nested_result["total"]
-            breakdown_jenjang = nested_result["breakdown_jenjang"]
-            breakdown_status  = nested_result["breakdown_status"]
-            logger.info(
-                "NESTED AGG total=%s jenjang_keys=%s status_keys=%s",
-                total,
-                list(breakdown_jenjang.keys())[:5],
-                list(breakdown_status.keys()),
-            )
-
-    else:
-        # Kecamatan/Desa: tidak ada nested agg, langsung query ES untuk total
-        total = await _run_metric_query()
-        _qc_aggs_result = {}
-
-    # ── Log result ─────────────────────────────────────────────────────────
-    logger.info(f"AGG TOTAL = {total}")
-    logger.info(f"AGG ENTITIES = {entities}")
-    
-    if total is None:
-        return _error("ELASTICSEARCH_ERROR")
-    
-    # ── Hitung total_all untuk persentase ─────────────────────────────
-    _is_numeric_metric = _metric_target and _metric_target != "sekolah"
-
-    has_operational_filter = bool(
-        query_filters.get("akreditasi_gte") or
-        query_filters.get("akreditasi_exact") or
-        query_filters.get("bentuk_pendidikan") or
-        query_filters.get("status_sekolah")
-    )
-
-    total_all = None
-    pct_of_total = None
-    # Jangan hitung pct jika metric adalah numerik (siswa/guru) —
-    # tidak bisa dibandingkan dengan count dokumen sebagai total_all
-    if has_operational_filter and total is not None and total > 0 and not _is_numeric_metric:
-        location_only = {
-            k: v for k, v in normalized.items()
-            if k not in (
-                "bentuk_pendidikan",
-                "status_sekolah",
-                "akreditasi_gte",
-                "akreditasi_exact",
-                "_akreditasi_values"  # optional (sudah tidak dipakai sebenarnya)
-            )
-        }
-
-        total_all = await execute_aggregation_query(es_client, location_only)
-
-        if total_all and total_all > 0:
-            pct_of_total = round(total / total_all * 100, 1)
-            logger.info(
-                "[AGG] total=%s total_all=%s pct=%.1f%%",
-                total, total_all, pct_of_total
-            )
-    
-    # ── Filter breakdown_jenjang sesuai jenjang yang user minta ────────────
-    # Jika user sebut jenjang spesifik, tampilkan hanya itu
-    # Jika tidak ada preferensi jenjang, tampilkan semua (default behavior)
-    if not jenjang_requested:
-        jenjang_requested = query_filters.get("jenjang_requested", [])
-
-    if jenjang_requested and breakdown_jenjang:
-        # Normalize ke uppercase biar robust
-        requested_upper = [j.upper() for j in jenjang_requested]
-
-        breakdown_jenjang_filtered = {
-            k: v for k, v in breakdown_jenjang.items()
-            if k.upper() in requested_upper
-        }
-
-        # Pakai hasil filter jika tidak kosong
-        if breakdown_jenjang_filtered:
-            breakdown_jenjang = breakdown_jenjang_filtered
-            logger.info(
-                "[AGG] breakdown filtered to requested jenjang: %s",
-                list(breakdown_jenjang.keys())
-            )
-    # ─────────────────────────────────────────────────────────────
-    if total == 0:
-        result = _validation(
-            "DATA_NOT_FOUND",
-            query,
-            resolution,
-            ranking_gap,
-            entities
-        )
-        logger.warning(f"ZERO RESULT for entities: {entities}")
-        await set_cache(cache_key, result, 600)
-        return result
-
-    confidence = compute_aggregation_confidence(
-        query=query,
-        resolution_status = (
-            resolution["status"].value
-            if hasattr(resolution["status"], "value")
-            else str(resolution["status"])
-        ),
-        resolution_metadata=resolution.get("metadata", {}),
-        total_hits=total,
-        ranking_gap=ranking_gap
-    )
-
-    answer_confident = confidence >= 0.7
-    result = {
-        "status": ResultStatus.SUCCESS,
-        "provider": "ELASTICSEARCH_AGGREGATION",
-        "total": total,
-        "metric_target": _metric_target or "sekolah",
-        "total_all": total_all,
-        "pct_of_total": pct_of_total,
-        "active_filters": query_filters,
-        "jenjang_requested": jenjang_requested,
-        "entities": entities,
-        "confidence": confidence,
-        "answer_confident": answer_confident,
-        "metadata": resolution.get("metadata", {}),
-        "breakdown_jenjang": breakdown_jenjang,
-        "breakdown_status":  breakdown_status,
-        "drilldown_field":   drilldown_field or "",
-        "drilldown_top3":    drilldown_top3,
-        "qc_aggs":           _qc_aggs_result,
-    }
-
-    await set_cache(cache_key, result, 3600)
-    return result
+    return await _handle_single_wilayah(query, es_client, entities, intent, resolution, ranking_gap)
 
 def _cache_key(entities: Any) -> str:
 

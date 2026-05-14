@@ -5,6 +5,8 @@ from typing import List, Optional
 
 from sentence_transformers import SentenceTransformer
 
+from app.utils.tiered_cache import TieredCache
+
 logger = logging.getLogger(__name__)
 EMBEDDING_ENABLED = os.getenv("EMBEDDING_ENABLED", "true").lower() == "true"
 # =========================================================
@@ -19,6 +21,10 @@ EMBED_TIMEOUT_SECONDS = 15
 # =========================================================
 
 _embedding_model: Optional[SentenceTransformer] = None
+
+# Embedding vector cache: L1 in-memory (maxsize=512, TTL 5 menit) + L2 Redis (TTL 24 jam).
+# Singleton — dibuat sekali saat module di-import, dipakai semua call.
+_embedding_cache = TieredCache(maxsize=512)
 
 
 def get_embedding_model() -> SentenceTransformer:
@@ -138,20 +144,49 @@ async def get_embeddings(texts: List[str]) -> List[List[float]]:
 
 
 async def get_cached_embedding(text: str) -> List[float]:
-    """Return embedding with Redis cache (key: embed:md5(text), TTL 86400)."""
+    """
+    Return embedding vector untuk text, dengan TieredCache L1+L2.
+
+    Cache hierarchy:
+    - L1: in-memory LRU, maxsize=512, TTL 5 menit  (~0ms)
+    - L2: Redis, TTL 24 jam                          (~1-3ms)
+    - Miss: generate via SentenceTransformer + simpan ke L1+L2
+
+    Key: "embed:{md5(text)}" — konsisten dengan implementasi sebelumnya
+    untuk backward compatibility dengan Redis keys yang sudah ada.
+    """
     import hashlib as _hashlib
-    from app.utils.cache import get_cache, set_cache
+
+    if not text or not text.strip():
+        return []
+
     cache_key = f"embed:{_hashlib.md5(text.encode()).hexdigest()}"
+
     try:
-        cached = await get_cache(cache_key)
+        cached = await _embedding_cache.get(cache_key)
         if cached:
+            logger.debug("[EMBED] cache hit (L1/L2): key=%s", cache_key[:20])
             return cached
     except Exception:
-        pass
+        logger.warning("[EMBED] cache get failed, falling through to generate")
+
     vector = await get_embedding(text)
-    try:
-        if vector:
-            await set_cache(cache_key, vector, ttl=86400)
-    except Exception:
-        pass
+
+    if vector:
+        try:
+            await _embedding_cache.set(
+                cache_key,
+                vector,
+                ttl_l1=300,   # 5 menit di L1
+                ttl_l2=86400, # 24 jam di L2 (Redis)
+            )
+            logger.debug("[EMBED] cached to L1+L2: key=%s", cache_key[:20])
+        except Exception:
+            logger.warning("[EMBED] cache set failed, continuing without cache")
+
     return vector
+
+
+def get_embedding_cache_stats() -> dict:
+    """Return L1 cache stats untuk monitoring/health endpoint."""
+    return _embedding_cache.stats()

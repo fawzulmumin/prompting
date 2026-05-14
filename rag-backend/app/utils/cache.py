@@ -27,20 +27,141 @@ def _log(logger_instance, level: str, event: str, **kwargs):
     getattr(logger_instance, level)(msg)
 
 
+# ---------------------------------------------------------------------------
+# Normalization tables — extend as needed, no code change required
+# ---------------------------------------------------------------------------
+_ALIAS_MAP: dict[str, str] = {
+    # Wilayah alias
+    "tangsel": "tangerang selatan",
+    "jakpus": "jakarta pusat",
+    "jaksel": "jakarta selatan",
+    "jakbar": "jakarta barat",
+    "jaktim": "jakarta timur",
+    "jakut": "jakarta utara",
+    "dki": "dki jakarta",
+    "jogja": "yogyakarta",
+    "yogya": "yogyakarta",
+    "diy": "yogyakarta",
+    "solo": "surakarta",
+    "jabar": "jawa barat",
+    "jatim": "jawa timur",
+    "jateng": "jawa tengah",
+    "sulsel": "sulawesi selatan",
+    "sulut": "sulawesi utara",
+    "sulteng": "sulawesi tengah",
+    "sulbar": "sulawesi barat",
+    "sultra": "sulawesi tenggara",
+    "sumut": "sumatera utara",
+    "sumbar": "sumatera barat",
+    "sumsel": "sumatera selatan",
+    "kalsel": "kalimantan selatan",
+    "kalbar": "kalimantan barat",
+    "kaltim": "kalimantan timur",
+    "kalteng": "kalimantan tengah",
+    "kaltara": "kalimantan utara",
+    "ntt": "nusa tenggara timur",
+    "ntb": "nusa tenggara barat",
+    # Jenjang alias (nama panjang → singkatan)
+    "sekolah dasar": "sd",
+    "sekolah menengah pertama": "smp",
+    "sekolah menengah atas": "sma",
+    "sekolah menengah kejuruan": "smk",
+    "madrasah ibtidaiyah": "mi",
+    "madrasah tsanawiyah": "mts",
+    "madrasah aliyah": "ma",
+    "madrasah aliyah negeri": "man",
+    "sekolah luar biasa": "slb",
+    "taman kanak": "tk",
+    "pendidikan anak usia dini": "paud",
+    "pusat kegiatan belajar masyarakat": "pkbm",
+    # Typo umum
+    "propinsi": "provinsi",
+    "brapa": "berapa",
+    "skolah": "sekolah",
+    "skola": "sekolah",
+    "seklah": "sekolah",
+}
+
+_STOPWORDS: frozenset[str] = frozenset({
+    # Query filler
+    "berapa", "jumlah", "total", "ada", "tolong", "cari",
+    "tampilkan", "lihat", "tunjukkan", "kasih", "tahu", "info",
+    "informasi", "data", "daftar", "list", "show", "get",
+    # Preposisi / konjungsi
+    "di", "dari", "ke", "pada", "untuk", "dan", "atau",
+    "yang", "dengan", "dalam", "tentang", "adalah", "apa", "saja",
+    "semua", "seluruh", "setiap",
+    # Location prefix (di-normalize terpisah, tapi backup di sini)
+    "provinsi", "kabupaten", "kota", "kecamatan", "kelurahan", "desa",
+    "prov", "kab", "kec",
+})
+
+_LOCATION_PREFIX_PATTERNS: list[tuple[str, str]] = [
+    # Urutan penting: lebih spesifik dulu
+    (r"\bkecamatan\b", ""),
+    (r"\bkelurahan\b", ""),
+    (r"\bkabupaten\b", ""),
+    (r"\bkota\b", ""),
+    (r"\bprovinsi\b", ""),
+    (r"\bprov\b", ""),
+    (r"\bkab\b\.?\s*", ""),
+    (r"\bkec\b\.?\s*", ""),
+]
+
+
 def _normalize_cache_key(raw: str) -> str:
     """
-    Normalize string sebelum dijadikan cache key hash.
-    - lowercase + strip
-    - hapus tanda baca tidak signifikan (diganti spasi)
-    - collapse whitespace
-    Tidak mengubah key yang sudah berupa hash (len == 32 dan hex).
+    Normalize a raw user query into a canonical cache key.
+
+    Pipeline:
+    1. MD5 hash passthrough (backward compat)
+    2. Lowercase + strip + remove punctuation
+    3. Apply multi-word alias map (longest match first)
+    4. Apply location prefix removal
+    5. Tokenize + single-word alias map + typo correction
+    6. Remove stopwords
+    7. Sort tokens (word-order invariant)
+    8. Rejoin
+
+    Pure function — no I/O, no side effects, <1ms.
     """
     if len(raw) == 32 and all(c in "0123456789abcdef" for c in raw):
         return raw  # sudah hash MD5, jangan diproses
-    normalized = raw.lower().strip()
-    normalized = _re.sub(r"[^\w\s]", " ", normalized)
-    normalized = _re.sub(r"\s+", " ", normalized)
-    return normalized.strip()
+
+    text = raw.lower().strip()
+
+    # Remove punctuation
+    text = _re.sub(r"[^\w\s]", " ", text)
+    text = _re.sub(r"\s+", " ", text).strip()
+
+    # Apply multi-word aliases (longest match first to avoid partial replacement)
+    multi_word = sorted(
+        [(k, v) for k, v in _ALIAS_MAP.items() if " " in k],
+        key=lambda x: -len(x[0]),
+    )
+    for alias, canonical in multi_word:
+        text = _re.sub(r"\b" + _re.escape(alias) + r"\b", canonical, text)
+
+    # Remove location prefixes
+    for pattern, replacement in _LOCATION_PREFIX_PATTERNS:
+        text = _re.sub(pattern, replacement, text)
+    text = _re.sub(r"\s+", " ", text).strip()
+
+    # Tokenize, apply single-word aliases, remove stopwords
+    # Note: alias may expand to multi-word (e.g. "tangsel" → "tangerang selatan")
+    # so split sub-tokens and process each independently.
+    result_tokens = []
+    for token in text.split():
+        expanded = _ALIAS_MAP.get(token, token)
+        sub_tokens = expanded.split() if " " in expanded else [expanded]
+        for st in sub_tokens:
+            if st in _STOPWORDS or len(st) < 2:
+                continue
+            result_tokens.append(st)
+
+    # Deduplicate (alias expansion can produce duplicates, e.g. "dki jakarta" + expanded "dki")
+    # then sort for word-order invariance
+    return " ".join(sorted(set(result_tokens)))
 
 
 # =========================

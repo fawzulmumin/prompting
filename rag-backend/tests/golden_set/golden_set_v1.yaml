@@ -1,0 +1,1904 @@
+# =============================================================================
+# GOLDEN SET — Intent Classification & Entity Extraction
+# =============================================================================
+# Versi: 1.0 (Mei 2026)
+# Tujuan: Test ground-truth untuk semua perubahan classifier/parser/narrator.
+#
+# Cara pakai:
+#   pytest tests/golden_set/test_intent_classification.py -v
+#
+# Format setiap case:
+#   id: unik, prefix = kategori
+#   query: pertanyaan mentah dari user (variasi realistis)
+#   expected.module: intent utama yang harus dideteksi
+#   expected.scope: level wilayah (nasional/provinsi/kabupaten/kecamatan/desa)
+#   expected.entities: entitas yang harus terekstrak
+#   must_not: kondisi yang TIDAK boleh ada di output
+#   tags: label untuk filter dan reporting
+#   notes: konteks untuk reviewer
+# =============================================================================
+
+cases:
+
+  # ---------------------------------------------------------------------------
+  # AGGREGATION — Single Intent, Lokasi Jelas (10 cases)
+  # ---------------------------------------------------------------------------
+
+  - id: agg_001
+    query: "berapa SD di jawa barat"
+    expected:
+      module: aggregation
+      scope: provinsi
+      entities:
+        jenjang: [SD]
+        provinsi: "jawa barat"
+    must_not:
+      module: out_of_context
+    tags: [aggregation, simple, provinsi, sd]
+    notes: "Query paling basic. Harus resolve provinsi dengan benar."
+
+  - id: agg_002
+    query: "jumlah SMP negeri di bandung"
+    expected:
+      module: aggregation
+      scope: kabupaten
+      entities:
+        jenjang: [SMP]
+        status: NEGERI
+        kabupaten: "bandung"
+    must_not:
+      module: out_of_context
+    tags: [aggregation, simple, kabupaten, status_filter]
+    notes: "Harus detect status NEGERI dan lokasi kabupaten bandung (bukan kota bandung)."
+
+  - id: agg_003
+    query: "brapa smk di tangsel"
+    expected:
+      module: aggregation
+      scope: kabupaten
+      entities:
+        jenjang: [SMK]
+        kabupaten: "tangerang selatan"
+    must_not:
+      module: out_of_context
+    tags: [aggregation, typo, alias, kabupaten]
+    notes: "Typo 'brapa' + alias 'tangsel' harus dinormalisasi."
+
+  - id: agg_004
+    query: "total sekolah akreditasi A di surabaya"
+    expected:
+      module: aggregation
+      scope: kabupaten
+      entities:
+        akreditasi: A
+        kabupaten: "surabaya"
+    must_not:
+      module: out_of_context
+    tags: [aggregation, akreditasi, kabupaten]
+    notes: "Filter akreditasi A."
+
+  - id: agg_005
+    query: "berapa sekolah di indonesia"
+    expected:
+      module: aggregation
+      scope: nasional
+      entities: {}
+    must_not:
+      module: out_of_context
+    tags: [aggregation, nasional, no_filter]
+    notes: "Scope nasional, tanpa filter jenjang."
+
+  - id: agg_006
+    query: "SD swasta di kecamatan cibinong berapa"
+    expected:
+      module: aggregation
+      scope: kecamatan
+      entities:
+        jenjang: [SD]
+        status: SWASTA
+        kecamatan: "cibinong"
+    must_not:
+      module: out_of_context
+    tags: [aggregation, kecamatan, status_filter]
+    notes: "Scope kecamatan. Urutan kata tidak kanonik."
+
+  - id: agg_007
+    query: "berapa SMA dan SMK di jawa tengah"
+    expected:
+      module: aggregation
+      scope: provinsi
+      entities:
+        jenjang: [SMA, SMK]
+        provinsi: "jawa tengah"
+    must_not:
+      module: out_of_context
+    tags: [aggregation, multi_jenjang, provinsi]
+    notes: "Multi-jenjang dalam satu query."
+
+  - id: agg_008
+    query: "jumlah madrasah ibtidaiyah di NTT"
+    expected:
+      module: aggregation
+      scope: provinsi
+      entities:
+        jenjang: [MI]
+        provinsi: "nusa tenggara timur"
+    must_not:
+      module: out_of_context
+    tags: [aggregation, madrasah, alias_provinsi]
+    notes: "Alias 'NTT' dan nama panjang jenjang MI."
+
+  - id: agg_009
+    query: "sekolah negeri akreditasi B di kab bogor ada berapa"
+    expected:
+      module: aggregation
+      scope: kabupaten
+      entities:
+        status: NEGERI
+        akreditasi: B
+        kabupaten: "bogor"
+    must_not:
+      module: out_of_context
+    tags: [aggregation, multi_filter, kabupaten]
+    notes: "Multi-filter: status + akreditasi + lokasi."
+
+  - id: agg_010
+    query: "ada berapa TK di DKI"
+    expected:
+      module: aggregation
+      scope: provinsi
+      entities:
+        jenjang: [TK]
+        provinsi: "dki jakarta"
+    must_not:
+      module: out_of_context
+    tags: [aggregation, alias_dki, tk]
+    notes: "Alias 'DKI' untuk Jakarta."
+
+  # ---------------------------------------------------------------------------
+  # LIST — Daftar Sekolah (8 cases)
+  # ---------------------------------------------------------------------------
+
+  - id: list_001
+    query: "daftar SMA negeri di jakarta selatan"
+    expected:
+      module: list
+      scope: kabupaten
+      entities:
+        jenjang: [SMA]
+        status: NEGERI
+        kabupaten: "jakarta selatan"
+    must_not:
+      module: out_of_context
+    tags: [list, simple, status_filter]
+    notes: "Query list paling umum."
+
+  - id: list_002
+    query: "tampilkan sekolah akreditasi A di kota bandung"
+    expected:
+      module: list
+      scope: kabupaten
+      entities:
+        akreditasi: A
+        kabupaten: "bandung"
+    must_not:
+      module: out_of_context
+    tags: [list, akreditasi]
+    notes: "Trigger kata 'tampilkan'."
+
+  - id: list_003
+    query: "sekolah di desa neglasari tangerang"
+    expected:
+      module: list
+      scope: desa
+      entities:
+        desa: "neglasari"
+        kabupaten: "tangerang"
+    must_not:
+      module: out_of_context
+    tags: [list, desa, disambiguasi]
+    notes: "Scope desa — potensi ambiguitas nama desa."
+
+  - id: list_004
+    query: "cari SMK swasta di bekasi yang akreditasi A"
+    expected:
+      module: list
+      scope: kabupaten
+      entities:
+        jenjang: [SMK]
+        status: SWASTA
+        akreditasi: A
+        kabupaten: "bekasi"
+    must_not:
+      module: out_of_context
+    tags: [list, multi_filter]
+    notes: "Multi-filter: jenjang + status + akreditasi."
+
+  - id: list_005
+    query: "sekolah luar biasa di sulawesi selatan"
+    expected:
+      module: list
+      scope: provinsi
+      entities:
+        jenjang: [SLB]
+        provinsi: "sulawesi selatan"
+    must_not:
+      module: out_of_context
+    tags: [list, slb, nama_panjang]
+    notes: "'sekolah luar biasa' harus map ke jenjang SLB."
+
+  - id: list_006
+    query: "PKBM di kecamatan parungpanjang"
+    expected:
+      module: list
+      scope: kecamatan
+      entities:
+        jenjang: [PKBM]
+        kecamatan: "parungpanjang"
+    must_not:
+      module: out_of_context
+    tags: [list, pkbm, kecamatan]
+    notes: "Jenjang non-formal PKBM."
+
+  - id: list_007
+    query: "sekolah negeri di jakpus"
+    expected:
+      module: list
+      scope: kabupaten
+      entities:
+        status: NEGERI
+        kabupaten: "jakarta pusat"
+    must_not:
+      module: out_of_context
+    tags: [list, alias_jakpus]
+    notes: "Alias 'jakpus' → jakarta pusat."
+
+  - id: list_008
+    query: "ada sekolah apa saja di desa cibunar parungpanjang"
+    expected:
+      module: list
+      scope: desa
+      entities:
+        desa: "cibunar"
+        kecamatan: "parungpanjang"
+    must_not:
+      module: out_of_context
+    tags: [list, desa, disambiguasi, hierarki]
+    notes: "Nama desa ambigus + kecamatan sebagai konteks → harus auto-resolve."
+
+  # ---------------------------------------------------------------------------
+  # PROFILE — Detail Sekolah (6 cases)
+  # ---------------------------------------------------------------------------
+
+  - id: profile_001
+    query: "profil SMAN 1 Bandung"
+    expected:
+      module: profile
+      entities:
+        nama_sekolah: "SMAN 1 Bandung"
+    must_not:
+      module: out_of_context
+    tags: [profile, simple]
+    notes: "Profile query paling dasar."
+
+  - id: profile_002
+    query: "info sekolah dengan NPSN 20217725"
+    expected:
+      module: profile
+      entities:
+        npsn: "20217725"
+    must_not:
+      module: out_of_context
+    tags: [profile, npsn]
+    notes: "Lookup by NPSN — harus ekstrak 8 digit angka."
+
+  - id: profile_003
+    query: "alamat SDN Merdeka 1 di cimahi"
+    expected:
+      module: profile
+      entities:
+        nama_sekolah: "SDN Merdeka 1"
+        kabupaten: "cimahi"
+    must_not:
+      module: out_of_context
+    tags: [profile, alamat, filter_lokasi]
+    notes: "User minta spesifik alamat + filter lokasi untuk disambiguasi."
+
+  - id: profile_004
+    query: "akreditasi SMK Negeri 2 Surabaya berapa"
+    expected:
+      module: profile
+      entities:
+        nama_sekolah: "SMK Negeri 2 Surabaya"
+    must_not:
+      module: out_of_context
+    tags: [profile, akreditasi_sekolah]
+    notes: "User minta field spesifik (akreditasi) dari profile."
+
+  - id: profile_005
+    query: "jumlah siswa di SMP Islam Al-Azhar 1 Jakarta"
+    expected:
+      module: profile
+      entities:
+        nama_sekolah: "SMP Islam Al-Azhar 1"
+        kabupaten: "jakarta"
+    must_not:
+      module: out_of_context
+    tags: [profile, siswa, swasta]
+    notes: "Sekolah swasta dengan nama panjang."
+
+  - id: profile_006
+    query: "kontak madrasah aliyah negeri 1 yogyakarta"
+    expected:
+      module: profile
+      entities:
+        nama_sekolah: "MAN 1 Yogyakarta"
+    must_not:
+      module: out_of_context
+    tags: [profile, madrasah, kontak]
+    notes: "Nama panjang madrasah aliyah negeri → MAN."
+
+  # ---------------------------------------------------------------------------
+  # COMPARISON — Perbandingan (6 cases)
+  # ---------------------------------------------------------------------------
+
+  - id: comp_001
+    query: "bandingkan jumlah SMA di Jawa Barat dan Jawa Timur"
+    expected:
+      module: comparison
+      entities:
+        jenjang: [SMA]
+        wilayah: ["jawa barat", "jawa timur"]
+    must_not:
+      module: out_of_context
+    tags: [comparison, provinsi, multi_wilayah]
+    notes: "Perbandingan dua provinsi."
+
+  - id: comp_002
+    query: "mana yang lebih banyak SMK, jakarta atau surabaya"
+    expected:
+      module: comparison
+      entities:
+        jenjang: [SMK]
+        wilayah: ["jakarta", "surabaya"]
+    must_not:
+      module: out_of_context
+    tags: [comparison, informal, multi_wilayah]
+    notes: "Bahasa informal 'mana yang lebih banyak'."
+
+  - id: comp_003
+    query: "perbandingan sekolah negeri vs swasta di DIY"
+    expected:
+      module: comparison
+      entities:
+        status: [NEGERI, SWASTA]
+        provinsi: "diy"
+    must_not:
+      module: out_of_context
+    tags: [comparison, status, provinsi]
+    notes: "Perbandingan status bukan wilayah."
+
+  - id: comp_004
+    query: "bandingkan akreditasi SMP di kab bogor dan kab depok"
+    expected:
+      module: comparison
+      entities:
+        jenjang: [SMP]
+        wilayah: ["bogor", "depok"]
+    must_not:
+      module: out_of_context
+    tags: [comparison, akreditasi, kabupaten]
+    notes: "Perbandingan dua kabupaten."
+
+  - id: comp_005
+    query: "SMK negeri di tangerang vs tangerang selatan berapa"
+    expected:
+      module: comparison
+      entities:
+        jenjang: [SMK]
+        status: NEGERI
+        wilayah: ["tangerang", "tangerang selatan"]
+    must_not:
+      module: out_of_context
+    tags: [comparison, wilayah_mirip, disambiguasi]
+    notes: "Dua wilayah nama mirip — harus dibedakan dengan benar."
+
+  - id: comp_006
+    query: "jumlah SD di kecamatan bogor utara vs bogor selatan"
+    expected:
+      module: comparison
+      entities:
+        jenjang: [SD]
+        wilayah: ["bogor utara", "bogor selatan"]
+        scope: kecamatan
+    must_not:
+      module: out_of_context
+    tags: [comparison, kecamatan, multi_wilayah]
+    notes: "Perbandingan antar kecamatan dalam kota yang sama."
+
+  # ---------------------------------------------------------------------------
+  # GEO / NEARBY — Sekolah Terdekat (4 cases)
+  # ---------------------------------------------------------------------------
+
+  - id: geo_001
+    query: "sekolah terdekat dari monas jakarta"
+    expected:
+      module: geo
+      entities:
+        landmark: "monas"
+        kabupaten: "jakarta"
+    must_not:
+      module: out_of_context
+    tags: [geo, landmark, jakarta]
+    notes: "Geo query dengan landmark terkenal."
+
+  - id: geo_002
+    query: "SMP negeri dekat stasiun depok baru"
+    expected:
+      module: geo
+      entities:
+        jenjang: [SMP]
+        status: NEGERI
+        landmark: "stasiun depok baru"
+    must_not:
+      module: out_of_context
+    tags: [geo, landmark, filter_jenjang]
+    notes: "Geo + filter jenjang + status."
+
+  - id: geo_003
+    query: "ada sekolah apa di sekitar bundaran HI"
+    expected:
+      module: geo
+      entities:
+        landmark: "bundaran HI"
+    must_not:
+      module: out_of_context
+    tags: [geo, landmark, informal]
+    notes: "Frasa informal 'di sekitar'."
+
+  - id: geo_004
+    query: "SMA terdekat dari koordinat -6.2088,106.8456"
+    expected:
+      module: geo
+      entities:
+        jenjang: [SMA]
+        koordinat: [-6.2088, 106.8456]
+    must_not:
+      module: out_of_context
+    tags: [geo, koordinat]
+    notes: "Geo query dengan koordinat langsung."
+
+  # ---------------------------------------------------------------------------
+  # MULTI-INTENT — Query Kompleks (5 cases)
+  # ---------------------------------------------------------------------------
+
+  - id: multi_001
+    query: "bandingkan SMK di Bandung dan Bekasi, tampilkan juga daftarnya"
+    expected:
+      module: multi_intent
+      sub_intents: [comparison, list]
+      entities:
+        jenjang: [SMK]
+        wilayah: ["bandung", "bekasi"]
+    must_not:
+      module: out_of_context
+    tags: [multi_intent, comparison_plus_list]
+    notes: "Dua intent eksplisit dalam satu query."
+
+  - id: multi_002
+    query: "berapa total SD di Jawa Barat dan mana yang terbanyak per kabupaten"
+    expected:
+      module: multi_intent
+      sub_intents: [aggregation, ranking]
+      entities:
+        jenjang: [SD]
+        provinsi: "jawa barat"
+    must_not:
+      module: out_of_context
+    tags: [multi_intent, aggregation_plus_ranking]
+    notes: "Aggregation + ranking dalam satu query."
+
+  - id: multi_003
+    query: "profil SMAN 3 Bandung dan berapa total SMA di kota Bandung"
+    expected:
+      module: multi_intent
+      sub_intents: [profile, aggregation]
+      entities:
+        nama_sekolah: "SMAN 3 Bandung"
+        kabupaten: "bandung"
+        jenjang: [SMA]
+    must_not:
+      module: out_of_context
+    tags: [multi_intent, profile_plus_aggregation]
+    notes: "Profile sekolah spesifik + aggregation area."
+
+  - id: multi_004
+    query: "tampilkan SD di sukabumi dan bandingkan dengan cianjur"
+    expected:
+      module: multi_intent
+      sub_intents: [list, comparison]
+      entities:
+        jenjang: [SD]
+        wilayah: ["sukabumi", "cianjur"]
+    must_not:
+      module: out_of_context
+    tags: [multi_intent, list_plus_comparison]
+    notes: "List + comparison implicit."
+
+  - id: multi_005
+    query: "cari SMK akreditasi A di bekasi, ada berapa dan tampilkan daftarnya"
+    expected:
+      module: multi_intent
+      sub_intents: [aggregation, list]
+      entities:
+        jenjang: [SMK]
+        akreditasi: A
+        kabupaten: "bekasi"
+    must_not:
+      module: out_of_context
+    tags: [multi_intent, aggregation_plus_list]
+    notes: "Explicit aggregation + list dalam satu kalimat."
+
+  # ---------------------------------------------------------------------------
+  # AMBIGUITY & EDGE CASES (8 cases)
+  # ---------------------------------------------------------------------------
+
+  - id: edge_001
+    query: "sekolah di cibunar"
+    expected:
+      module: list
+      scope: desa
+      status: ambiguous
+      entities:
+        desa: "cibunar"
+    must_not:
+      module: out_of_context
+    tags: [edge, ambiguous_location, desa_duplikat]
+    notes: "Nama desa yang ada di banyak kecamatan — harus return AMBIGUOUS bukan error."
+
+  - id: edge_002
+    query: "smp di bandung"
+    expected:
+      module: aggregation
+      entities:
+        jenjang: [SMP]
+        kabupaten: "bandung"
+    must_not:
+      module: out_of_context
+    tags: [edge, ambiguous_intent, bisa_list_atau_agg]
+    notes: "Bisa list atau aggregation — harus pilih yang paling useful (aggregation count)."
+
+  - id: edge_003
+    query: "brp sklh di bdg akrd A"
+    expected:
+      module: aggregation
+      entities:
+        akreditasi: A
+        kabupaten: "bandung"
+    must_not:
+      module: out_of_context
+    tags: [edge, heavy_typo]
+    notes: "Heavy typo dan abbreviation. Stress test untuk normalizer."
+
+  - id: edge_004
+    query: "sekolah jakarta"
+    expected:
+      module: list
+      entities:
+        provinsi: "dki jakarta"
+    must_not:
+      module: out_of_context
+    tags: [edge, minimal_query, dua_kata]
+    notes: "Query minimal 2 kata. Harus resolve dan return hasil, bukan error."
+
+  - id: edge_005
+    query: "berapa sekolah di cibunar parungpanjang bogor"
+    expected:
+      module: aggregation
+      scope: desa
+      entities:
+        desa: "cibunar"
+        kecamatan: "parungpanjang"
+        kabupaten: "bogor"
+    must_not:
+      module: out_of_context
+      status: ambiguous
+    tags: [edge, hierarki_lengkap, disambiguasi_sukses]
+    notes: "Hierarki lengkap diberikan — harus auto-resolve tanpa ambiguous."
+
+  - id: edge_006
+    query: "berapa SD di kab. tangerang vs kota tangerang"
+    expected:
+      module: comparison
+      entities:
+        jenjang: [SD]
+        wilayah: ["tangerang", "kota tangerang"]
+    must_not:
+      module: out_of_context
+    tags: [edge, kab_vs_kota, nama_mirip]
+    notes: "Kab. Tangerang vs Kota Tangerang — harus dibedakan."
+
+  - id: edge_007
+    query: "ranking SMK terbanyak per provinsi"
+    expected:
+      module: aggregation
+      entities:
+        jenjang: [SMK]
+        scope: nasional
+        breakdown: provinsi
+    must_not:
+      module: out_of_context
+    tags: [edge, ranking, breakdown]
+    notes: "Ranking/breakdown nasional per provinsi."
+
+  - id: edge_008
+    query: "sekolah dengan data tidak lengkap di jawa barat"
+    expected:
+      module: aggregation
+      entities:
+        qc_filter: true
+        provinsi: "jawa barat"
+    must_not:
+      module: out_of_context
+    tags: [edge, qc_query]
+    notes: "Query QC — harus detect intent data quality."
+
+  # ---------------------------------------------------------------------------
+  # OUT OF CONTEXT (3 cases)
+  # ---------------------------------------------------------------------------
+
+  - id: oot_001
+    query: "siapa presiden Indonesia sekarang"
+    expected:
+      module: out_of_context
+    tags: [oot, politik]
+    notes: "Clearly OOT — tidak ada hubungan dengan data sekolah."
+
+  - id: oot_002
+    query: "tolong buatkan saya puisi tentang pendidikan"
+    expected:
+      module: out_of_context
+    tags: [oot, creative_writing]
+    notes: "Creative writing request — OOT."
+
+  - id: oot_003
+    query: "harga laptop terbaru 2025"
+    expected:
+      module: out_of_context
+    tags: [oot, ecommerce]
+    notes: "Query belanja/harga — OOT."
+
+  # ---------------------------------------------------------------------------
+  # AGGREGATION — Gap Coverage (agg_011–agg_025)
+  # ---------------------------------------------------------------------------
+
+  - id: agg_011
+    query: "brp seklh d jktm"
+    expected:
+      module: aggregation
+      scope: provinsi
+      entities:
+        provinsi: "jawa timur"
+    must_not:
+      module: out_of_context
+    tags: [aggregation, heavy_typo, provinsi]
+    notes: "Typo parah untuk 'berapa sekolah di jatim'. Stress-test normalizer."
+
+  - id: agg_012
+    query: "sekolah di NTB"
+    expected:
+      module: list
+      scope: provinsi
+      entities:
+        provinsi: "nusa tenggara barat"
+    must_not:
+      module: out_of_context
+    tags: [aggregation, alias_provinsi, ntb]
+    notes: "Alias 'NTB' tanpa kata berapa — classifier mengembalikan list; lokasi harus resolve ke NTB."
+
+  - id: agg_013
+    query: "5 kabupaten dengan SD terbanyak di jatim"
+    expected:
+      module: aggregation
+      scope: provinsi
+      entities:
+        jenjang: [SD]
+        provinsi: "jawa timur"
+    must_not:
+      module: out_of_context
+    tags: [aggregation, ranking, kabupaten, jatim]
+    notes: "Ranking query — harus detect sebagai aggregation bukan list."
+
+  - id: agg_014
+    query: "SMA SMK negeri di DIY ada berapa"
+    expected:
+      module: aggregation
+      scope: provinsi
+      entities:
+        jenjang: [SMA, SMK]
+        status: NEGERI
+        provinsi: "diy"
+    must_not:
+      module: out_of_context
+    tags: [aggregation, multi_jenjang, status_filter, diy]
+    notes: "Multi-jenjang SMA+SMK, filter status NEGERI, alias DIY."
+
+  - id: agg_015
+    query: "sekolah bermasalah di kab bogor"
+    expected:
+      module: aggregation
+      scope: kabupaten
+      entities:
+        kabupaten: "bogor"
+    must_not:
+      module: out_of_context
+    tags: [aggregation, qc_masalah_only, kabupaten]
+    notes: "Query kondisi data — 'bermasalah' harus detect sebagai aggregation QC."
+
+  - id: agg_016
+    query: "SD akreditasi A dan B di banten"
+    expected:
+      module: aggregation
+      scope: provinsi
+      entities:
+        jenjang: [SD]
+        provinsi: "banten"
+    must_not:
+      module: out_of_context
+    tags: [aggregation, multi_akreditasi, provinsi]
+    notes: "Akreditasi range A dan B — harus detect sebagai aggregation bukan comparison."
+
+  - id: agg_017
+    query: "berapa sekolah di kecamatan ciawi bogor"
+    expected:
+      module: aggregation
+      scope: kecamatan
+      entities:
+        kecamatan: "ciawi"
+        kabupaten: "bogor"
+    must_not:
+      module: out_of_context
+    tags: [aggregation, kecamatan, hierarki]
+    notes: "Scope kecamatan dengan parent kabupaten eksplisit."
+
+  - id: agg_018
+    query: "SD di desa sukamaju depok"
+    expected:
+      module: list
+      scope: desa
+      entities:
+        jenjang: [SD]
+        desa: "sukamaju"
+        kabupaten: "depok"
+    must_not:
+      module: out_of_context
+    tags: [aggregation, desa, hierarki]
+    notes: "Scope desa tanpa kata berapa — classifier mengembalikan list."
+
+  - id: agg_019
+    query: "ada berapa ya sekolah di tangsel?"
+    expected:
+      module: aggregation
+      scope: kabupaten
+      entities:
+        kabupaten: "tangerang selatan"
+    must_not:
+      module: out_of_context
+    tags: [aggregation, informal, alias, kabupaten]
+    notes: "Bahasa informal 'ada berapa ya', alias 'tangsel'."
+
+  - id: agg_020
+    query: "berapa PKBM di sulsel"
+    expected:
+      module: aggregation
+      scope: provinsi
+      entities:
+        jenjang: [PKBM]
+        provinsi: "sulawesi selatan"
+    must_not:
+      module: out_of_context
+    tags: [aggregation, pkbm, alias_provinsi]
+    notes: "Jenjang non-formal PKBM, alias 'sulsel' → sulawesi selatan."
+
+  - id: agg_021
+    query: "total SD di jawa barat dan jawa tengah"
+    expected:
+      module: aggregation
+      entities:
+        jenjang: [SD]
+        wilayah: ["jawa barat", "jawa tengah"]
+    must_not:
+      module: out_of_context
+    tags: [aggregation, multi_provinsi, total]
+    notes: "Total dua provinsi — 'total' condong aggregation; bisa multi-entity."
+
+  - id: agg_022
+    query: "MI di aceh berapa"
+    expected:
+      module: aggregation
+      scope: provinsi
+      entities:
+        jenjang: [MI]
+        provinsi: "aceh"
+    must_not:
+      module: out_of_context
+    tags: [aggregation, madrasah, mi, provinsi]
+    notes: "Jenjang MI, lokasi terbalik di akhir kalimat."
+
+  - id: agg_023
+    query: "berapa, sekolah.. di bogor??"
+    expected:
+      module: aggregation
+      scope: kabupaten
+      entities:
+        kabupaten: "bogor"
+    must_not:
+      module: out_of_context
+    tags: [aggregation, punctuation, noise]
+    notes: "Tanda baca tidak wajar — harus normalize dan tetap detect aggregation."
+
+  - id: agg_024
+    query: "di semarang ada berapa SMK"
+    expected:
+      module: aggregation
+      scope: kabupaten
+      entities:
+        jenjang: [SMK]
+        kabupaten: "semarang"
+    must_not:
+      module: out_of_context
+    tags: [aggregation, urutan_terbalik, kabupaten]
+    notes: "Urutan kata terbalik: lokasi di awal bukan di akhir."
+
+  - id: agg_025
+    query: "total SMA negeri akreditasi A di kab sukabumi"
+    expected:
+      module: aggregation
+      scope: kabupaten
+      entities:
+        jenjang: [SMA]
+        status: NEGERI
+        akreditasi: A
+        kabupaten: "sukabumi"
+    must_not:
+      module: out_of_context
+    tags: [aggregation, multi_filter, kabupaten]
+    notes: "Empat filter sekaligus: jenjang + status + akreditasi + lokasi."
+
+  # ---------------------------------------------------------------------------
+  # LIST — Gap Coverage (list_009–list_025)
+  # ---------------------------------------------------------------------------
+
+  - id: list_009
+    query: "cari sekolah SMAN 3"
+    expected:
+      module: profile
+      entities:
+        nama_sekolah: "SMAN 3"
+    must_not:
+      module: out_of_context
+    tags: [profile, cari, nama_sekolah, ambigu]
+    notes: "Pencarian nama sekolah spesifik — Tier2 memetakan ke profile karena ada nama sekolah eksplisit."
+
+  - id: list_010
+    query: "daftar sekolah aktif di depok"
+    expected:
+      module: list
+      scope: kabupaten
+      entities:
+        kabupaten: "depok"
+    must_not:
+      module: out_of_context
+    tags: [list, keaktifan, kabupaten]
+    notes: "Filter keaktifan 'aktif' — harus masuk list bukan aggregation."
+
+  - id: list_011
+    query: "SMK swasta akreditasi A di tangerang"
+    expected:
+      module: list
+      scope: kabupaten
+      entities:
+        jenjang: [SMK]
+        status: SWASTA
+        akreditasi: A
+        kabupaten: "tangerang"
+    must_not:
+      module: out_of_context
+    tags: [list, multi_filter, kabupaten]
+    notes: "Multi-filter tanpa trigger kata eksplisit — intent list dari konteks."
+
+  - id: list_012
+    query: "sekolah di kampung ciawi bogor"
+    expected:
+      module: list
+      scope: desa
+      entities:
+        desa: "ciawi"
+        kabupaten: "bogor"
+    must_not:
+      module: out_of_context
+    tags: [list, desa, rural, hierarki]
+    notes: "'kampung' sebagai penanda desa/kelurahan rural."
+
+  - id: list_013
+    query: "sekolah internasional di jakarta selatan"
+    expected:
+      module: list
+      scope: kabupaten
+      entities:
+        kabupaten: "jakarta selatan"
+    must_not:
+      module: out_of_context
+    tags: [list, internasional, kabupaten]
+    notes: "Query sekolah internasional — harus masuk list."
+
+  - id: list_014
+    query: "SLB di sulawesi utara"
+    expected:
+      module: list
+      scope: provinsi
+      entities:
+        jenjang: [SLB]
+        provinsi: "sulawesi utara"
+    must_not:
+      module: out_of_context
+    tags: [list, slb, inklusi, provinsi]
+    notes: "SLB (Sekolah Luar Biasa) tanpa kata daftar — short query pattern."
+
+  - id: list_015
+    query: "sekolah di kecamatan sukajadi"
+    expected:
+      module: list
+      scope: kecamatan
+      entities:
+        kecamatan: "sukajadi"
+    must_not:
+      module: out_of_context
+    tags: [list, kecamatan, ambigu_lokasi]
+    notes: "Kecamatan Sukajadi ada di beberapa kota — potensi AMBIGUOUS."
+
+  - id: list_016
+    query: "tampilkan SD dengan data bersih di bekasi"
+    expected:
+      module: list
+      scope: kabupaten
+      entities:
+        jenjang: [SD]
+        kabupaten: "bekasi"
+    must_not:
+      module: out_of_context
+    tags: [list, qc_filter, tampilkan, kabupaten]
+    notes: "'tampilkan' sebagai trigger list; 'data bersih' sebagai QC filter positif."
+
+  - id: list_017
+    query: "sekolah smp di bogor barat"
+    expected:
+      module: list
+      scope: kecamatan
+      entities:
+        jenjang: [SMP]
+        kecamatan: "bogor barat"
+    must_not:
+      module: out_of_context
+    tags: [list, kecamatan, jenjang]
+    notes: "Kecamatan Bogor Barat — harus dibedakan dari kota Bogor."
+
+  - id: list_018
+    query: "semua sekolah di kab sleman"
+    expected:
+      module: list
+      scope: kabupaten
+      entities:
+        kabupaten: "sleman"
+    must_not:
+      module: out_of_context
+    tags: [list, semua, kabupaten]
+    notes: "'semua sekolah' sebagai trigger list tanpa filter jenjang."
+
+  - id: list_019
+    query: "Daftarkan SMA dan SMK di Surabaya"
+    expected:
+      module: list
+      scope: kabupaten
+      entities:
+        jenjang: [SMA, SMK]
+        kabupaten: "surabaya"
+    must_not:
+      module: out_of_context
+    tags: [list, multi_jenjang, daftarkan]
+    notes: "'Daftarkan' sebagai trigger list; multi-jenjang SMA dan SMK."
+
+  - id: list_020
+    query: "TK dan PAUD di kec. ciputat"
+    expected:
+      module: list
+      scope: kecamatan
+      entities:
+        jenjang: [TK, PAUD]
+        kecamatan: "ciputat"
+    must_not:
+      module: out_of_context
+    tags: [list, tk, paud, multi_jenjang, kecamatan]
+    notes: "Jenjang PAUD dan TK; 'kec.' sebagai prefix kecamatan."
+
+  - id: list_021
+    query: "show schools in bandung"
+    expected:
+      module: list
+      scope: kabupaten
+      entities:
+        kabupaten: "bandung"
+    must_not:
+      module: out_of_context
+    tags: [list, bahasa_inggris, bandung]
+    notes: "Query bahasa Inggris — 'show schools' harus dipetakan ke list."
+
+  - id: list_022
+    query: "sekolah di kota bogor"
+    expected:
+      module: list
+      scope: kabupaten
+      entities:
+        kabupaten: "kota bogor"
+    must_not:
+      module: out_of_context
+    tags: [list, kota_vs_kab, bogor]
+    notes: "'kota bogor' harus dibedakan dari 'kab bogor'."
+
+  - id: list_023
+    query: "sekolah di cimahi dan kota bandung"
+    expected:
+      module: list
+      entities:
+        wilayah: ["cimahi", "kota bandung"]
+    must_not:
+      module: out_of_context
+    tags: [list, multi_wilayah, cimahi, bandung]
+    notes: "Dua wilayah dengan 'dan' — list multi-entity atau comparison."
+
+  - id: list_024
+    query: "SMP negeri akreditasi B di Jakarta Utara"
+    expected:
+      module: list
+      scope: kabupaten
+      entities:
+        jenjang: [SMP]
+        status: NEGERI
+        akreditasi: B
+        kabupaten: "jakarta utara"
+    must_not:
+      module: out_of_context
+    tags: [list, multi_filter, jakarta]
+    notes: "Triple filter: jenjang + status + akreditasi — tanpa trigger kata daftar."
+
+  - id: list_025
+    query: "sekolah terbaik di kab bekasi"
+    expected:
+      module: list
+      scope: kabupaten
+      entities:
+        kabupaten: "bekasi"
+    must_not:
+      module: out_of_context
+    tags: [list, sort_quality, kabupaten]
+    notes: "'terbaik' sebagai signal ranking kualitas — masuk list dengan sort."
+
+  # ---------------------------------------------------------------------------
+  # COMPARISON — Gap Coverage (comp_007–comp_020)
+  # ---------------------------------------------------------------------------
+
+  - id: comp_007
+    query: "negeri vs swasta di yogyakarta"
+    expected:
+      module: comparison
+      entities:
+        status: [NEGERI, SWASTA]
+        provinsi: "yogyakarta"
+    must_not:
+      module: out_of_context
+    tags: [comparison, status_comparison, vs]
+    notes: "Perbandingan status NEGERI vs SWASTA dalam satu wilayah."
+
+  - id: comp_008
+    query: "SMA vs SMK di bandung"
+    expected:
+      module: comparison
+      entities:
+        jenjang: [SMA, SMK]
+        kabupaten: "bandung"
+    must_not:
+      module: out_of_context
+    tags: [comparison, jenjang_comparison, vs]
+    notes: "Perbandingan dua jenjang bukan dua wilayah."
+
+  - id: comp_009
+    query: "sekolah di bandung, bogor, dan bekasi"
+    expected:
+      module: comparison
+      entities:
+        wilayah: ["bandung", "bogor", "bekasi"]
+    must_not:
+      module: out_of_context
+    tags: [comparison, tiga_wilayah, multi_wilayah]
+    notes: "Tiga wilayah sekaligus — harus comparison bukan aggregation."
+
+  - id: comp_010
+    query: "antara jawa barat dan jawa timur mana lebih banyak SMK"
+    expected:
+      module: comparison
+      entities:
+        jenjang: [SMK]
+        wilayah: ["jawa barat", "jawa timur"]
+    must_not:
+      module: out_of_context
+    tags: [comparison, antara, mana_lebih, provinsi]
+    notes: "Pola 'antara X dan Y mana lebih banyak' — trigger comparison."
+
+  - id: comp_011
+    query: "bandung vs bogor sekolah"
+    expected:
+      module: comparison
+      entities:
+        wilayah: ["bandung", "bogor"]
+    must_not:
+      module: out_of_context
+    tags: [comparison, vs, urutan_terbalik]
+    notes: "Objek query di akhir — 'vs' tetap harus trigger comparison."
+
+  - id: comp_012
+    query: "berapa SD di depok dibandingkan bekasi"
+    expected:
+      module: comparison
+      entities:
+        jenjang: [SD]
+        wilayah: ["depok", "bekasi"]
+    must_not:
+      module: out_of_context
+    tags: [comparison, dibandingkan, kabupaten]
+    notes: "Trigger 'dibandingkan' — pola perbandingan implisit."
+
+  - id: comp_013
+    query: "SD dan SMP di bandung vs bogor"
+    expected:
+      module: comparison
+      entities:
+        jenjang: [SD, SMP]
+        wilayah: ["bandung", "bogor"]
+    must_not:
+      module: out_of_context
+    tags: [comparison, multi_jenjang, vs]
+    notes: "Multi-jenjang + multi-wilayah dalam satu query comparison."
+
+  - id: comp_014
+    query: "SMAN 1 Bandung vs SMAN 3 Bandung"
+    expected:
+      module: comparison
+      entities:
+        nama_sekolah: ["SMAN 1 Bandung", "SMAN 3 Bandung"]
+    must_not:
+      module: out_of_context
+    tags: [comparison, school_vs_school, vs]
+    notes: "Perbandingan dua sekolah spesifik — profile-to-profile comparison."
+
+  - id: comp_015
+    query: "provinsi mana yang paling banyak SMK"
+    expected:
+      module: comparison
+      entities:
+        jenjang: [SMK]
+        scope: nasional
+    must_not:
+      module: out_of_context
+    tags: [comparison, ranking, provinsi]
+    notes: "Classifier Tier1 memetakan 'mana yang paling' ke comparison; semantiknya ranking tapi classifier menyimpulkan comparison."
+
+  - id: comp_016
+    query: "lebih banyak mana sekolah di jakarta atau surabaya"
+    expected:
+      module: comparison
+      entities:
+        wilayah: ["jakarta", "surabaya"]
+    must_not:
+      module: out_of_context
+    tags: [comparison, lebih_banyak_mana, atau]
+    notes: "Pola 'lebih banyak mana X atau Y' — trigger comparison."
+
+  - id: comp_017
+    query: "kec bogor utara vs bogor selatan SD berapa"
+    expected:
+      module: comparison
+      entities:
+        jenjang: [SD]
+        wilayah: ["bogor utara", "bogor selatan"]
+        scope: kecamatan
+    must_not:
+      module: out_of_context
+    tags: [comparison, kecamatan, vs]
+    notes: "Perbandingan antar kecamatan dalam kota yang sama."
+
+  - id: comp_018
+    query: "SMA negeri di bandung vs bogor, mana lebih banyak"
+    expected:
+      module: comparison
+      entities:
+        jenjang: [SMA]
+        status: NEGERI
+        wilayah: ["bandung", "bogor"]
+    must_not:
+      module: out_of_context
+    tags: [comparison, status_filter, vs, mana_lebih]
+    notes: "Comparison dengan filter status NEGERI."
+
+  - id: comp_019
+    query: "bandung dan bogor smk brapa"
+    expected:
+      module: aggregation
+      entities:
+        jenjang: [SMK]
+        wilayah: ["bandung", "bogor"]
+    must_not:
+      module: out_of_context
+    tags: [aggregation, typo, dan_separator]
+    notes: "Typo 'brapa' → Tier2 mendeteksi sebagai aggregation; dua wilayah diharapkan dihandle sebagai multi-entity aggregation."
+
+  - id: comp_020
+    query: "breakdown SMA di jawa barat vs jawa timur"
+    expected:
+      module: comparison
+      entities:
+        jenjang: [SMA]
+        wilayah: ["jawa barat", "jawa timur"]
+    must_not:
+      module: out_of_context
+    tags: [comparison, breakdown, vs, provinsi]
+    notes: "'breakdown' + vs dua provinsi — comparison dengan detail breakdown."
+
+  # ---------------------------------------------------------------------------
+  # PROFILE — Gap Coverage (profile_007–profile_015)
+  # ---------------------------------------------------------------------------
+
+  - id: profile_007
+    query: "info NPSN 20263123"
+    expected:
+      module: profile
+      entities:
+        npsn: "20263123"
+    must_not:
+      module: out_of_context
+    tags: [profile, npsn, lookup]
+    notes: "NPSN lookup singkat — 'info NPSN' sebagai trigger profile."
+
+  - id: profile_008
+    query: "SMP 1 Denpasar"
+    expected:
+      module: profile
+      entities:
+        nama_sekolah: "SMP 1 Denpasar"
+    must_not:
+      module: out_of_context
+    tags: [profile, nama_sekolah, minimal]
+    notes: "Query minimal nama sekolah tanpa kata kunci — ambigu antara list dan profile."
+
+  - id: profile_009
+    query: "profil Sekolah Cikal"
+    expected:
+      module: profile
+      entities:
+        nama_sekolah: "Sekolah Cikal"
+    must_not:
+      module: out_of_context
+    tags: [profile, sekolah_swasta, trigger_profil]
+    notes: "'profil' sebagai trigger eksplisit; Sekolah Cikal = sekolah swasta terkenal."
+
+  - id: profile_010
+    query: "akreditasi SMA N 1 Solo"
+    expected:
+      module: profile
+      entities:
+        nama_sekolah: "SMA N 1 Solo"
+    must_not:
+      module: out_of_context
+    tags: [profile, akreditasi_sekolah, field_spesifik]
+    notes: "Query field spesifik (akreditasi) dari profil sekolah tertentu."
+
+  - id: profile_011
+    query: "dimana SDN Kebon Jeruk 11"
+    expected:
+      module: profile
+      entities:
+        nama_sekolah: "SDN Kebon Jeruk 11"
+    must_not:
+      module: out_of_context
+    tags: [profile, lokasi_sekolah, dimana]
+    notes: "'dimana' sebagai trigger lokasi sekolah spesifik → profile."
+
+  - id: profile_012
+    query: "kepala sekolah SMA Taruna Nusantara"
+    expected:
+      module: profile
+      entities:
+        nama_sekolah: "SMA Taruna Nusantara"
+    must_not:
+      module: out_of_context
+    tags: [profile, kepala_sekolah, field_spesifik]
+    notes: "Field 'kepala sekolah' dari profil sekolah spesifik."
+
+  - id: profile_013
+    query: "data guru SMAN 2 Yogyakarta"
+    expected:
+      module: profile
+      entities:
+        nama_sekolah: "SMAN 2 Yogyakarta"
+    must_not:
+      module: out_of_context
+    tags: [profile, guru, sekolah_spesifik]
+    notes: "Data guru di sekolah spesifik → profile. Query tanpa 'berapa' menghindari false-positif aggregation."
+
+  - id: profile_014
+    query: "kapan SMP N 1 Semarang berdiri"
+    expected:
+      module: profile
+      entities:
+        nama_sekolah: "SMP N 1 Semarang"
+    must_not:
+      module: out_of_context
+    tags: [profile, tahun_berdiri, kapan]
+    notes: "'kapan berdiri' sebagai query field profil temporal sekolah."
+
+  - id: profile_015
+    query: "website SMKN 1 Bandung"
+    expected:
+      module: profile
+      entities:
+        nama_sekolah: "SMKN 1 Bandung"
+    must_not:
+      module: out_of_context
+    tags: [profile, website, kontak, field_spesifik]
+    notes: "'website' sebagai field profil sekolah spesifik."
+
+  # ---------------------------------------------------------------------------
+  # MULTI-INTENT — Gap Coverage (multi_006–multi_020)
+  # ---------------------------------------------------------------------------
+
+  - id: multi_006
+    query: "berapa dan tampilkan SMA di depok"
+    expected:
+      module: multi_intent
+      sub_intents: [aggregation, list]
+      entities:
+        jenjang: [SMA]
+        kabupaten: "depok"
+    must_not:
+      module: out_of_context
+    tags: [multi_intent, aggregation_plus_list]
+    notes: "Dua intent eksplisit: jumlah + daftar. tier: llm_only"
+
+  - id: multi_007
+    query: "profil SMAN 1 Jakarta dan berapa total SMA di Jakarta"
+    expected:
+      module: multi_intent
+      sub_intents: [profile, aggregation]
+      entities:
+        nama_sekolah: "SMAN 1 Jakarta"
+        kabupaten: "jakarta"
+        jenjang: [SMA]
+    must_not:
+      module: out_of_context
+    tags: [multi_intent, profile_plus_aggregation]
+    notes: "Profile sekolah spesifik + aggregation area. tier: llm_only"
+
+  - id: multi_008
+    query: "tampilkan dan bandingkan SMA di bandung vs bekasi"
+    expected:
+      module: multi_intent
+      sub_intents: [list, comparison]
+      entities:
+        jenjang: [SMA]
+        wilayah: ["bandung", "bekasi"]
+    must_not:
+      module: out_of_context
+    tags: [multi_intent, list_plus_comparison]
+    notes: "List + comparison eksplisit. tier: llm_only"
+
+  - id: multi_009
+    query: "berapa SD di jatim, tampilkan daftarnya, dan bandingkan dengan jateng"
+    expected:
+      module: multi_intent
+      sub_intents: [aggregation, list, comparison]
+      entities:
+        jenjang: [SD]
+        wilayah: ["jawa timur", "jawa tengah"]
+    must_not:
+      module: out_of_context
+    tags: [multi_intent, tiga_intent]
+    notes: "Tiga intent dalam satu query. tier: llm_only"
+
+  - id: multi_010
+    query: "berapa dan sekolah mana yang terdekat dari pusat kota bogor"
+    expected:
+      module: multi_intent
+      sub_intents: [aggregation, geo]
+      entities:
+        kabupaten: "bogor"
+    must_not:
+      module: out_of_context
+    tags: [multi_intent, aggregation_plus_geo]
+    notes: "Aggregation + geo query. tier: llm_only"
+
+  - id: multi_011
+    query: "SMA di bandung: ada berapa, daftarnya apa"
+    expected:
+      module: multi_intent
+      sub_intents: [aggregation, list]
+      entities:
+        jenjang: [SMA]
+        kabupaten: "bandung"
+    must_not:
+      module: out_of_context
+    tags: [multi_intent, colon_separator, implicit_multi]
+    notes: "Dua sub-query dipisah titik dua. tier: llm_only"
+
+  - id: multi_012
+    query: "SMAN 1 vs SMAN 2 Bandung, profil dan perbandingan"
+    expected:
+      module: multi_intent
+      sub_intents: [comparison, profile]
+      entities:
+        nama_sekolah: ["SMAN 1 Bandung", "SMAN 2 Bandung"]
+    must_not:
+      module: out_of_context
+    tags: [multi_intent, comparison_plus_profile]
+    notes: "Comparison + profile dua sekolah spesifik. tier: llm_only"
+
+  - id: multi_013
+    query: "total dan ranking provinsi dengan SD terbanyak"
+    expected:
+      module: multi_intent
+      sub_intents: [aggregation, ranking]
+      entities:
+        jenjang: [SD]
+        scope: nasional
+    must_not:
+      module: out_of_context
+    tags: [multi_intent, aggregation_plus_ranking]
+    notes: "Total nasional + ranking per provinsi. tier: llm_only"
+
+  - id: multi_014
+    query: "daftar SD di bogor yang datanya bermasalah"
+    expected:
+      module: list
+      scope: kabupaten
+      entities:
+        jenjang: [SD]
+        kabupaten: "bogor"
+    must_not:
+      module: out_of_context
+    tags: [list, qc_masalah_only, kabupaten]
+    notes: "Primary intent adalah list dengan filter QC — bukan multi_intent."
+
+  - id: multi_015
+    query: "jumlah dan breakdown negeri swasta di DIY"
+    expected:
+      module: aggregation
+      scope: provinsi
+      entities:
+        provinsi: "diy"
+    must_not:
+      module: out_of_context
+    tags: [aggregation, breakdown_status, diy]
+    notes: "'breakdown negeri swasta' adalah aggregation dengan breakdown — primary aggregation."
+
+  - id: multi_016
+    query: "info SDN Merdeka dan sekolah lain di sekitarnya"
+    expected:
+      module: multi_intent
+      sub_intents: [profile, geo]
+      entities:
+        nama_sekolah: "SDN Merdeka"
+    must_not:
+      module: out_of_context
+    tags: [multi_intent, profile_plus_geo]
+    notes: "Profile sekolah + geo query sekitar. tier: llm_only"
+
+  - id: multi_017
+    query: "berapa SD baru di jakarta tahun ini"
+    expected:
+      module: aggregation
+      scope: provinsi
+      entities:
+        jenjang: [SD]
+        provinsi: "dki jakarta"
+    must_not:
+      module: out_of_context
+    tags: [aggregation, temporal, bukan_multi]
+    notes: "Temporal 'tahun ini' tidak membuat multi_intent — ini aggregation."
+
+  - id: multi_018
+    query: "bandingkan dan breakdown per jenjang SMA di jatim vs jateng"
+    expected:
+      module: multi_intent
+      sub_intents: [comparison, aggregation]
+      entities:
+        jenjang: [SMA]
+        wilayah: ["jawa timur", "jawa tengah"]
+    must_not:
+      module: out_of_context
+    tags: [multi_intent, comparison_plus_breakdown]
+    notes: "Comparison + breakdown analitik dua provinsi. tier: llm_only"
+
+  - id: multi_019
+    query: "filter dan tampilkan SMK akreditasi A di jawa barat"
+    expected:
+      module: list
+      scope: provinsi
+      entities:
+        jenjang: [SMK]
+        akreditasi: A
+        provinsi: "jawa barat"
+    must_not:
+      module: out_of_context
+    tags: [list, filter_plus_tampilkan, provinsi]
+    notes: "'filter dan tampilkan' adalah list dengan multi-filter — bukan multi_intent."
+
+  - id: multi_020
+    query: "dari SD di bekasi, mana yang negeri dan akreditasi A"
+    expected:
+      module: list
+      scope: kabupaten
+      entities:
+        jenjang: [SD]
+        status: NEGERI
+        akreditasi: A
+        kabupaten: "bekasi"
+    must_not:
+      module: out_of_context
+    tags: [list, multi_filter, nested_query]
+    notes: "Query nested dengan multiple filter — primary intent adalah list."
+
+  # ---------------------------------------------------------------------------
+  # EDGE CASES — Gap Coverage (edge_009–edge_020)
+  # ---------------------------------------------------------------------------
+
+  - id: edge_009
+    query: "sekolah?"
+    expected:
+      module: aggregation
+      scope: nasional
+      entities: {}
+    must_not:
+      module: out_of_context
+    tags: [edge, minimal_query, satu_kata]
+    notes: "Query satu kata dengan tanda tanya — sangat ambigu, mungkin xfail ke LLM."
+
+  - id: edge_010
+    query: "BERAPA SMK DI BANDUNG"
+    expected:
+      module: aggregation
+      scope: kabupaten
+      entities:
+        jenjang: [SMK]
+        kabupaten: "bandung"
+    must_not:
+      module: out_of_context
+    tags: [edge, caps_lock, aggregation]
+    notes: "Caps lock — normalisasi case harus handle ini."
+
+  - id: edge_011
+    query: "berapa SD tahun 2024 di jawa barat"
+    expected:
+      module: aggregation
+      scope: provinsi
+      entities:
+        jenjang: [SD]
+        provinsi: "jawa barat"
+    must_not:
+      module: out_of_context
+    tags: [edge, angka_dalam_query, tahun, aggregation]
+    notes: "Angka tahun dalam query — harus tidak dikira NPSN."
+
+  - id: edge_012
+    query: "sekolah di bandung berapa?"
+    expected:
+      module: aggregation
+      scope: kabupaten
+      entities:
+        kabupaten: "bandung"
+    must_not:
+      module: out_of_context
+    tags: [edge, aggregation, urutan_terbalik]
+    notes: "Urutan terbalik 'sekolah di X berapa' — harus tetap detect aggregation."
+
+  - id: edge_013
+    query: "berapa    sekolah   di  bogor"
+    expected:
+      module: aggregation
+      scope: kabupaten
+      entities:
+        kabupaten: "bogor"
+    must_not:
+      module: out_of_context
+    tags: [edge, spasi_berlebihan, aggregation]
+    notes: "Spasi berlebihan antar kata — normalisasi whitespace harus handle."
+
+  - id: edge_014
+    query: "how many sekolah di bandung"
+    expected:
+      module: aggregation
+      scope: kabupaten
+      entities:
+        kabupaten: "bandung"
+    must_not:
+      module: out_of_context
+    tags: [edge, bahasa_campuran, aggregation]
+    notes: "Bahasa campuran Inggris-Indonesia — 'how many' sebagai aggregation trigger."
+
+  - id: edge_015
+    query: "sekolah bukan negeri di bandung"
+    expected:
+      module: list
+      scope: kabupaten
+      entities:
+        status: SWASTA
+        kabupaten: "bandung"
+    must_not:
+      module: out_of_context
+    tags: [edge, negasi, status_filter, list]
+    notes: "'bukan negeri' → SWASTA filter via negasi."
+
+  - id: edge_016
+    query: "masa iya tidak ada SMA di kupang"
+    expected:
+      module: aggregation
+      scope: kabupaten
+      entities:
+        jenjang: [SMA]
+        kabupaten: "kupang"
+    must_not:
+      module: out_of_context
+    tags: [edge, retoris, aggregation]
+    notes: "Pertanyaan retoris — tetap harus detect sebagai aggregation, bukan OOT."
+
+  - id: edge_017
+    query: "berapa total sekolah negeri akreditasi A di semua kabupaten provinsi jawa barat dengan jumlah siswa besar"
+    expected:
+      module: aggregation
+      scope: provinsi
+      entities:
+        status: NEGERI
+        akreditasi: A
+        provinsi: "jawa barat"
+    must_not:
+      module: out_of_context
+    tags: [edge, query_panjang, multi_filter, aggregation]
+    notes: "Query panjang >15 kata — stress test parser untuk tidak truncate entitas penting."
+
+  - id: edge_018
+    query: "jakarta, selatan"
+    expected:
+      module: list
+      scope: kabupaten
+      entities:
+        kabupaten: "jakarta selatan"
+    must_not:
+      module: out_of_context
+    tags: [edge, nama_dengan_koma, minimal]
+    notes: "Nama daerah dengan koma — harus parse sebagai 'jakarta selatan'."
+
+  - id: edge_019
+    query: "sekolah di mars"
+    expected:
+      module: list
+      entities:
+        kabupaten: "mars"
+    must_not:
+      module: out_of_context
+    tags: [edge, lokasi_invalid, not_found]
+    notes: "Lokasi tidak valid — classifier return list; location resolver yang return NOT_FOUND."
+
+  - id: edge_020
+    query: "berapa guru di Indonesia"
+    expected:
+      module: aggregation
+      scope: nasional
+      entities: {}
+    must_not:
+      module: out_of_context
+    tags: [edge, aggregation, nasional, guru]
+    notes: "'berapa guru' — aggregation nasional, field terkait pendidikan."
+
+  # ---------------------------------------------------------------------------
+  # OUT OF CONTEXT — Gap Coverage (oot_004–oot_010)
+  # ---------------------------------------------------------------------------
+
+  - id: oot_004
+    query: "cuaca bandung hari ini"
+    expected:
+      module: out_of_context
+    tags: [oot, cuaca, non_education]
+    notes: "Query cuaca — jelas OOT meski menyebut kota Bandung."
+
+  - id: oot_005
+    query: "hitung 2 + 2"
+    expected:
+      module: out_of_context
+    tags: [oot, matematika, non_education]
+    notes: "Pertanyaan matematika — OOT."
+
+  - id: oot_006
+    query: "resep rendang"
+    expected:
+      module: out_of_context
+    tags: [oot, kuliner, non_education]
+    notes: "Query kuliner — jelas OOT."
+
+  - id: oot_007
+    query: "berita olahraga terbaru"
+    expected:
+      module: out_of_context
+    tags: [oot, berita, non_education]
+    notes: "Query berita non-pendidikan — OOT."
+
+  - id: oot_008
+    query: "bagus ya sistem pendidikan kita"
+    expected:
+      module: out_of_context
+    tags: [oot, opini, non_query]
+    notes: "Komentar opini bukan pertanyaan data — OOT."
+
+  - id: oot_009
+    query: "siapa kamu"
+    expected:
+      module: out_of_context
+    tags: [oot, meta, non_education]
+    notes: "Pertanyaan tentang identitas sistem — OOT."
+
+  - id: oot_010
+    query: "kurikulum merdeka itu apa"
+    expected:
+      module: out_of_context
+    tags: [oot, kurikulum, pendidikan_tapi_oot]
+    notes: "Terkait pendidikan tapi query konsep kebijakan, bukan data sekolah — OOT."
+
+  # ---------------------------------------------------------------------------
+  # GEO / NEARBY — Gap Coverage (geo_005–geo_010)
+  # ---------------------------------------------------------------------------
+
+  - id: geo_005
+    query: "SD dalam radius 3km dari thamrin city"
+    expected:
+      module: geo
+      entities:
+        jenjang: [SD]
+        landmark: "thamrin city"
+        radius_km: 3
+    must_not:
+      module: out_of_context
+    tags: [geo, radius_eksplisit, landmark]
+    notes: "Geo dengan radius eksplisit 3km — harus extract radius dan landmark."
+
+  - id: geo_006
+    query: "SMA dekat -7.250445,112.768845"
+    expected:
+      module: geo
+      entities:
+        jenjang: [SMA]
+        koordinat: [-7.250445, 112.768845]
+    must_not:
+      module: out_of_context
+    tags: [geo, koordinat_desimal, jenjang]
+    notes: "Koordinat negatif (lintang selatan) — parser harus handle minus sign."
+
+  - id: geo_007
+    query: "sekolah dekat alun-alun bandung"
+    expected:
+      module: geo
+      entities:
+        landmark: "alun-alun bandung"
+    must_not:
+      module: out_of_context
+    tags: [geo, landmark_kabupaten, dekat]
+    notes: "Landmark kabupaten (alun-alun) — geo query tanpa filter jenjang."
+
+  - id: geo_008
+    query: "TK terdekat dari rumah sakit siloam surabaya"
+    expected:
+      module: geo
+      entities:
+        jenjang: [TK]
+        landmark: "rumah sakit siloam surabaya"
+    must_not:
+      module: out_of_context
+    tags: [geo, tk, landmark_rs, terdekat]
+    notes: "Geo + jenjang TK + landmark rumah sakit."
+
+  - id: geo_009
+    query: "SMA negeri terdekat dari stasiun bogor"
+    expected:
+      module: geo
+      entities:
+        jenjang: [SMA]
+        status: NEGERI
+        landmark: "stasiun bogor"
+    must_not:
+      module: out_of_context
+    tags: [geo, filter_jenjang, filter_status, stasiun]
+    notes: "Geo + filter jenjang + status — stasiun sebagai landmark."
+
+  - id: geo_010
+    query: "SD akreditasi A terdekat dari thamrin"
+    expected:
+      module: geo
+      entities:
+        jenjang: [SD]
+        akreditasi: A
+        landmark: "thamrin"
+    must_not:
+      module: out_of_context
+    tags: [geo, akreditasi, landmark, terdekat]
+    notes: "Geo + filter akreditasi A."
+
+  # ---------------------------------------------------------------------------
+  # QC QUERIES (qc_001–qc_005)
+  # ---------------------------------------------------------------------------
+
+  - id: qc_001
+    query: "sekolah dengan data tidak lengkap di jakarta"
+    expected:
+      module: aggregation
+      scope: provinsi
+      entities:
+        provinsi: "dki jakarta"
+    must_not:
+      module: out_of_context
+    tags: [qc, aggregation, data_tidak_lengkap, jakarta]
+    notes: "QC query — 'data tidak lengkap' harus detect sebagai aggregation QC."
+
+  - id: qc_002
+    query: "berapa persen data sekolah bersih di jawa barat"
+    expected:
+      module: aggregation
+      scope: provinsi
+      entities:
+        provinsi: "jawa barat"
+    must_not:
+      module: out_of_context
+    tags: [qc, aggregation, qc_persen_query, provinsi]
+    notes: "'berapa persen data bersih' = qc_persen_query aggregation."
+
+  - id: qc_003
+    query: "SD dengan masalah data terbanyak di sulsel"
+    expected:
+      module: aggregation
+      scope: provinsi
+      entities:
+        jenjang: [SD]
+        provinsi: "sulawesi selatan"
+    must_not:
+      module: out_of_context
+    tags: [qc, aggregation, ranking, masalah_data]
+    notes: "QC ranking — SD dengan masalah data paling banyak per kabupaten."
+
+  - id: qc_004
+    query: "tampilkan sekolah bermasalah di kab bogor"
+    expected:
+      module: list
+      scope: kabupaten
+      entities:
+        kabupaten: "bogor"
+    must_not:
+      module: out_of_context
+    tags: [qc, list, tampilkan, bermasalah]
+    notes: "'tampilkan' + 'bermasalah' → list dengan QC filter."
+
+  - id: qc_005
+    query: "sekolah akreditasi A tapi data kotor di jakarta"
+    expected:
+      module: list
+      scope: provinsi
+      entities:
+        akreditasi: A
+        provinsi: "dki jakarta"
+    must_not:
+      module: out_of_context
+    tags: [qc, list, akreditasi, data_kotor]
+    notes: "List QC dengan filter akreditasi A dan kondisi data kotor."

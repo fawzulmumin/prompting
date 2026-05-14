@@ -8,9 +8,9 @@ from typing import Dict, Any, Optional, List, Tuple
 from elasticsearch import AsyncElasticsearch
  
 from app.services.core.result_model import ResultStatus
-from app.services.entity_service import (
-    resolve_entities,
-    validate_hierarchy_integrity
+from app.services.core.location_resolver_adapter import (
+    resolve_location_from_query,
+    validate_hierarchy_integrity,
 )
 from app.services.core.aggregation_core import (
     execute_aggregation_query,
@@ -241,6 +241,37 @@ def graceful_error_response() -> Dict[str, Any]:
     }
  
  
+def _build_kabupaten_filter(val: str) -> dict:
+    """
+    Build ES kabupaten filter yang toleran terhadap missing prefix.
+
+    Jika val sudah punya prefix (kab./kota/kabupaten) → exact term match.
+    Jika tidak (mis. "bogor") → should query yang mencoba:
+      - kab. bogor
+      - kota bogor
+      - bogor (bare, fallback)
+    Sehingga comparison "bandung vs bogor" tetap menemukan dokumen
+    meskipun classifier tidak menambahkan prefix ke wilayah_bandingkan.
+    """
+    v = val.lower().strip()
+    _has_prefix = (
+        v.startswith("kab.") or v.startswith("kab ")
+        or v.startswith("kota") or v.startswith("kabupaten")
+    )
+    if _has_prefix:
+        return {"term": {"kabupaten": v}}
+    return {
+        "bool": {
+            "should": [
+                {"term": {"kabupaten": f"kab. {v}"}},
+                {"term": {"kabupaten": f"kota {v}"}},
+                {"term": {"kabupaten": v}},
+            ],
+            "minimum_should_match": 1,
+        }
+    }
+
+
 def _build_comparison_agg_query(
     entities: dict,
     jenjang: str = None,
@@ -254,6 +285,8 @@ def _build_comparison_agg_query(
         if val:
             if field == "provinsi":
                 filters.append(_build_provinsi_filter(val))
+            elif field == "kabupaten":
+                filters.append(_build_kabupaten_filter(val))
             else:
                 filters.append({"term": {field: val}})
 
@@ -328,6 +361,78 @@ def _extract_wilayah_from_intent(intent) -> dict:
     if w2:
         result["wilayah_2"] = w2.lower().strip()
     return result
+
+
+async def _fetch_location_data(
+    loc_data: dict,
+    es_client: AsyncElasticsearch,
+    intent=None,
+    filters: Optional[Dict[str, Any]] = None,
+) -> dict:
+    """
+    Fetch aggregation count for a single location.
+    Extracted from handle_comparison_query (Phase 10).
+    """
+    entities = dict(loc_data)
+    normalized = normalize_entity_hierarchy(entities)
+
+    qf = filters or extract_filters_from_intent(intent)
+
+    if qf.get("bentuk_pendidikan"):
+        normalized["bentuk_pendidikan"] = qf["bentuk_pendidikan"]
+    if qf.get("status_sekolah"):
+        normalized["status_sekolah"] = qf["status_sekolah"]
+    if qf.get("akreditasi_gte"):
+        normalized["akreditasi_gte"] = qf["akreditasi_gte"]
+    if qf.get("akreditasi_in"):
+        normalized["akreditasi_in"] = qf["akreditasi_in"]
+    if qf.get("bentuk_pendidikan_in"):
+        normalized["bentuk_pendidikan_in"] = qf["bentuk_pendidikan_in"]
+    if qf.get("penyelenggara"):
+        normalized["penyelenggara"] = qf["penyelenggara"]
+    elif qf.get("akreditasi_exact"):
+        normalized["akreditasi_exact"] = qf["akreditasi_exact"]
+
+    jenjang = qf.get("bentuk_pendidikan")
+    agg_query = _build_comparison_agg_query(entities, jenjang, qf=qf)
+
+    es_result = await es_client.search(
+        index=os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc"),
+        body=agg_query,
+    )
+
+    aggs = es_result.get("aggregations", {})
+    total_sekolah = aggs.get("total_sekolah", {}).get("value", 0)
+    display_value = get_display_value(entities)
+
+    return {
+        "value": display_value,
+        "count": total_sekolah,
+        "entities": entities,
+    }
+
+
+def _build_comparison_markdown(
+    results: List[Dict[str, Any]],
+    jenjang_label: Optional[str] = None,
+) -> str:
+    """
+    Build perbandingan markdown from sorted results list.
+    Each result must have keys: 'value', 'count'.
+    """
+    if jenjang_label:
+        markdown = f"### Perbandingan Sekolah {jenjang_label}\n\n"
+    else:
+        markdown = "### Perbandingan Jumlah Sekolah\n\n"
+
+    for r in results:
+        label = format_location(r["value"])
+        markdown += f"- {label}: **{r['count']:,} sekolah**\n"
+
+    best_label = format_location(results[0]["value"])
+    markdown += f"\n---\n"
+    markdown += f"Wilayah dengan sekolah terbanyak adalah **{best_label}**."
+    return markdown
 
 
 async def handle_comparison_query(
@@ -463,7 +568,7 @@ async def handle_comparison_query(
         locations = vs_result
     else:
         # ── SLOW PATH: resolve normal (untuk koma, dll) ───────
-        resolved = await resolve_entities(query, es_client)
+        resolved = await resolve_location_from_query(query, es_client)
  
         if resolved["status"] == ResultStatus.AMBIGUOUS:
             resolved["confidence_score"] = 0.0
@@ -506,56 +611,6 @@ async def handle_comparison_query(
     # ── Execute aggregation per lokasi ────────────────────────
     results: List[Dict[str, Any]] = []
  
-    async def _fetch_location_data(loc_data: dict) -> dict:
-
-        entities = dict(loc_data)
-        normalized = normalize_entity_hierarchy(entities)
-
-        # Ambil filter SEKALI saja
-        qf = filters or extract_filters_from_intent(intent)
-
-        if qf.get("bentuk_pendidikan"):
-            normalized["bentuk_pendidikan"] = qf["bentuk_pendidikan"]
-
-        if qf.get("status_sekolah"):
-            normalized["status_sekolah"] = qf["status_sekolah"]
-
-        if qf.get("akreditasi_gte"):
-            normalized["akreditasi_gte"] = qf["akreditasi_gte"]
-
-        if qf.get("akreditasi_in"):
-            normalized["akreditasi_in"] = qf["akreditasi_in"]
-
-        if qf.get("bentuk_pendidikan_in"):
-            normalized["bentuk_pendidikan_in"] = qf["bentuk_pendidikan_in"]
-
-        if qf.get("penyelenggara"):
-            normalized["penyelenggara"] = qf["penyelenggara"]
-        elif qf.get("akreditasi_exact"):
-            normalized["akreditasi_exact"] = qf["akreditasi_exact"]
-
-        # Ambil jenjang untuk avg comparison
-        jenjang = qf.get("bentuk_pendidikan")
-
-        agg_query = _build_comparison_agg_query(entities, jenjang, qf=qf)
-
-        es_result = await es_client.search(
-            index=os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc"),
-            body=agg_query
-        )
-
-        aggs = es_result.get("aggregations", {})
-
-        total_sekolah = aggs.get("total_sekolah", {}).get("value", 0)
-
-        display_value = get_display_value(entities)
-
-        return {
-            "value": display_value,
-            "count": total_sekolah,
-            "entities": entities,
-        }
- 
     for loc_data in locations:
         if not isinstance(loc_data, dict):
             logger.warning("[COMPARISON] loc_data invalid type: %s", type(loc_data))
@@ -569,7 +624,7 @@ async def handle_comparison_query(
             }
  
         try:
-            result = await _fetch_location_data(loc_data)
+            result = await _fetch_location_data(loc_data, es_client, intent=intent, filters=filters)
             results.append(result)
         except Exception:
             logger.exception("Comparison aggregation failed for loc: %s", loc_data)
@@ -584,30 +639,14 @@ async def handle_comparison_query(
     # ── Build Markdown Output ─────────────────────────────────
     if not results:
         return None
- 
+
     results.sort(key=lambda x: x["count"], reverse=True)
- 
-    # Ambil jenjang dari filter (jika ada)
+
     qf = filters or extract_filters_from_intent(intent)
     jenjang = qf.get("bentuk_pendidikan")
-
-    # Optional: label biar lebih rapi (SMA, SMK, dll)
     jenjang_label = jenjang.upper() if jenjang else None
 
-    # Header dinamis
-    if jenjang_label:
-        markdown = f"### Perbandingan Sekolah {jenjang_label}\n\n"
-    else:
-        markdown = "### Perbandingan Jumlah Sekolah\n\n"
-    for r in results:
-        label = format_location(r["value"])
-        markdown += f"- {label}: **{r['count']:,} sekolah**\n"
- 
-    best = results[0]
-    best_label = format_location(best["value"])
-    markdown += f"\n---\n"
-    markdown += f"Wilayah dengan sekolah terbanyak adalah **{best_label}**."
- 
+    markdown = _build_comparison_markdown(results, jenjang_label=jenjang_label)
     total_hits = sum(r["count"] for r in results)
  
     confidence = compute_comparison_confidence(
@@ -928,7 +967,7 @@ async def _resolve_vs_query(
             return None
  
         logger.debug("[VS_RESOLVE] status_comparison pseudo_query=%s", pseudo_query)
-        sub = await resolve_entities(pseudo_query, es_client)
+        sub = await resolve_location_from_query(pseudo_query, es_client)
  
         if sub["status"] == ResultStatus.SUCCESS:
             entities = sub["data"].get("entities", {})
@@ -966,7 +1005,7 @@ async def _resolve_vs_query(
         if loc_part:
             pseudo_query = f"jumlah sekolah di {loc_part}"
             logger.debug("[VS_RESOLVE] implicit_status pseudo_query=%s", pseudo_query)
-            sub = await resolve_entities(pseudo_query, es_client)
+            sub = await resolve_location_from_query(pseudo_query, es_client)
  
             if sub["status"] == ResultStatus.SUCCESS:
                 entities = sub["data"].get("entities", {})
@@ -1028,7 +1067,7 @@ async def _resolve_vs_query(
                 jenjang_a, jenjang_b, loc_text
             )
             pseudo_query = f"jumlah sekolah di {loc_text}"
-            sub = await resolve_entities(pseudo_query, es_client)
+            sub = await resolve_location_from_query(pseudo_query, es_client)
  
             if sub["status"] == ResultStatus.SUCCESS:
                 entities = sub["data"].get("entities", {})
@@ -1092,7 +1131,7 @@ async def _resolve_vs_query(
         pseudo_query = f"jumlah sekolah di {corrected_text}"
         logger.debug("[VS_RESOLVE] location pseudo_query=%s", pseudo_query)
  
-        sub = await resolve_entities(pseudo_query, es_client)
+        sub = await resolve_location_from_query(pseudo_query, es_client)
         logger.debug(
             "[VS_RESOLVE] sub status=%s entities=%s metadata=%s",
             sub["status"],
@@ -1128,7 +1167,7 @@ async def _resolve_vs_query(
             # Fuzzy correction tidak membantu — coba original text juga
             logger.debug("[VS_RESOLVE] fuzzy correction failed, trying original: %s", loc_text)
             pseudo_orig = f"jumlah sekolah di {loc_text}"
-            sub_orig = await resolve_entities(pseudo_orig, es_client)
+            sub_orig = await resolve_location_from_query(pseudo_orig, es_client)
             if sub_orig["status"] == ResultStatus.SUCCESS:
                 entities = sub_orig["data"].get("entities", {})
                 if isinstance(entities, dict) and entities:

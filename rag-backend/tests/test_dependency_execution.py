@@ -242,8 +242,9 @@ def test_normalize_cache_key_lowercases_and_strips():
     """
     from app.utils.cache import _normalize_cache_key
 
-    assert _normalize_cache_key("  Berapa SMK  ") == "berapa smk"
-    assert _normalize_cache_key("berapa,SMK!") == "berapa smk"
+    # "berapa" is a stopword → stripped; punctuation/whitespace/casing → cleaned
+    assert _normalize_cache_key("  Berapa SMK  ") == "smk"
+    assert _normalize_cache_key("berapa,SMK!") == "smk"
 
     md5_like = "a" * 32  # 32 hex chars — must pass through unchanged
     assert _normalize_cache_key(md5_like) == md5_like

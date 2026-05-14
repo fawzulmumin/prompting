@@ -1,8 +1,11 @@
 # core/ranking_engine.py
- 
+
 import re
+import logging
 from rapidfuzz import fuzz
 from typing import List, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 # =====================================================
 # LOCAL CONSTANTS (decoupled from smart_query_parser)
@@ -372,17 +375,19 @@ def apply_smart_ranking(parsed_query: Dict, hits: List[Dict]) -> List[Dict]:
         h["_loc_score"]    = loc_sc
  
     hits.sort(key=lambda x: x["_custom_score"], reverse=True)
- 
-    # Debug: print top 3
-    for i, h in enumerate(hits[:3]):
-        print(
-            f"[RANK {i+1}] {h['_source'].get('nama')} | "
-            f"kab={h['_source'].get('kabupaten')} | "
-            f"custom={h.get('_custom_score', 0):.1f} | "
-            f"loc={h.get('_loc_score', 0):.1f} | "
-            f"es={h.get('_score', 0):.2f}"
-        )
- 
+
+    if logger.isEnabledFor(logging.DEBUG):
+        for i, h in enumerate(hits[:3]):
+            logger.debug(
+                "[RANK %d] %s | kab=%s | custom=%.1f | loc=%.1f | es=%.2f",
+                i + 1,
+                h["_source"].get("nama"),
+                h["_source"].get("kabupaten"),
+                h.get("_custom_score", 0),
+                h.get("_loc_score", 0),
+                h.get("_score", 0),
+            )
+
     return hits
  
  

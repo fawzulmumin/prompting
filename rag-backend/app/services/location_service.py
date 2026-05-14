@@ -1,6 +1,7 @@
 # location_service.py
 
 import os
+import re
 import logging
 import json
 from typing import Dict, List
@@ -329,6 +330,44 @@ async def initialize_location_index(es_client: AsyncElasticsearch):
 # ENRICH HIERARCHY
 # =========================================================
  
+_ALL_LOCATIONS_CACHE: list = []
+
+
+def build_reference_locations() -> list:
+    """
+    Build a flat cache of all locations from LOCATION_INDEX.
+    Called once at startup (main.py). Migrated from entity_service.py (Phase 9).
+    """
+    global _ALL_LOCATIONS_CACHE
+    if _ALL_LOCATIONS_CACHE:
+        return _ALL_LOCATIONS_CACHE
+
+    from app.services.core.location_resolver import strip_loc_prefix
+
+    refs = []
+    for level, lookup in LOCATION_INDEX.items():
+        for key, raw in lookup.items():
+            normalized_name = re.sub(r"[^\w\s]", " ", strip_loc_prefix(key).lower())
+            normalized_name = re.sub(r"\s+", " ", normalized_name).strip()
+            # normalize raw value: lowercase + standard prefixes
+            norm_raw = raw.lower().strip()
+            for old, new in (
+                ("kabupaten ", "kab. "),
+                ("provinsi ", "prov. "),
+                ("kecamatan ", "kec. "),
+                ("kelurahan ", ""),
+                ("desa ", ""),
+            ):
+                norm_raw = norm_raw.replace(old, new)
+            refs.append({
+                "value": norm_raw.strip(),
+                "level": level,
+                "normalized_name": normalized_name,
+            })
+    _ALL_LOCATIONS_CACHE = refs
+    return refs
+
+
 def enrich_hierarchy_from_index(entities: dict) -> dict:
     """Enrich entities dengan hierarki wilayah dari LOCATION_HIERARCHY."""
     if not entities:

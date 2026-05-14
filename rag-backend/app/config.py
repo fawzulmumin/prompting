@@ -1,7 +1,10 @@
 # config.py
+import logging
 import os
 from dotenv import load_dotenv
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 # ROOT project adalah satu level di atas folder app/
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -12,10 +15,10 @@ env_file_name = ".env.production" if PROD == "production" else ".env"
 env_path = ROOT_DIR / env_file_name
 
 if env_path.exists():
-    print(f"--- Loading config from: {env_path} ---")
+    _log.info("Config loaded from %s", env_path)
     load_dotenv(dotenv_path=env_path, override=True)
 else:
-    print(f"--- Warning: {env_file_name} not found at {env_path} ---")
+    _log.warning("Env file not found: %s", env_path)
 
 ELASTICSEARCH_NODE = os.getenv("ELASTICSEARCH_NODE")
 ELASTICSEARCH_USERNAME = os.getenv("ELASTICSEARCH_USERNAME")

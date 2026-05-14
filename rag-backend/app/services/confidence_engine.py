@@ -1,7 +1,8 @@
 # confidence_engine.py
 
 from typing import Dict
-from app.services.entity_service import LOCATION_HINT_WORDS
+
+LOCATION_HINT_WORDS = {"provinsi", "kabupaten", "kota", "kecamatan", "desa", "kelurahan"}
 
 
 def resolution_score(metadata: dict) -> float:

@@ -5,18 +5,73 @@ Input: CognitiveIntent + es_filters dari _build_es_filters()
 Output: dict ES query siap kirim
 """
 
+import logging
 from typing import Dict, Any, List, Optional
+
+logger = logging.getLogger(__name__)
+
+
+def _build_provinsi_filter(provinsi_value: str) -> dict:
+    """Build ES filter untuk field provinsi, dengan handling khusus Jakarta."""
+    if "jakarta" in provinsi_value.lower():
+        return {
+            "bool": {
+                "should": [
+                    {"term": {"provinsi": "prov. d.k.i. jakarta"}},
+                    {"term": {"provinsi": "prov. dki jakarta"}},
+                    {"match": {"provinsi.text": "jakarta"}},
+                ],
+                "minimum_should_match": 1,
+            }
+        }
+    return {"term": {"provinsi": provinsi_value}}
 
 
 def build_wilayah_filter(intent) -> List[Dict]:
     """
     Bangun filter wilayah bertingkat dari intent.
     Gunakan field .keyword untuk exact match yang efisien.
+
+    Jika intent.wilayah.ambiguous=True, build should query dari semua
+    candidates (Phase 14 — implementasi TODO Phase 3).
     """
     filters = []
     wil = intent.wilayah
 
-    # Hierarki: desa > kecamatan > kabupaten > provinsi
+    # ── Ambiguous: build should query ke semua kandidat ──────────────────
+    if getattr(wil, "ambiguous", False) and getattr(wil, "candidates", []):
+        should_clauses = []
+        for candidate in wil.candidates:
+            cand_filters = []
+            desa_val = candidate.get("desa_kelurahan") or candidate.get("desa")
+            if desa_val:
+                cand_filters.append({"term": {"desa_kelurahan": desa_val.lower()}})
+            if candidate.get("kecamatan"):
+                cand_filters.append({"term": {"kecamatan": candidate["kecamatan"].lower()}})
+            if candidate.get("kabupaten"):
+                cand_filters.append({"term": {"kabupaten": candidate["kabupaten"].lower()}})
+            if candidate.get("provinsi"):
+                cand_filters.append(_build_provinsi_filter(candidate["provinsi"].lower()))
+            if cand_filters:
+                if len(cand_filters) == 1:
+                    should_clauses.append(cand_filters[0])
+                else:
+                    should_clauses.append({"bool": {"filter": cand_filters}})
+
+        if should_clauses:
+            filters.append({
+                "bool": {
+                    "should": should_clauses,
+                    "minimum_should_match": 1,
+                }
+            })
+            logger.debug(
+                "[WILAYAH_FILTER] ambiguous=True, %d candidates → should query",
+                len(should_clauses),
+            )
+            return filters
+
+    # ── Non-ambiguous: exact match per level (hierarki desa→kecamatan→kabupaten→provinsi) ──
     if wil.desa:
         filters.append({"bool": {"should": [
             {"term": {"desa_kelurahan": wil.desa.lower()}},
@@ -30,7 +85,7 @@ def build_wilayah_filter(intent) -> List[Dict]:
     elif wil.kabupaten:
         filters.append({"term": {"kabupaten": wil.kabupaten.lower()}})
     elif wil.provinsi:
-        filters.append({"term": {"provinsi": wil.provinsi.lower()}})
+        filters.append(_build_provinsi_filter(wil.provinsi.lower()))
     # scope nasional → tidak ada filter wilayah
 
     return filters
