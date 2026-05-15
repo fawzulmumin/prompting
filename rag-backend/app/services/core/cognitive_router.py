@@ -252,7 +252,7 @@ def _keyword_fallback(query: str) -> CognitiveIntent:
     Keyword fallback sederhana — digunakan saat LLM tidak tersedia.
     Tidak perlu se-komprehensif dulu karena LLM seharusnya handle 95%+ kasus.
     """
-    q      = query.lower()
+    q      = query.lower().rstrip("?!.,;:")   # trailing punctuation breaks scope regex
     tokens = set(q.split())
     import re as _re
  
@@ -460,7 +460,9 @@ def _keyword_fallback(query: str) -> CognitiveIntent:
 
     elif any(w in q for w in ("berapa", "jumlah", "total")) or any(
         abbr in q for abbr in ("jmlh", "jml ", "jml.")
-    ) or re.search(r'\bpaling\s+banyak\b', q) or re.search(r'\bbanyak\s+sekolah\b', q):
+    ) or re.search(r'\bpaling\s+banyak\b', q) or re.search(r'\bbanyak\s+sekolah\b', q) \
+      or any(w in q for w in ("terbanyak", "terbesar", "tertinggi", "terendah", "terkecil",
+                               "ranking", "peringkat")):
         module = "aggregation"
 
     elif any(w in q for w in (
@@ -497,14 +499,28 @@ def _keyword_fallback(query: str) -> CognitiveIntent:
         r'\bindonesia\b', r'\bnasional\b',
         r'\bse-?indonesia\b', r'\bseluruh\s+indonesia\b', r'\bnusantara\b',
     ]
+    # Prevent "provinsi dengan / kabupaten mana" from triggering scope (Fix 4).
+    _SCOPE_STOP = frozenset({
+        "dengan", "mana", "yang", "apa", "ini", "itu", "saja",
+        "paling", "dan", "atau", "untuk", "dari", "ke", "berapa",
+        "terbanyak", "terbesar", "tertinggi", "terendah", "terkecil",
+    })
+
+    def _level_is_filter(level_words):
+        """True iff the word right after any level keyword is a real name (not a stopword)."""
+        for lw in level_words:
+            m = _re.search(r'\b' + _re.escape(lw) + r'\s+(\w+)', q)
+            if m and m.group(1).lower() not in _SCOPE_STOP:
+                return True
+        return False
 
     if any(_re.search(p, q) for p in _DESA_PATTERNS):
         _scope = "desa"
-    elif any(_re.search(p, q) for p in _KEC_PATTERNS):
+    elif any(_re.search(p, q) for p in _KEC_PATTERNS) and _level_is_filter(["kecamatan", "kec."]):
         _scope = "kecamatan"
-    elif any(_re.search(p, q) for p in _KAB_PATTERNS):
+    elif any(_re.search(p, q) for p in _KAB_PATTERNS) and _level_is_filter(["kabupaten", "kab.", "kota"]):
         _scope = "kabupaten"
-    elif any(_re.search(p, q) for p in _PROV_PATTERNS):
+    elif any(_re.search(p, q) for p in _PROV_PATTERNS) and _level_is_filter(["provinsi", "prov."]):
         _scope = "provinsi"
     elif any(_re.search(p, q) for p in _NASIONAL_PATTERNS):
         _scope = "nasional"
@@ -523,6 +539,24 @@ def _keyword_fallback(query: str) -> CognitiveIntent:
                 _scope = "kabupaten"
 
     logger.debug("[KeywordFallback] scope=%s", _scope)
+
+    # ═══════════════════════════════════════════════════════════════
+    # WILAYAH EXTRACTION — parent-scope filter for ranking queries
+    # "10 kabupaten dengan SMA terbanyak di jawa timur" → provinsi=jawa timur
+    # Runs after scope so we know the ranking axis level (Fix 2).
+    # ═══════════════════════════════════════════════════════════════
+    _wilayah_from_ranking = None
+    _RANKING_WORDS = ("terbanyak", "terbesar", "tertinggi", "terendah", "terkecil",
+                      "ranking", "peringkat")
+    if _scope in ("kabupaten", "kecamatan", "desa") and any(w in q for w in _RANKING_WORDS):
+        _tail_di = _re.search(r'\bdi\s+([a-z][a-z\s]+?)\s*$', q)
+        if _tail_di:
+            _parent_raw = _tail_di.group(1).strip()
+            _parent_loc = _WILAYAH_ALIAS.get(_parent_raw, _parent_raw)
+            if _scope == "kabupaten":
+                _wilayah_from_ranking = WilayahEntities(provinsi=_parent_loc)
+            else:
+                _wilayah_from_ranking = WilayahEntities(kabupaten=_parent_loc)
 
     # ═══════════════════════════════════════════════════════════════
     # SUB-QUERIES untuk multi-intent — splitting heuristik
@@ -607,6 +641,7 @@ def _keyword_fallback(query: str) -> CognitiveIntent:
         status=status,
         npsn=npsn,
         yayasan=yayasan,
+        wilayah=_wilayah_from_ranking if _wilayah_from_ranking is not None else WilayahEntities(),
         dependencies=dependencies,
     )
  

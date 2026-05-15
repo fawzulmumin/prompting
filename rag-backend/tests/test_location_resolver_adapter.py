@@ -158,6 +158,98 @@ async def test_status_sekolah_negeri_in_metadata(mock_get_resolver, mock_es):
     assert result["metadata"].get("status_sekolah") == "NEGERI"
 
 
+# ── Province alias tests ──────────────────────────────────────────────────────
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_province_alias_jakarta(mock_es):
+    """'jakarta' → provinsi='prov. dki jakarta', kabupaten not set."""
+    from app.services.core.location_resolver_adapter import resolve_location_from_query
+    result = await resolve_location_from_query("jumlah SD di jakarta", mock_es)
+    assert result["status"] == ResultStatus.SUCCESS
+    assert result["metadata"]["method"] == "province_alias"
+    entities = result["data"]["entities"]
+    assert entities.get("provinsi") == "prov. dki jakarta"
+    assert "kabupaten" not in entities
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_province_alias_yogyakarta(mock_es):
+    """'yogyakarta' → provinsi='prov. d.i. yogyakarta', kabupaten not set."""
+    from app.services.core.location_resolver_adapter import resolve_location_from_query
+    result = await resolve_location_from_query("sekolah di yogyakarta", mock_es)
+    assert result["status"] == ResultStatus.SUCCESS
+    entities = result["data"]["entities"]
+    assert entities.get("provinsi") == "prov. d.i. yogyakarta"
+    assert "kabupaten" not in entities
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_province_alias_jogja(mock_es):
+    """'jogja' shorthand → provinsi='prov. d.i. yogyakarta'."""
+    from app.services.core.location_resolver_adapter import resolve_location_from_query
+    result = await resolve_location_from_query("sekolah di jogja", mock_es)
+    assert result["status"] == ResultStatus.SUCCESS
+    assert result["data"]["entities"].get("provinsi") == "prov. d.i. yogyakarta"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_province_alias_jatim(mock_es):
+    """'jatim' shorthand → provinsi='prov. jawa timur'."""
+    from app.services.core.location_resolver_adapter import resolve_location_from_query
+    result = await resolve_location_from_query("SD di jatim", mock_es)
+    assert result["status"] == ResultStatus.SUCCESS
+    assert result["data"]["entities"].get("provinsi") == "prov. jawa timur"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@patch("app.services.core.location_resolver_adapter._get_resolver")
+async def test_explicit_kota_prefix_skips_province_alias(mock_get_resolver, mock_es):
+    """'kota yogyakarta' has explicit 'kota' prefix → NOT a province alias, resolver handles it."""
+    mock_get_resolver.return_value = _mock_resolver(
+        _make_resolved(kabupaten="kota yogyakarta", provinsi="prov. d.i. yogyakarta")
+    )
+    from app.services.core.location_resolver_adapter import resolve_location_from_query
+    result = await resolve_location_from_query("sekolah di kota yogyakarta", mock_es)
+    assert result["status"] == ResultStatus.SUCCESS
+    entities = result["data"]["entities"]
+    assert entities.get("kabupaten") == "kota yogyakarta"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@patch("app.services.core.location_resolver_adapter._get_resolver")
+async def test_jakarta_selatan_not_province_alias(mock_get_resolver, mock_es):
+    """'jakarta selatan' is a specific borough, not in PROVINCE_ALIAS_MAP → LocationResolver."""
+    mock_get_resolver.return_value = _mock_resolver(
+        _make_resolved(kabupaten="kota adm. jakarta selatan")
+    )
+    from app.services.core.location_resolver_adapter import resolve_location_from_query
+    result = await resolve_location_from_query("sekolah di jakarta selatan", mock_es)
+    assert result["status"] == ResultStatus.SUCCESS
+    entities = result["data"]["entities"]
+    assert entities.get("kabupaten") == "kota adm. jakarta selatan"
+    assert entities.get("provinsi") is None
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@patch("app.services.core.location_resolver_adapter._get_resolver")
+async def test_kab_aceh_explicit_prefix_skips_alias(mock_get_resolver, mock_es):
+    """'kab. aceh besar' has 'kab.' prefix → explicit kabupaten, NOT a province alias."""
+    mock_get_resolver.return_value = _mock_resolver(
+        _make_resolved(kabupaten="kab. aceh besar")
+    )
+    from app.services.core.location_resolver_adapter import resolve_location_from_query
+    result = await resolve_location_from_query("sekolah di kab. aceh besar", mock_es)
+    assert result["status"] == ResultStatus.SUCCESS
+    assert result["data"]["entities"].get("kabupaten") == "kab. aceh besar"
+
+
 # ── Regression: handler imports ───────────────────────────────────────────────
 
 @pytest.mark.unit

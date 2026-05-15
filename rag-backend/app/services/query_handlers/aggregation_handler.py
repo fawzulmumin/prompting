@@ -15,6 +15,7 @@ from app.services.core.location_resolver_adapter import (
     resolve_location_from_query,
     validate_location_presence,
     validate_hierarchy_consistency,
+    PROVINCE_ALIAS_MAP,
 )
 from app.services.core.aggregation_core import (
     execute_aggregation_query,
@@ -174,7 +175,7 @@ _JAKARTA_KABUPATEN_CANONICAL: dict = {
     "jakarta barat":   "kota adm. jakarta barat",
     "jakarta timur":   "kota adm. jakarta timur",
     "jakarta utara":   "kota adm. jakarta utara",
-    "jakarta":         "kota adm. jakarta pusat",   # fallback jika standalone
+    # "jakarta" bare is handled by PROVINCE_ALIAS_MAP → provinsi DKI, not kab
 }
 
 # Nama kota yang ambigu: ada kab. X dan kota X sekaligus.
@@ -400,11 +401,34 @@ async def _handle_multi_entity(
     return result
 
 
+def _format_ranking_result(
+    query: str,
+    buckets: list,
+    confidence: float = 0.85,
+    entities: Optional[Dict[str, Any]] = None,
+    jenjang: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build standard ELASTICSEARCH_GLOBAL_RANKING result from ES terms-agg buckets."""
+    top = buckets[0] if buckets else {}
+    return {
+        "status": ResultStatus.SUCCESS,
+        "provider": "ELASTICSEARCH_GLOBAL_RANKING",
+        "top_location": top.get("key"),
+        "total": top.get("doc_count"),
+        "ranking": buckets,
+        "entities": entities or {},
+        "jenjang": jenjang,
+        "confidence": confidence,
+        "answer_confident": confidence >= 0.7,
+    }
+
+
 async def _handle_ranking_fallback(
     query: str,
     es_client: AsyncElasticsearch,
     resolution: dict,
     ranking_gap: float,
+    jenjang_filter: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Handle global ranking ketika tidak ada wilayah terdeteksi.
@@ -417,8 +441,9 @@ async def _handle_ranking_fallback(
     if not level:
         return None
 
+    _sz = _extract_ranking_size(query, default=5)
     buckets = await execute_global_ranking_query(
-        es_client, group_field=level, size=5
+        es_client, group_field=level, size=_sz, jenjang_filter=jenjang_filter
     )
 
     if not buckets:
@@ -434,17 +459,9 @@ async def _handle_ranking_fallback(
         ranking_gap=ranking_gap
     )
 
-    answer_confident = confidence >= 0.7
-
-    return {
-        "status": ResultStatus.SUCCESS,
-        "provider": "ELASTICSEARCH_GLOBAL_RANKING",
-        "top_location": top.get("key"),
-        "total": top.get("doc_count"),
-        "ranking": buckets,
-        "confidence": confidence,
-        "answer_confident": answer_confident
-    }
+    return _format_ranking_result(
+        query, buckets, confidence=confidence, jenjang=jenjang_filter
+    )
 
 
 async def _build_resolution(
@@ -490,7 +507,12 @@ async def _build_resolution(
             kab_raw = (getattr(w, "kabupaten", None) or "").lower().strip()
             if kab_raw:
                 has_prefix = any(kab_raw.startswith(p) for p in ("kab.", "kota ", "kabupaten ", "kota adm."))
-                if not has_prefix and kab_raw in _AMBIGUOUS_CITIES:
+                if not has_prefix and kab_raw in PROVINCE_ALIAS_MAP:
+                    # Bare province alias in kabupaten field → upgrade to province scope
+                    wilayah_from_intent["provinsi"] = PROVINCE_ALIAS_MAP[kab_raw]
+                    logger.info("[AGG] Province alias upgrade: '%s' → provinsi='%s'",
+                                kab_raw, PROVINCE_ALIAS_MAP[kab_raw])
+                elif not has_prefix and kab_raw in _AMBIGUOUS_CITIES:
                     logger.info("[AGG] ambiguous city '%s' without prefix → skip auto-trust", kab_raw)
                 elif kab_raw in _JAKARTA_KABUPATEN_CANONICAL:
                     canonical = _JAKARTA_KABUPATEN_CANONICAL[kab_raw]
@@ -804,21 +826,13 @@ async def handle_aggregation_query(
     if is_pure_ranking_query(query):
         level = detect_ranking_level(query)
         if level:
+            _jf = getattr(intent, "jenjang", None) if intent else None
+            _sz = _extract_ranking_size(query, default=5)
             buckets = await execute_global_ranking_query(
-                es_client, group_field=level, size=5
+                es_client, group_field=level, size=_sz, jenjang_filter=_jf
             )
             if buckets:
-                top = buckets[0]
-                confidence = 0.85
-                return {
-                    "status": ResultStatus.SUCCESS,
-                    "provider": "ELASTICSEARCH_GLOBAL_RANKING",
-                    "top_location": top.get("key"),
-                    "total": top.get("doc_count"),
-                    "ranking": buckets,
-                    "confidence": confidence,
-                    "answer_confident": True
-                }
+                return _format_ranking_result(query, buckets, confidence=0.85, jenjang=_jf)
     # ── Fallback: intent=None → assume nasional scope ────────────────────────
     if intent is None:
         from app.services.core.cognitive_router import CognitiveIntent, WilayahEntities
@@ -955,6 +969,17 @@ async def handle_aggregation_query(
         wilayah_keys = ("provinsi", "kabupaten", "kecamatan", "desa_kelurahan")
         has_wilayah_filter = any(entities.get(k) for k in wilayah_keys)
         if not has_wilayah_filter:
+            # Ranking query without location filter → global ranking (e.g. "5 provinsi dengan SD terbanyak")
+            if is_ranking_query(query):
+                level = detect_ranking_level(query)
+                if level:
+                    _jf = getattr(intent, "jenjang", None) if intent else None
+                    _sz = _extract_ranking_size(query, default=5)
+                    buckets = await execute_global_ranking_query(
+                        es_client, group_field=level, size=_sz, jenjang_filter=_jf
+                    )
+                    if buckets:
+                        return _format_ranking_result(query, buckets, confidence=0.85, jenjang=_jf)
             return await _handle_nasional_scope(query, es_client, intent, resolution, ranking_gap)
     # =====================================================
     # MULTI ENTITY HANDLING (WITH CACHE)
@@ -994,10 +1019,33 @@ async def handle_aggregation_query(
     # GLOBAL RANKING FALLBACK
     # ==================================
     if not validate_location_presence(entities):
-        fallback = await _handle_ranking_fallback(query, es_client, resolution, ranking_gap)
+        _jf_fb = getattr(intent, "jenjang", None) if intent else None
+        fallback = await _handle_ranking_fallback(
+            query, es_client, resolution, ranking_gap, jenjang_filter=_jf_fb
+        )
         if fallback is not None:
             return fallback
         return _validation("LOCATION_NOT_FOUND", query, resolution, ranking_gap)
+
+    # ==================================
+    # FILTERED RANKING
+    # "10 kabupaten dengan SMA terbanyak di jawa timur" → rank kabupaten within jawa timur
+    # entities has parent-scope (e.g. provinsi) but level is the ranking axis (kabupaten).
+    # ==================================
+    if is_ranking_query(query):
+        level = detect_ranking_level(query)
+        if level and isinstance(entities, dict) and level not in entities:
+            _jf  = getattr(intent, "jenjang", None) if intent else None
+            _pf  = entities.get("provinsi")
+            _sz  = _extract_ranking_size(query, default=5)
+            buckets = await execute_global_ranking_query(
+                es_client, group_field=level, size=_sz,
+                jenjang_filter=_jf, provinsi_filter=_pf,
+            )
+            if buckets:
+                return _format_ranking_result(
+                    query, buckets, confidence=0.85, entities=entities, jenjang=_jf
+                )
 
     return await _handle_single_wilayah(query, es_client, entities, intent, resolution, ranking_gap)
 

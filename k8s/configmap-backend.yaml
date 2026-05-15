@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rag-backend-config
+  namespace: default  # sesuaikan dengan namespace deployment
+data:
+  PORT: "3000"
+  PROD: "production"
+
+  # ── Elasticsearch indices ──────────────────────────────────────────────────
+  ELASTICSEARCH_INDEX: "idx_sekolah_qc"
+  ELASTICSEARCH_PROFILE_INDEX: "idx_sekolah_profile"
+  ELASTICSEARCH_ANALYTICS_INDEX: "logs-analytics"
+  # ELASTICSEARCH_LIST_INDEX default ke ELASTICSEARCH_PROFILE_INDEX jika tidak diset
+  ELASTICSEARCH_LIST_INDEX: "idx_sekolah_profile"
+  ELASTICSEARCH_AGENT_INDEX: "idx_prompting_agent"
+
+  # ── Rate limiting (Layer 2 — per user_id via Redis) ────────────────────────
+  # Layer 1 ada di rag-middleware (30 req/mnt per IP, tidak dikonfigurasi di sini)
+  RATE_LIMIT_REQUESTS: "5"
+  RATE_LIMIT_WINDOW: "60"
+  RATE_LIMIT_FAIL_OPEN: "true"
+
+  # ── Search ─────────────────────────────────────────────────────────────────
+  MIN_FUZZY_SCORE: "3.0"
+
+  # ── Features ───────────────────────────────────────────────────────────────
+  NARRATOR_ENABLED: "true"
+  LOG_PROFILE_DEBUG: "false"
+  EMBEDDING_ENABLED: "true"
+
+  # ── Logging ────────────────────────────────────────────────────────────────
+  LOG_FORMAT: "json"
+  LOG_LEVEL: "INFO"
+
+  # ── DeepSeek rate-limit & circuit-breaker (non-secret) ────────────────────
+  DEEPSEEK_RL_MAX_REQ: "50"
+  DEEPSEEK_CB_THRESHOLD: "5"
+
+  # ── HuggingFace (non-secret) ───────────────────────────────────────────────
+  HF_HUB_DISABLE_PROGRESS_BARS: "1"
+  HF_HUB_DISABLE_SYMLINKS_WARNING: "1"
+
+  # ── CORS — WAJIB diisi sebelum apply ──────────────────────────────────────
+  # Contoh: "https://app.example.com" atau "https://a.com,https://b.com"
+  ALLOWED_ORIGINS: "GANTI_DENGAN_URL_FRONTEND_PRODUCTION"
+
+  # ── Model cache (sesuaikan dengan mountPath volume di Deployment) ──────────
+  TRANSFORMERS_CACHE: "/app/.cache"

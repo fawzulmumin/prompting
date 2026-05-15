@@ -1,6 +1,7 @@
 # list_school_handler.py
 
 import re
+import asyncio
 import logging
 from typing import Dict, List, Optional, Tuple, Set
 from elasticsearch import AsyncElasticsearch
@@ -21,6 +22,7 @@ from app.services.core.list_location_detector import (
     _has_province_siblings,
 )
 from app.services.core.cognitive_router import CognitiveIntent, WilayahEntities
+from app.services.core.location_resolver_adapter import PROVINCE_ALIAS_MAP
 
 logger = logging.getLogger(__name__)
 
@@ -492,8 +494,7 @@ class ListSchoolHandler:
         # Untuk setiap sub-query, inject scope=kabupaten agar resolver langsung
         # ke level kab/kota dan tidak jatuh ke multi-level clarification
         # (mis. "bandung" → 24 kandidat kecamatan/desa dari berbagai provinsi).
-        ok_results = []
-        for part in dan_parts:
+        def _make_task(part: str):
             loc_kw = _extract_location_keyword(part)
             if loc_kw:
                 hint_wil    = WilayahEntities(kabupaten=loc_kw)
@@ -506,9 +507,18 @@ class ListSchoolHandler:
                     status=getattr(intent, "status", None) if intent else None,
                     akreditasi=getattr(intent, "akreditasi", None) if intent else None,
                 )
-                r = await self.handle(part, intent=hint_intent, filters=filters, _depth=1)
-            else:
-                r = await self.handle(part, intent=None, filters=filters, _depth=1)
+                return self.handle(part, intent=hint_intent, filters=filters, _depth=1)
+            return self.handle(part, intent=None, filters=filters, _depth=1)
+
+        raw_results = await asyncio.gather(
+            *[_make_task(p) for p in dan_parts],
+            return_exceptions=True,
+        )
+        ok_results = []
+        for part, r in zip(dan_parts, raw_results):
+            if isinstance(r, Exception):
+                logger.warning("[LIST] Dan-split sub-query gagal untuk '%s': %s", part, r)
+                continue
             if r.get("status") == "success":
                 ok_results.append(r)
 
@@ -629,6 +639,16 @@ class ListSchoolHandler:
         elif _intent_scope == "kabupaten" and getattr(_intent_wil, "kabupaten", None):
             wil_val   = _intent_wil.kabupaten.lower().strip()
             wil_level = "kabupaten"
+            # Province alias check: bare name like "jakarta"/"yogyakarta" → upgrade to province
+            _has_kab_prefix = any(wil_val.startswith(p)
+                                  for p in ("kab.", "kota ", "kota adm.", "kabupaten "))
+            if not _has_kab_prefix:
+                _prov_alias = PROVINCE_ALIAS_MAP.get(wil_val)
+                if _prov_alias:
+                    wil_val   = _prov_alias
+                    wil_level = "provinsi"
+                    logger.info("[LIST] Province alias upgrade: '%s' → provinsi='%s'",
+                                _intent_wil.kabupaten, wil_val)
         elif _intent_scope == "kecamatan" and getattr(_intent_wil, "kecamatan", None):
             wil_val   = _intent_wil.kecamatan.lower().strip()
             wil_level = "kecamatan"

@@ -77,7 +77,7 @@ def _validate_numbers_in_narasi(narasi: str, expected_numbers) -> Optional[str]:
     Return None jika ada angka kritis yang hilang.
 
     Menerima variasi format angka Indonesia:
-    - 4414, 4.414, 4,414 (pemisah ribuan)
+    - 4414, 4.414, 4,414, 4 414 (semua separator ribuan)
     - Angka dibulatkan (4.400 untuk 4.414) — toleransi ±2%
     """
     import re as _re
@@ -86,8 +86,14 @@ def _validate_numbers_in_narasi(narasi: str, expected_numbers) -> Optional[str]:
         return _re.sub(r"[.,\s]", "", text)
 
     def _normalize_for_validation(text: str) -> str:
-        """Hapus titik pemisah ribuan Indonesia (digit.3digit) sebelum normalisasi penuh."""
-        return _re.sub(r'(\d)\.(\d{3})(?!\d)', r'\1\2', text)
+        """Hapus separator ribuan umum (titik, koma, spasi) sebelum normalisasi penuh."""
+        # titik sebagai separator ribuan: 1.234 → 1234
+        t = _re.sub(r'(\d)\.(\d{3})(?!\d)', r'\1\2', text)
+        # koma sebagai separator ribuan: 1,234 → 1234
+        t = _re.sub(r'(\d),(\d{3})(?!\d)', r'\1\2', t)
+        # spasi sebagai separator ribuan: 1 234 → 1234
+        t = _re.sub(r'(\d) (\d{3})(?!\d)', r'\1\2', t)
+        return t
 
     narasi_normalized = _normalize(_normalize_for_validation(narasi))
 
@@ -585,22 +591,32 @@ async def narrate_school_list(
     if not narasi:
         return template_md
 
-    # Validasi angka — dan-split: cukup salah satu angka per-wilayah muncul
+    # Validasi angka — dan-split: cek per-entry, fallback hanya jika >50% missing
     _dan_split_breakdown = active_filters.get("dan_split_breakdown") if active_filters else None
     if _dan_split_breakdown:
-        _any_found = any(
-            _validate_numbers_in_narasi(narasi, {f"subtotal_{i}": v})
-            for i, v in enumerate(_dan_split_breakdown.values())
-            if v and v >= 10
-        )
-        if not _any_found:
+        _missing = []
+        for _label, _v in _dan_split_breakdown.items():
+            if _v and _v >= 10:
+                if not _validate_numbers_in_narasi(narasi, {_label: _v}):
+                    _missing.append((_label, _v))
+
+        if _missing:
+            _total_validated = sum(1 for _v in _dan_split_breakdown.values() if _v and _v >= 10)
+            _missing_ratio = len(_missing) / _total_validated if _total_validated > 0 else 0
             logger.warning(
-                "[Narrator] Validasi angka gagal (school_list dan-split) — expected=%s, pakai template",
-                _dan_split_breakdown,
+                "[Narrator] Validasi angka dan-split: %d/%d entry missing di narasi — %s",
+                len(_missing), _total_validated, _missing,
             )
-            return _enrich_template_on_validation_fail(
-                template_md, _dan_split_breakdown, context="school_list dan-split"
-            )
+            if _missing_ratio > 0.5:
+                return _enrich_template_on_validation_fail(
+                    template_md, _dan_split_breakdown, context="school_list dan-split"
+                )
+            else:
+                _missing_note = ", ".join(
+                    f"{_lbl}: {int(_mv):,}".replace(",", ".")
+                    for _lbl, _mv in _missing
+                )
+                return narasi + f"\n\n> _Koreksi data: {_missing_note}._"
     else:
         if not _validate_numbers_in_narasi(narasi, {"total": total}):
             logger.warning(

@@ -29,6 +29,52 @@ from app.services.core.result_model import ResultStatus, build_result
 
 logger = logging.getLogger(__name__)
 
+# ── Province alias map ────────────────────────────────────────────────────────
+# Maps bare alias/shorthand → canonical ES-ready province value (lowercase with
+# "prov." prefix so build_filters/_build_provinsi_filter works out-of-the-box).
+# Priority: if input matches here (and has no explicit kab/kec prefix), return
+# scope=provinsi immediately — before LocationResolver sees it as a kabupaten.
+PROVINCE_ALIAS_MAP: Dict[str, str] = {
+    "jakarta":         "prov. dki jakarta",
+    "yogyakarta":      "prov. d.i. yogyakarta",
+    "jogja":           "prov. d.i. yogyakarta",
+    "jogjakarta":      "prov. d.i. yogyakarta",
+    "aceh":            "prov. aceh",
+    "papua":           "prov. papua",
+    "kalbar":          "prov. kalimantan barat",
+    "kaltim":          "prov. kalimantan timur",
+    "kalteng":         "prov. kalimantan tengah",
+    "kalsel":          "prov. kalimantan selatan",
+    "sulsel":          "prov. sulawesi selatan",
+    "sulut":           "prov. sulawesi utara",
+    "sulteng":         "prov. sulawesi tengah",
+    "sultra":          "prov. sulawesi tenggara",
+    "sumut":           "prov. sumatera utara",
+    "sumsel":          "prov. sumatera selatan",
+    "sumbar":          "prov. sumatera barat",
+    "jabar":           "prov. jawa barat",
+    "jateng":          "prov. jawa tengah",
+    "jatim":           "prov. jawa timur",
+    "ntb":             "prov. nusa tenggara barat",
+    "ntt":             "prov. nusa tenggara timur",
+    "malut":           "prov. maluku utara",
+    "papua barat":     "prov. papua barat",
+    "kepri":           "prov. kepulauan riau",
+    "babel":           "prov. kepulauan bangka belitung",
+    "diy":             "prov. d.i. yogyakarta",
+    "dki":             "prov. dki jakarta",
+}
+
+# Prefixes that signal the user explicitly chose kabupaten/kecamatan level —
+# skip province-alias check when any of these are present.
+_KAB_KEC_PREFIXES = ("kota ", "kab.", "kabupaten ", "kec.", "kecamatan ")
+
+
+def _is_explicit_kab_kec(text: str) -> bool:
+    low = text.lower().strip()
+    return any(low.startswith(p) for p in _KAB_KEC_PREFIXES)
+
+
 # ── Singleton resolver ────────────────────────────────────────────────────────
 _resolver = LocationResolver()
 
@@ -39,7 +85,7 @@ def _get_resolver() -> LocationResolver:
 
 # ── Noise-word strip ──────────────────────────────────────────────────────────
 _NOISE_PATTERN = re.compile(
-    r"\b(jumlah|berapa|total|daftar|tampilkan|sekolah|sd|smp|sma|smk|mi|mts|ma|"
+    r"\b(ada|ada berapa|jumlah|berapa|total|daftar|tampilkan|sekolah|sd|smp|sma|smk|mi|mts|ma|"
     r"tk|paud|slb|pkbm|di|dari|dalam|wilayah|negeri|swasta|"
     r"bandingkan|perbandingan|vs|versus|dan|dengan|akreditasi|a|b|c)\b",
     re.IGNORECASE,
@@ -49,7 +95,8 @@ _VS_PATTERN = re.compile(r"\s+(?:vs\.?|versus)\s+", re.IGNORECASE)
 
 
 def _extract_location_tokens(query: str) -> str:
-    cleaned = _NOISE_PATTERN.sub(" ", query)
+    cleaned = re.sub(r"[?!.,;:]", "", query)   # strip trailing/inline punctuation first
+    cleaned = _NOISE_PATTERN.sub(" ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
 
@@ -77,7 +124,12 @@ def _resolved_to_entities(r: ResolvedWilayah) -> Dict[str, Any]:
     if r.provinsi:
         ent["provinsi"] = r.provinsi
     if r.kabupaten:
-        ent["kabupaten"] = r.kabupaten
+        kab = r.kabupaten
+        # Location cache stores "kota jakarta X" (from minority ES docs without "adm."),
+        # but the main ES corpus uses "kota adm. jakarta X". Normalize here.
+        if kab.lower().startswith("kota jakarta "):
+            kab = "kota adm. jakarta " + kab[len("kota jakarta "):]
+        ent["kabupaten"] = kab
     if r.kecamatan:
         ent["kecamatan"] = r.kecamatan
     if r.desa:
@@ -129,6 +181,25 @@ async def resolve_location_from_query(
             metadata={"reason": "no_location_tokens"},
             confidence=0.0,
         )
+
+    # ── Province alias fast-path (before LocationResolver) ───────────────────
+    # If the bare location token is a known province alias and has no explicit
+    # kab/kec prefix, resolve directly to province scope (confidence=1.0).
+    _loc_lower = loc_text.lower().strip()
+    if not _is_explicit_kab_kec(_loc_lower):
+        _prov_canonical = PROVINCE_ALIAS_MAP.get(_loc_lower)
+        if _prov_canonical:
+            logger.debug("[LR_ADAPTER] province alias: '%s' → '%s'", _loc_lower, _prov_canonical)
+            _ent: Dict[str, Any] = {"provinsi": _prov_canonical}
+            if status_sekolah:
+                _ent["status_sekolah"] = status_sekolah
+            return build_result(
+                status=ResultStatus.SUCCESS,
+                provider="LOCATION_RESOLVER_ADAPTER",
+                data={"entities": _ent},
+                metadata={"method": "province_alias", "status_sekolah": status_sekolah},
+                confidence=1.0,
+            )
 
     wilayah = _make_wilayah(loc_text)
     resolved = _get_resolver().resolve(wilayah)
@@ -238,6 +309,13 @@ def _resolve_parts(parts: list) -> list:
         loc_text = _extract_location_tokens(part.strip())
         if not loc_text:
             continue
+        # Province alias fast-path for each VS part
+        loc_lower = loc_text.lower().strip()
+        if not _is_explicit_kab_kec(loc_lower):
+            prov_canonical = PROVINCE_ALIAS_MAP.get(loc_lower)
+            if prov_canonical:
+                result.append({"provinsi": prov_canonical})
+                continue
         wilayah = _make_wilayah(loc_text)
         resolved = _get_resolver().resolve(wilayah)
         if resolved.confidence > 0.0 and not resolved.ambiguous:

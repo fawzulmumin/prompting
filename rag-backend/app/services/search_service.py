@@ -44,7 +44,7 @@ async def perform_search(
             logger.warning("[SEARCH] Empty embedding vector")
             return []
 
-        index = os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent")
+        index = os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc")
 
         # ── Coba RRF dulu (ES 8.8+) ──────────────────────────────────────────
         try:
@@ -104,7 +104,7 @@ async def perform_search(
  
 async def fuzzy_search_all_locations(es_client: AsyncElasticsearch, query: str):
  
-    index = os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent")
+    index = os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc")
  
     body = {
         "size": 5,
@@ -547,7 +547,7 @@ async def perform_geo_search(
     """
     import asyncio as _asyncio
 
-    index = os.getenv("ELASTICSEARCH_INDEX", "idx_prompting_agent")
+    index = os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc")
 
     filters = [
         {

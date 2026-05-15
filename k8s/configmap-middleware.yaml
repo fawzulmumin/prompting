@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rag-middleware-config
+  namespace: default  # sesuaikan dengan namespace deployment
+data:
+  EXPRESS_PORT: "4000"
+
+  # ── Backend URL — gunakan nama Service k8s, bukan localhost ───────────────
+  # Ganti "rag-backend-service" dengan nama Service yang didefinisikan di deployment backend.
+  PYTHON_API_URL: "http://rag-backend-service:3000"
+
+  # ── CORS — WAJIB diisi sebelum apply ──────────────────────────────────────
+  # Harus sama dengan nilai ALLOWED_ORIGINS di configmap-backend.yaml.
+  # Contoh: "https://app.example.com"
+  FRONTEND_URL: "GANTI_DENGAN_URL_FRONTEND_PRODUCTION"

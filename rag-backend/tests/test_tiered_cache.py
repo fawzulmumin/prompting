@@ -286,3 +286,139 @@ def test_lru_access_updates_order():
         order = run(_run())
         assert "b" not in order, "b harus dievict (LRU)"
         assert "a" in order, "a tidak boleh dievict (recently accessed)"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 13. Counters — fresh cache semua nol
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.unit
+def test_counter_fresh_cache_all_zero():
+    """Fresh cache — semua counter 0, hit rate 0.0."""
+    cache = make_cache()
+    s = cache.stats()
+    assert s["total_requests"] == 0
+    assert s["l1_hits"] == 0
+    assert s["l2_hits"] == 0
+    assert s["l1_misses"] == 0
+    assert s["l2_misses"] == 0
+    assert s["l1_hit_rate"] == 0.0
+    assert s["overall_hit_rate"] == 0.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 14. Counters — L1 hit
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.unit
+def test_counter_l1_hit():
+    """L1 hit → l1_hits+1, total_requests+1, hit_rate=1.0."""
+    cache = make_cache()
+    with patch("app.utils.tiered_cache.get_cache", new_callable=AsyncMock), \
+         patch("app.utils.tiered_cache.set_cache", new_callable=AsyncMock):
+
+        async def _run():
+            await cache.set("k1", "v1", ttl_l1=300, ttl_l2=600)
+            await cache.get("k1")  # L1 hit
+            return cache.stats()
+
+        s = run(_run())
+
+    assert s["l1_hits"] == 1
+    assert s["total_requests"] == 1
+    assert s["l1_misses"] == 0
+    assert s["l1_hit_rate"] == 1.0
+    assert s["overall_hit_rate"] == 1.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 15. Counters — full miss (L1 miss + L2 miss)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.unit
+def test_counter_full_miss():
+    """Full miss → l1_misses+1, l2_misses+1, total_requests+1."""
+    cache = make_cache()
+    with patch("app.utils.tiered_cache.get_cache", new_callable=AsyncMock) as mock_get, \
+         patch("app.utils.tiered_cache.set_cache", new_callable=AsyncMock):
+        mock_get.return_value = None
+
+        run(cache.get("nonexistent"))
+        s = cache.stats()
+
+    assert s["total_requests"] == 1
+    assert s["l1_misses"] == 1
+    assert s["l2_misses"] == 1
+    assert s["l1_hits"] == 0
+    assert s["l2_hits"] == 0
+    assert s["overall_hit_rate"] == 0.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 16. Counters — L2 hit (L1 miss + L2 hit)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.unit
+def test_counter_l2_hit():
+    """L2 hit → l1_misses+1, l2_hits+1; l2_misses tetap 0."""
+    cache = make_cache()
+    with patch("app.utils.tiered_cache.get_cache", new_callable=AsyncMock) as mock_get, \
+         patch("app.utils.tiered_cache.set_cache", new_callable=AsyncMock):
+        mock_get.return_value = "from_redis"
+
+        run(cache.get("k_redis"))
+        s = cache.stats()
+
+    assert s["total_requests"] == 1
+    assert s["l1_misses"] == 1
+    assert s["l2_hits"] == 1
+    assert s["l2_misses"] == 0
+    assert s["l1_hits"] == 0
+    assert s["l2_hit_rate"] == 1.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 17. Counters — hit rate kalkulasi setelah mix hits dan misses
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.unit
+def test_counter_hit_rate_mixed():
+    """1 L1 hit + 1 full miss → overall_hit_rate = 0.5."""
+    cache = make_cache()
+    with patch("app.utils.tiered_cache.get_cache", new_callable=AsyncMock) as mock_get, \
+         patch("app.utils.tiered_cache.set_cache", new_callable=AsyncMock):
+        mock_get.return_value = None
+
+        async def _run():
+            await cache.set("k1", "v1", ttl_l1=300, ttl_l2=600)
+            await cache.get("k1")       # L1 hit
+            await cache.get("missing")  # full miss
+            return cache.stats()
+
+        s = run(_run())
+
+    assert s["total_requests"] == 2
+    assert s["l1_hits"] == 1
+    assert s["l2_misses"] == 1
+    assert s["overall_hit_rate"] == 0.5
+    assert s["l1_hit_rate"] == 0.5
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 18. stats() — semua field baru tersedia
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.unit
+def test_stats_has_all_fields():
+    """stats() harus include semua field baru."""
+    cache = make_cache()
+    s = cache.stats()
+    required = [
+        "l1_size", "l1_maxsize", "l2_backend",
+        "total_requests", "l1_hits", "l2_hits",
+        "l1_misses", "l2_misses",
+        "l1_hit_rate", "l2_hit_rate", "overall_hit_rate",
+    ]
+    for field in required:
+        assert field in s, f"Missing field: {field}"
+    assert s["l2_backend"] == "redis"

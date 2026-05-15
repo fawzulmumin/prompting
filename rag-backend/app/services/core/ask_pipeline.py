@@ -32,6 +32,7 @@ from app.services.core.result_model import ResultStatus, build_ambiguous_message
 from app.services.query_handlers.aggregation_handler import (
     handle_aggregation_query,
     detect_ranking_level,
+    is_ranking_query,
 )
 from app.services.query_handlers.school_vs_handler import (
     is_school_vs_school_query,
@@ -410,6 +411,12 @@ async def _run_classification(query: str, on_step: _OnStep) -> tuple:
                 intent.is_oot = False
                 intent.oot_reason = None
 
+    # Ranking override: LLM sometimes classifies ranking queries as "list".
+    # Detect early via keyword signal and redirect to aggregation handler.
+    if intent.primary == "list" and is_ranking_query(query) and detect_ranking_level(query):
+        logger.info("[RouterV2] ranking override: list → aggregation for '%s'", query[:60])
+        intent.primary = "aggregation"
+
     return intent, False
 
 
@@ -602,19 +609,30 @@ async def _handle_aggregation_route(
         return _base(query, start_time, user_id, answer_md, agg_prov, confidence_score=conf)
 
     if agg_prov == "ELASTICSEARCH_GLOBAL_RANKING":
-        loc   = result.get("top_location")
-        total = result.get("total")
-        lv    = detect_ranking_level(query)
+        ranking = result.get("ranking", [])
+        lv      = detect_ranking_level(query)
         label_map = {
             "provinsi": "Provinsi", "kabupaten": "Kabupaten/Kota",
             "kecamatan": "Kecamatan", "desa_kelurahan": "Desa/Kelurahan",
         }
-        label = label_map.get(lv, "Wilayah")
-        conf  = result.get("confidence", 0.0)
-        return _base(query, start_time, user_id,
-                     f"{label} dengan jumlah sekolah terbanyak adalah **{loc}** dengan **{total:,} sekolah**.",
+        label         = label_map.get(lv, "Wilayah")
+        jenjang_label = result.get("jenjang") or "sekolah"
+        conf          = result.get("confidence", 0.85)
+        top_loc       = result.get("top_location", "")
+        total         = result.get("total", 0)
+
+        lines = [
+            f"{i}. **{b.get('key', '?').title()}** — {b.get('doc_count', 0):,} {jenjang_label}"
+            for i, b in enumerate(ranking, 1)
+        ]
+        answer_md = (
+            f"### Top {len(ranking)} {label} dengan {jenjang_label.upper()} Terbanyak\n\n"
+            + "\n".join(lines)
+        )
+        return _base(query, start_time, user_id, answer_md,
                      "ELASTICSEARCH_GLOBAL_RANKING",
-                     context_used=[f"provinsi:{loc}"], context_sufficiency_score=1.0,
+                     context_used=[f"ranking:{lv}:{top_loc}"],
+                     context_sufficiency_score=1.0,
                      answer_confident=conf >= 0.6, confidence_score=conf, num_docs=total)
 
     if agg_prov == "ELASTICSEARCH_QC_PERCENTAGE":

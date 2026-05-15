@@ -512,12 +512,20 @@ def calculate_confidence(total: int, entities: Dict[str, Any]) -> float:
 async def execute_global_ranking_query(
     es_client: AsyncElasticsearch,
     group_field: str,
-    size: int = 1
+    size: int = 5,
+    jenjang_filter: Optional[str] = None,
+    provinsi_filter: Optional[str] = None,
 ) -> Optional[List[Dict[str, Any]]]:
- 
+
     index = os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc")
- 
-    body = {
+
+    filters = []
+    if jenjang_filter:
+        filters.append({"term": {"bentuk_pendidikan": jenjang_filter.upper()}})
+    if provinsi_filter:
+        filters.append({"term": {"provinsi": provinsi_filter.lower()}})
+
+    body: Dict[str, Any] = {
         "size": 0,
         "aggs": {
             "group_by_field": {
@@ -529,22 +537,24 @@ async def execute_global_ranking_query(
             }
         }
     }
- 
+    if filters:
+        body["query"] = {"bool": {"filter": filters}}
+
     try:
         response = await es_client.search(
             index=index,
             body=body,
             request_timeout=10
         )
- 
+
         buckets = (
             response.get("aggregations", {})
             .get("group_by_field", {})
             .get("buckets", [])
         )
- 
+
         return buckets
- 
+
     except (ApiError, TransportError):
         logger.exception("Global ranking aggregation failed")
         return None

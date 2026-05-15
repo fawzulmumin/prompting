@@ -102,7 +102,7 @@ from app.services.search.search_service import (
 # ── INFRA ─────────────────────────────────────────────────────────────────────
 from app.services.location_service import initialize_location_index
 from app.services.rate_limit_service import check_rate_limit
-from app.services.embedding_service import get_embedding_model
+from app.services.embedding_service import get_embedding_model, get_embedding_cache_stats, EMBEDDING_ENABLED
 from app.services.confidence_engine import compute_rag_confidence, compute_aggregation_confidence
 from app.router import route_with_fallback
 from app.providers.deepseek import close_deepseek_client
@@ -403,11 +403,12 @@ async def ooc_alerts(_=Depends(_require_report_key)):
 
 @app.get("/health")
 async def health_check():
+    embed_cache = get_embedding_cache_stats() if EMBEDDING_ENABLED else {"status": "disabled"}
     try:
         await es_client.ping(request_timeout=2)
-        return {"status": "UP"}
+        return {"status": "UP", "embedding_cache": embed_cache}
     except ESConnectionError:
-        return JSONResponse(status_code=503, content={"status": "DOWN"})
+        return JSONResponse(status_code=503, content={"status": "DOWN", "embedding_cache": embed_cache})
 
 
 # ========== MAIN ==========
