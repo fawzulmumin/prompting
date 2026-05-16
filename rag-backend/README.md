@@ -1,180 +1,198 @@
-> ✅ Last fix session: QC pipeline — 155 passed, 0 failed (2026-04-26)
-
 # rag-backend
- 
-FastAPI service sebagai RAG (Retrieval-Augmented Generation) engine yang melayani query berbasis data Elasticsearch.
- 
-## Alur Data
- 
-```
-rag-middleware (Express :4000) → rag-backend (FastAPI :3000) → Elasticsearch
-                                                              → Redis (cache)
-                                                              → DeepSeek API (narasi LLM)
-```
- 
-## Tanggung Jawab
- 
-- Menerima query dari middleware dan mengklasifikasikan intent
-- Melakukan pencarian ke Elasticsearch (full-text, semantic, geo)
-- Memanggil LLM (DeepSeek) untuk narasi dan routing
-- Mengembalikan respons terstruktur ke middleware
-## Struktur Folder
- 
-```
-rag-backend/
-├── app/
-│   ├── main.py                          # Entry point FastAPI + semua route
-│   ├── config.py                        # Load environment variables
-│   ├── router.py                        # LangGraph-based LLM router
-│   ├── providers/
-│   │   └── deepseek.py                  # DeepSeek API client
-│   ├── services/
-│   │   ├── core/                        # Intent classifier, cognitive router, query parser
-│   │   │   ├── cognitive_router.py
-│   │   │   ├── intent_classifier.py
-│   │   │   ├── es_query_builder.py
-│   │   │   ├── multi_intent_orchestrator.py
-│   │   │   ├── smart_query_parser.py
-│   │   │   └── ...
-│   │   ├── query_handlers/              # Handler per jenis query
-│   │   │   ├── list_school_handler.py
-│   │   │   ├── aggregation_handler.py
-│   │   │   ├── profile_handler.py
-│   │   │   ├── comparison_handler.py
-│   │   │   └── school_vs_handler.py
-│   │   ├── search/                      # Search services
-│   │   │   ├── search_service.py        # Elasticsearch search
-│   │   │   └── profile_search_service.py
-│   │   ├── formatters/                  # Response formatters
-│   │   │   ├── response_formatter.py
-│   │   │   └── profile_formatter.py
-│   │   ├── narrator_service.py          # Narasi berbasis LLM
-│   │   ├── embedding_service.py         # Sentence Transformer embeddings
-│   │   ├── entity_service.py            # Entity resolution & referensi lokasi
-│   │   ├── location_service.py          # Geo & location index
-│   │   ├── confidence_engine.py         # Confidence scoring
-│   │   └── rate_limit_service.py        # Rate limiting
-│   ├── background/                      # Background jobs (analytics, rewrite worker, dsb.)
-│   └── utils/
-│       ├── cache.py                     # Redis cache
-│       ├── cost_tracker.py              # Token & cost logging
-│       ├── rag_evaluation_logger.py
-│       ├── markdown_to_html.py
-│       ├── location_utils.py
-│       └── domain_filter.py
-├── scripts/
-│   ├── ingest_qc.py                     # Ingest data ke Elasticsearch
-│   ├── init_es.py                       # Inisialisasi index Elasticsearch
-│   └── utils/
-│       ├── monitor.py                   # Monitor status ingestion
-│       ├── test_search.py               # Test koneksi & pencarian ES
-│       └── detect_bom_fields.py         # Deteksi BOM fields pada CSV
-├── tests/                               # Unit & integration tests (pytest)
-├── data/
-│   └── mapping.json                     # Elasticsearch index mapping
-├── models/
-│   └── all-MiniLM-L6-v2/               # Config model (file .safetensors tidak di-commit)
-├── Dockerfile
-├── docker-compose.yml
-├── requirements.txt
-├── .env.example
-└── README.md
-```
- 
-## Setup Lokal
- 
+
+FastAPI backend untuk sistem RAG Kemendikdasmen. Bertanggung jawab atas klasifikasi intent, query ke Elasticsearch, dan narasi jawaban via LLM.
+
+## Persyaratan
+
+- Python 3.11+
+- Elasticsearch 8.x (running)
+- Redis 7.x (running)
+- DeepSeek API key
+
+## Setup
+
 ```bash
-# 1. Buat virtual environment
+cd rag-backend
+
+# Buat virtual environment
 python -m venv .venv
- 
-# 2. Aktifkan virtual environment
-# Linux/Mac:
+
+# Aktifkan (Linux/Mac)
 source .venv/bin/activate
-# Windows (PowerShell):
-.venv\Scripts\Activate.ps1
- 
-# 3. Install dependencies
+
+# Aktifkan (Windows)
+.venv\Scripts\activate
+
+# Install dependencies
 pip install -r requirements.txt
- 
-# 4. Salin template env
-# Linux/Mac:
-cp .env.example .env
-# Windows:
-copy .env.example .env
- 
-# Edit .env sesuai konfigurasi lokal
- 
-# 5. Jalankan server (development)
+```
+
+## Konfigurasi
+
+Salin file contoh dan isi nilainya:
+
+```bash
+cp app/.env.example app/.env
+```
+
+| Variable | Keterangan |
+|----------|------------|
+| `ELASTICSEARCH_NODE` | URL Elasticsearch, contoh: `http://localhost:9200` |
+| `ELASTICSEARCH_USERNAME` | Username ES |
+| `ELASTICSEARCH_PASSWORD` | Password ES |
+| `ELASTICSEARCH_INDEX` | Index utama, default: `idx_sekolah_qc` |
+| `ELASTICSEARCH_PROFILE_INDEX` | Index profil, default: `idx_sekolah_profile` |
+| `DEEPSEEK_API_KEY` | API key DeepSeek |
+| `REDIS_URL` | URL Redis, contoh: `redis://localhost:6379` |
+| `LOG_LEVEL` | Level logging: `DEBUG`/`INFO`/`WARNING`, default: `INFO` |
+| `PORT` | Port server, default: `3000` |
+
+## Menjalankan Server
+
+```bash
+# Development (auto-reload)
 uvicorn app.main:app --reload --port 3000
+
+# Production
+uvicorn app.main:app --port 3000
 ```
- 
-## Environment Variables
- 
-Lihat `.env.example` untuk daftar lengkap variabel yang dibutuhkan.
- 
-Variabel utama:
- 
-| Variabel | Deskripsi |
-|---|---|
-| `PORT` | Port server (default: 3000) |
-| `ELASTICSEARCH_NODE` | URL Elasticsearch cluster |
-| `ELASTICSEARCH_USERNAME` | Username Elasticsearch |
-| `ELASTICSEARCH_PASSWORD` | Password Elasticsearch |
-| `ELASTICSEARCH_INDEX` | Nama index utama |
-| `ELASTICSEARCH_ANALYTICS_INDEX` | Index untuk analytics log |
-| `REDIS_URL` | URL Redis untuk caching |
-| `DEEPSEEK_API_KEY` | API key DeepSeek LLM |
-| `HF_TOKEN` | HuggingFace token (opsional, untuk download model) |
-| `TRANSFORMERS_CACHE` | Path cache model transformer |
-| `NARRATOR_ENABLED` | Aktifkan narasi LLM (`true`/`false`) |
-| `EMBEDDING_ENABLED` | Aktifkan semantic search (`true`/`false`) |
-| `ALLOWED_ORIGINS` | CORS origins yang diizinkan (comma-separated) |
-| `PROD` | Set ke `production` untuk load `.env.production` |
- 
-## Model Embedding
- 
-Service menggunakan model **`all-MiniLM-L6-v2`** (Sentence Transformers).
-File besar (`model.safetensors`) tidak di-commit. Model diunduh otomatis saat pertama kali server dijalankan.
- 
-Download manual jika diperlukan:
+
+## Menjalankan arq Worker
+
+arq worker diperlukan untuk background jobs (cache, analytics, logging). Jalankan sebagai proses terpisah:
+
 ```bash
-python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
+arq app.background.arq_worker.WorkerSettings
 ```
- 
-## Docker
- 
+
+Di production, worker dijalankan sebagai sidecar container (lihat `k8s/deployment-backend.yaml`).
+
+## Testing
+
 ```bash
-# Build image
-docker build -t rag-backend .
- 
-# Jalankan via docker-compose (production)
-docker-compose up -d
+# Regression guard — jalankan sebelum dan sesudah setiap perubahan
+pytest tests/test_regression.py -v -m unit
+
+# Full test suite (tidak butuh ES/Redis)
+pytest tests/ -v -m unit --ignore=tests/test_es_health.py --ignore=tests/test_redis.py
+
+# Hitung total test
+pytest tests/ --ignore=tests/test_es_health.py --ignore=tests/test_redis.py -q
+
+# Test spesifik
+pytest tests/test_tier1_pattern.py tests/test_tier2_rule.py -v
+pytest tests/test_list_school_handler.py -v -m unit
+pytest tests/test_health_endpoint.py -v
 ```
- 
-## Scripts Utilitas
- 
-Dijalankan dari root folder `rag-backend/` dengan virtual environment aktif:
- 
+
+**Status test saat ini: 642 passed**
+
+## Struktur Aplikasi
+
+```
+app/
+├── main.py                          # Entry point, startup/shutdown, /ask endpoint
+├── config.py                        # Environment loading
+├── router.py                        # LangGraph RAG fallback
+├── api/
+│   ├── models.py                    # AskRequest, AskResponse
+│   ├── stream.py                    # POST /ask/stream — SSE endpoint
+│   └── routes/
+│       ├── health.py                # GET /health — status ES, Redis, cache, queue, LLM
+│       └── reports.py
+├── classification/
+│   ├── intent_classifier.py         # Dispatcher Tier 1 → 2 → 3
+│   ├── tier1_pattern.py             # Regex pattern, <5ms, 29 patterns
+│   ├── tier2_rule.py                # Additive scoring, <20ms
+│   └── tier3_llm.py                 # Placeholder (implementasi di cognitive_router)
+├── services/
+│   ├── core/
+│   │   ├── ask_pipeline.py          # Pipeline utama, 10 langkah
+│   │   ├── cognitive_router.py      # Tier 3 LLM + entity extraction
+│   │   ├── es_query_builder.py      # Centralized Elasticsearch DSL builder
+│   │   ├── location_resolver.py     # 5-step location resolution chain
+│   │   ├── aggregation_core.py      # ES aggregation queries
+│   │   ├── list_location_detector.py# 10 location detection helpers
+│   │   └── multi_intent_orchestrator.py  # Parallel multi-intent dispatch
+│   ├── query_handlers/
+│   │   ├── list_school_handler.py   # Daftar sekolah per wilayah
+│   │   ├── aggregation_handler.py   # Hitung & ranking sekolah
+│   │   ├── comparison_handler.py    # Perbandingan antar wilayah
+│   │   ├── profile_handler.py       # Profil satu sekolah
+│   │   └── school_vs_handler.py     # Perbandingan dua sekolah spesifik
+│   ├── narrator_service.py          # Narasi jawaban via LLM
+│   ├── embedding_service.py         # MiniLM embedding + TieredCache L1+L2
+│   └── formatters/
+│       ├── narrator_prompts.py      # Prompt builder untuk narasi
+│       └── response_formatter.py    # Format markdown response
+├── background/
+│   ├── arq_worker.py                # arq job definitions + WorkerSettings
+│   ├── trigger.py                   # Dispatcher background jobs
+│   ├── analytics.py                 # Log query ke ES analytics
+│   ├── rewrite_worker.py            # Query rewrite via LLM
+│   └── suggestion.py                # Generate related questions
+├── providers/
+│   └── deepseek.py                  # DeepSeek HTTP client + circuit breaker
+└── utils/
+    ├── tiered_cache.py              # L1 in-memory LRU + L2 Redis
+    ├── cache.py                     # Redis primitives + semantic key normalization
+    ├── arq_pool.py                  # Singleton ArqRedis connection pool
+    ├── task_queue.py                # SimpleTaskQueue (legacy, akan dihapus)
+    ├── structured_log.py            # JSON logging
+    └── prompt_loader.py             # Versioned prompt loading
+```
+
+## Alur Query
+
+```
+POST /ask/stream
+ ↓
+normalize query
+ ↓
+geo fast path? → ES geo search → narasi → SSE
+ ↓
+cache hit? → return langsung
+ ↓
+OOT guard
+ ↓
+Tier 1 (regex) → commit jika conf ≥ 0.70
+ ↓
+Tier 2 (scoring) → commit jika conf ≥ 0.60
+ ↓
+Tier 3 (LLM DeepSeek) → selalu commit
+ ↓
+route: comparison / aggregation / profile / list / RAG fallback
+ ↓
+narrator → SSE stream response
+```
+
+## Health Check
+
 ```bash
-# Inisialisasi index Elasticsearch (jalankan sekali di awal setup)
-python scripts/init_es.py
- 
-# Ingest data ke Elasticsearch
-python scripts/ingest_qc.py
- 
-# Monitor status ingestion
-python scripts/utils/monitor.py
- 
-# Test koneksi dan pencarian Elasticsearch
-python scripts/utils/test_search.py
- 
-# Deteksi BOM fields pada data CSV
-python scripts/utils/detect_bom_fields.py
+curl http://localhost:3000/health
 ```
- 
-## Menjalankan Tests
- 
-```bash
-pytest tests/ -v
+
+Response:
+```json
+{
+  "status": "UP",
+  "components": {
+    "es": {"status": "UP"},
+    "redis": {"status": "UP"},
+    "embedding_cache": {"status": "UP", "l1_size": 42, "l2_hits": 120},
+    "task_queue": {"status": "UP", "pending": 0, "workers": 2},
+    "deepseek": {"status": "UP", "circuit": "closed"}
+  }
+}
 ```
- 
+
+HTTP 503 jika ES atau Redis tidak tersedia.
+
+## Konvensi Kode
+
+- Semua I/O wajib `async/await`
+- Selalu `try/except` dengan fallback untuk ES, Redis, DeepSeek
+- Log dengan tag `[MODULE]` di awal: `logger.info("[LIST] ...")`
+- Gunakan `get_logger(__name__)` dari `app.utils.structured_log`
+- Return shape handler: `{status, provider, data, confidence, metadata}`
+- Jangan gunakan `print()` — selalu `logger`

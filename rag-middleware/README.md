@@ -1,84 +1,105 @@
 # rag-middleware
- 
-Express.js bridge service yang menjadi perantara antara frontend dan `rag-backend` (FastAPI).
- 
-## Alur Data
- 
+
+Express.js middleware untuk sistem RAG Kemendikdasmen. Berfungsi sebagai proxy layer antara client dan rag-backend — menangani CORS, rate limiting, validasi input, dan distributed tracing.
+
+## Persyaratan
+
+- Node.js ≥ 20 LTS
+- npm ≥ 10
+- rag-backend berjalan di port 3000
+
+## Setup
+
+```bash
+cd rag-middleware
+
+npm install
 ```
-Frontend (:5173) → rag-middleware (Express :4000) → rag-backend (FastAPI :3000) → Elasticsearch
+
+## Konfigurasi
+
+Buat file `.env` di folder `rag-middleware/`:
+
+```bash
+cp .env.example .env
 ```
- 
-## Tanggung Jawab
- 
-- Validasi input dari frontend sebelum diteruskan ke backend
-- CORS handling untuk request dari frontend
-- Rate limiting per endpoint (default: 30 request/menit pada `/api/ask`)
-- Security headers via Helmet
-- Request tracing via `X-Request-Id`
-- Graceful shutdown
-## Struktur Folder
- 
+
+| Variable | Default | Keterangan |
+|----------|---------|------------|
+| `PORT` | `4000` | Port middleware |
+| `BACKEND_URL` | `http://localhost:3000` | URL rag-backend |
+| `RATE_LIMIT_WINDOW_MS` | `60000` | Window rate limit (ms) |
+| `RATE_LIMIT_MAX` | `30` | Max request per window per IP |
+| `ALLOWED_ORIGINS` | `http://localhost:3000` | CORS whitelist, pisahkan dengan koma |
+| `NODE_ENV` | `development` | `production` untuk disable verbose log |
+
+## Menjalankan Server
+
+```bash
+# Development (auto-reload dengan nodemon)
+npm run dev
+
+# Production
+npm start
+```
+
+## Endpoint
+
+Semua request diteruskan ke rag-backend setelah melewati validasi.
+
+### `POST /api/ask`
+
+Terima pertanyaan dari client dan teruskan ke `POST /ask/stream` di rag-backend sebagai SSE.
+
+**Request:**
+```json
+{
+  "question": "Berapa jumlah SD negeri di Bandung?",
+  "user_id": "optional-user-id",
+  "lat": null,
+  "lon": null
+}
+```
+
+**Validasi yang dilakukan middleware:**
+- `question` wajib ada, maksimal 1000 karakter
+- `lat` dan `lon` harus dalam range valid jika disertakan
+- Rate limit: 30 request per menit per IP
+
+**Response:** SSE stream dengan events:
+```
+event: status   data: {"step": "classifying", "message": "..."}
+event: status   data: {"step": "searching", "message": "..."}
+event: result   data: {"answer": "...", "answer_html": "...", ...}
+event: done     data: {}
+```
+
+### `GET /health`
+
+Health check middleware.
+
+```bash
+curl http://localhost:4000/health
+```
+
+## Struktur
+
 ```
 rag-middleware/
 ├── src/
-│   └── server.js     # Entry point Express (semua route & middleware)
-├── Dockerfile
+│   └── server.js        # Entry point — Express app, routes, middleware
 ├── package.json
-├── .env.example
-└── README.md
+└── .env.example
 ```
- 
-## Endpoints
- 
-| Method | Path | Body | Deskripsi |
-|---|---|---|---|
-| `POST` | `/api/ask` | `{ question, user_id, level, lat, lon, radius_km }` | Kirim pertanyaan ke RAG backend |
-| `GET` | `/api/health` | — | Cek status middleware dan backend |
- 
-## Setup Lokal
- 
-```bash
-# 1. Install dependencies
-npm install
- 
-# 2. Salin template env
-# Linux/Mac:
-cp .env.example .env
-# Windows:
-copy .env.example .env
- 
-# Edit .env sesuai konfigurasi lokal
- 
-# 3. Jalankan development mode (auto-restart)
-npm run dev
- 
-# Jalankan production mode
-npm start
-```
- 
-Middleware tersedia di: `http://localhost:4000`
- 
-## Environment Variables
- 
-Lihat `.env.example` untuk daftar variabel yang dibutuhkan.
- 
-| Variabel | Contoh Nilai | Keterangan |
-|---|---|---|
-| `PORT` | `4000` | Port Express server |
-| `PYTHON_API_URL` | `http://localhost:3000` | URL rag-backend |
-| `FRONTEND_URL` | `http://localhost:5173` | URL frontend (untuk CORS) |
-| `RATE_LIMIT_REQUESTS` | `30` | Maks request per window |
-| `RATE_LIMIT_WINDOW` | `60` | Window rate limit (detik) |
- 
-## Docker
- 
-```bash
-# Build image
-docker build -t rag-middleware .
- 
-# Jalankan container
-# Linux/Mac:
-docker run -d -p 4000:4000 --env-file .env rag-middleware
-# Windows (PowerShell):
-docker run -d -p 4000:4000 --env-file .env rag-middleware
-```
+
+## Fitur
+
+**Rate limiting:** 30 request per menit per IP menggunakan `express-rate-limit`. Client yang melebihi limit mendapat HTTP 429.
+
+**Request tracing:** Setiap request mendapat `x-request-id` (UUID v4) yang diteruskan ke rag-backend untuk distributed tracing di semua log.
+
+**Validasi input:** Pertanyaan kosong, terlalu panjang (>1000 karakter), atau koordinat tidak valid ditolak sebelum sampai ke backend.
+
+**Timeout:** Proxy ke rag-backend memiliki timeout 60 detik. Jika backend tidak merespons dalam 60 detik, client mendapat HTTP 504.
+
+**CORS:** Dikonfigurasi via `ALLOWED_ORIGINS`. Di production, isi dengan domain frontend yang diizinkan.
