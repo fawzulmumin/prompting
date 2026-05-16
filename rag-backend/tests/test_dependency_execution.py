@@ -386,3 +386,113 @@ def test_validate_numbers_fallback_when_number_missing():
     narasi = "Terdapat banyak sekolah di wilayah ini"
     result = _validate_numbers_in_narasi(narasi, {"total": 500})
     assert result is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GROUP 8: Extended inject_from_result (P17-C)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_dependency_detection_kabupaten_level():
+    """
+    Protects against: kabupaten-level ranking query using provinsi injection
+    instead of kabupaten, causing list handler to search at wrong wilayah level.
+    """
+    intent = _keyword_fallback(
+        "kabupaten dengan SMK terbanyak di Jawa Barat tampilkan sekolahnya"
+    )
+
+    assert intent.dependencies != {}, "dependencies must be set"
+    inject_map = intent.dependencies.get("list", {}).get("inject_from_result", {})
+    assert "kabupaten" in inject_map, (
+        f"Expected 'kabupaten' key in inject_map, got: {inject_map}"
+    )
+    assert inject_map["kabupaten"] == "top_location"
+    assert "provinsi" not in inject_map, (
+        f"inject_map should not have 'provinsi' for kabupaten-level query, got: {inject_map}"
+    )
+
+
+@pytest.mark.unit
+def test_dependency_detection_jenjang_inject():
+    """
+    Protects against: jenjang filter not being propagated to list handler
+    when query has both ranking and jenjang intent, causing unfiltered school list.
+    """
+    intent = _keyword_fallback(
+        "provinsi dengan SD terbanyak tampilkan daftarnya"
+    )
+
+    assert intent.dependencies != {}, "dependencies must be set"
+    inject_map = intent.dependencies.get("list", {}).get("inject_from_result", {})
+    assert "jenjang" in inject_map, (
+        f"Expected 'jenjang' key in inject_map for SD query, got: {inject_map}"
+    )
+    assert inject_map["jenjang"] == "top_jenjang"
+
+
+@pytest.mark.unit
+def test_build_injected_intent_kabupaten_field():
+    """
+    Protects against: _build_injected_intent not setting kabupaten wilayah field
+    when inject_map uses {"kabupaten": "top_location"}.
+    """
+    original = CognitiveIntent(module="list", wilayah=WilayahEntities(kabupaten=None))
+
+    result = _build_injected_intent(
+        original,
+        {"top_location": "Bandung"},
+        {"kabupaten": "top_location"},
+    )
+
+    assert result.wilayah.kabupaten == "bandung", (
+        f"Expected 'bandung', got '{result.wilayah.kabupaten}'"
+    )
+    assert result.scope == "kabupaten"
+    assert original.wilayah.kabupaten is None
+
+
+@pytest.mark.unit
+def test_build_injected_intent_jenjang_direct_field():
+    """
+    Protects against: _build_injected_intent failing to inject jenjang into
+    intent directly (not into intent.wilayah, which has no jenjang field).
+    """
+    original = CognitiveIntent(module="list", wilayah=WilayahEntities(), jenjang=None)
+
+    result = _build_injected_intent(
+        original,
+        {"top_jenjang": "SD"},
+        {"jenjang": "top_jenjang"},
+    )
+
+    assert result.jenjang == "SD", (
+        f"Expected 'SD', got '{result.jenjang}'"
+    )
+    assert original.jenjang is None
+
+
+@pytest.mark.unit
+def test_build_injected_intent_combined_wilayah_and_jenjang():
+    """
+    Protects against: combined injection (wilayah + jenjang) partially failing —
+    both fields must be injected in a single _build_injected_intent call.
+    """
+    original = CognitiveIntent(
+        module="list",
+        wilayah=WilayahEntities(provinsi=None),
+        jenjang=None,
+    )
+
+    result = _build_injected_intent(
+        original,
+        {"top_location": "Jawa Timur", "top_jenjang": "SMA"},
+        {"provinsi": "top_location", "jenjang": "top_jenjang"},
+    )
+
+    assert result.wilayah.provinsi == "jawa timur"
+    assert result.jenjang == "SMA"
+    assert result.scope == "provinsi"
+    assert original.wilayah.provinsi is None
+    assert original.jenjang is None

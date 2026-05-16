@@ -298,17 +298,38 @@ async def _call_module(
  
 def _build_injected_intent(original_intent, parent_result: dict, inject_map: dict):
     """
-    Return a shallow copy of intent with wilayah fields populated from parent_result.
+    Return a shallow copy of intent with fields populated from parent_result.
     Does NOT mutate original_intent.
+
+    Supported injection targets:
+      - wilayah fields: provinsi, kabupaten, kecamatan, desa
+        → setattr(new_intent.wilayah, field_name, value)
+      - direct intent fields: jenjang
+        → setattr(new_intent, field_name, value)
     """
     new_intent = copy.copy(original_intent)
     new_intent.wilayah = copy.copy(original_intent.wilayah)
 
+    _DIRECT_INTENT_FIELDS = {"jenjang"}
+
     for field_name, result_key in inject_map.items():
         injected_value = parent_result.get(result_key)
-        if injected_value and hasattr(new_intent.wilayah, field_name):
+        if not injected_value:
+            continue
+
+        if field_name in _DIRECT_INTENT_FIELDS:
+            setattr(new_intent, field_name, str(injected_value))
+            logger.info(
+                "[Orchestrator] inject direct field: intent.%s = %r",
+                field_name, injected_value,
+            )
+        elif hasattr(new_intent.wilayah, field_name):
             setattr(new_intent.wilayah, field_name, str(injected_value).lower())
-            new_intent.scope = field_name  # e.g., "provinsi"
+            new_intent.scope = field_name
+            logger.info(
+                "[Orchestrator] inject wilayah field: intent.wilayah.%s = %r, scope=%s",
+                field_name, injected_value, field_name,
+            )
 
     return new_intent
 

@@ -26,108 +26,20 @@ from app.services.core.location_resolver_adapter import PROVINCE_ALIAS_MAP
 
 logger = logging.getLogger(__name__)
 
-# PAUD adalah kategori umbrella — expand ke jenjang konkret di ES
-_PAUD_BENTUK_EXPAND = ["TK", "KB", "RA", "SPS", "TPA", "PAUDQ", "SPK TK", "SPK KB", "SDTK"]
-
-# ================================================================
-# SORT KEYWORDS — deteksi niat pengurutan dari query
-# ================================================================
-_SORT_QUALITY_KEYWORDS = {
-    "terbaik", "unggulan", "favorit", "terfavorit", "top", "berkualitas",
-    "terakreditasi a", "akreditasi a", "terbaik akreditasi",
-    "data terbersih", "paling bersih", "kualitas data terbaik",
-}
-_SORT_MASALAH_KEYWORDS = {
-    "paling bermasalah", "data paling kotor", "paling banyak masalah",
-    "masalah terbanyak", "kualitas data terburuk",
-}
-
-def _detect_sort_mode(query: str, intent=None) -> str:
-    # Prioritas: jika intent punya sort_by eksplisit dari LLM, gunakan itu
-    if intent is not None:
-        sort_by = getattr(intent, "sort_by", None)
-        sort_order = getattr(intent, "sort_order", None)
-        if sort_by == "total_masalah" and sort_order == "desc":
-            return "bermasalah"
-        if sort_by == "total_masalah" and sort_order == "asc":
-            return "quality"
-        if sort_by == "persen_bersih" and sort_order == "asc":
-            return "bermasalah"
-        if sort_by == "persen_bersih" and sort_order == "desc":
-            return "quality"
-    # fallback ke keyword detection
-    q = query.lower()
-    if any(kw in q for kw in _SORT_MASALAH_KEYWORDS):
-        return "bermasalah"
-    if any(kw in q for kw in _SORT_QUALITY_KEYWORDS):
-        return "quality"
-    return "default"
-
-_AKREDITASI_ORDER_SCRIPT = (
-    "def v = doc.containsKey('akreditasi') && doc['akreditasi'].size() > 0"
-    " ? doc['akreditasi'].value : 'Z';"
-    "if (v == 'A') { return 1; }"
-    "if (v == 'B') { return 2; }"
-    "if (v == 'C') { return 3; }"
-    "return 4;"
+from app.services.query_handlers.list_sort_utils import (
+    detect_sort_mode as _detect_sort_mode,
+    build_sort_clause as _build_sort_clause,
 )
-
-def _build_sort_clause(sort_mode: str, intent=None) -> List[Dict]:
-    # Prioritas: jika intent punya sort_by eksplisit, gunakan field/order langsung
-    if intent is not None:
-        sort_by = getattr(intent, "sort_by", None)
-        sort_order = getattr(intent, "sort_order", None)
-        if sort_by == "persen_bersih" and sort_order in ("asc", "desc"):
-            return [
-                {"qc_score.persen_bersih": {"order": sort_order, "missing": "_last"}},
-                {"_score": {"order": "desc"}},
-            ]
-        if sort_by == "total_masalah" and sort_order in ("asc", "desc"):
-            return [
-                {"qc_score.total_masalah": {"order": sort_order, "missing": "_last"}},
-                {"_score": {"order": "desc"}},
-            ]
-    if sort_mode == "quality":
-        # Data terbersih: persen_bersih tertinggi dulu, tiebreaker akreditasi
-        return [
-            {"qc_score.persen_bersih": {"order": "desc", "missing": "_last"}},
-            {"_script": {"type": "number",
-                "script": {"lang": "painless", "source": _AKREDITASI_ORDER_SCRIPT},
-                "order": "asc"}},
-            {"_score": {"order": "desc"}},
-        ]
-    if sort_mode == "bermasalah":
-        # Sekolah dengan data paling bermasalah (total_masalah terbanyak) dulu
-        return [
-            {"qc_score.total_masalah": {"order": "desc", "missing": "_last"}},
-            {"_score": {"order": "desc"}},
-        ]
-    return [{"_score": {"order": "desc"}}]
-
-# ================================================================
-# OPTIONAL AGGREGATIONS FOR BREAKDOWN (jenjang + status)
-# ================================================================
-LIST_AGGS_SNIPPET = {
-    "aggs": {
-        "by_jenjang": {"terms": {"field": "bentuk_pendidikan", "size": 20}},
-        "by_status":  {"terms": {"field": "status_sekolah", "size": 5}},
-    }
-}
-
-def extract_breakdowns(es_response: dict):
-    agg = es_response.get("aggregations", {})
-
-    jenjang = {
-        b["key"]: b["doc_count"]
-        for b in agg.get("by_jenjang", {}).get("buckets", [])
-    }
-
-    status = {
-        b["key"]: b["doc_count"]
-        for b in agg.get("by_status", {}).get("buckets", [])
-    }
-
-    return jenjang, status
+from app.services.query_handlers.list_query_builder import (
+    LIST_AGGS_SNIPPET,
+    extract_breakdowns,
+    hybridize_query as _hybridize_query,
+    build_list_query,
+    match_phrase,
+    match_phrase_boosted,
+    strip_prefix,
+    _PAUD_BENTUK_EXPAND,
+)
 # ================================================================
 # TYPO CORRECTION — delegates to LocationResolver (replaces custom Levenshtein)
 # ================================================================
@@ -293,35 +205,6 @@ def _intent_to_legacy_parsed(filters: dict) -> dict:
         parsed["penyelenggara"] = filters["penyelenggara"]
 
     return parsed
-
-def _hybridize_query(query_body: Dict, qv: List[float]) -> None:
-    """In-place: wrap existing bool query with function_score for vector similarity boost.
-
-    Compatible with collapse, sort, track_total_hits — unlike RRF sub_searches.
-    Docs without content_vector get a neutral multiply factor of 1.0.
-    """
-    existing = query_body.get("query")
-    if not existing:
-        return
-    query_body["query"] = {
-        "function_score": {
-            "query": existing,
-            "functions": [{
-                "script_score": {
-                    "script": {
-                        "source": (
-                            "doc['content_vector'].size() > 0 "
-                            "? cosineSimilarity(params.qv, 'content_vector') + 1.0 "
-                            ": 1.0"
-                        ),
-                        "params": {"qv": qv},
-                    }
-                }
-            }],
-            "boost_mode": "multiply",
-        }
-    }
-    logger.info("[HYBRID] query injected, vector_dims=%d", len(qv))
 
 
 class ListSchoolHandler:
@@ -1057,7 +940,7 @@ class ListSchoolHandler:
         if desa:
             filters.append({"bool": {"should": [
                 {"term":  {"desa_kelurahan": desa}},
-                self._match_phrase("desa_kelurahan.text", desa),
+                match_phrase("desa_kelurahan.text", desa),
             ], "minimum_should_match": 1}})
             should.append({"term": {"desa_kelurahan": {"value": desa, "boost": 30}}})
             logger.info("[LIST] Multi: filter desa=%s", desa)
@@ -1066,7 +949,7 @@ class ListSchoolHandler:
             filters.append({"bool": {"should": [
                 {"term":  {"kecamatan": kecamatan}},
                 {"term":  {"kecamatan": f"kec. {kecamatan}"}},
-                self._match_phrase("kecamatan.text", kecamatan),
+                match_phrase("kecamatan.text", kecamatan),
             ], "minimum_should_match": 1}})
             should.append({"term": {"kecamatan": {"value": kecamatan, "boost": 25}}})
             should.append({"term": {"kecamatan": {"value": f"kec. {kecamatan}", "boost": 25}}})
@@ -1077,7 +960,7 @@ class ListSchoolHandler:
                 filters.append({"bool": {"should": [
                     {"term": {"kabupaten": f"kota {kab_name}"}},
                     {"term": {"kabupaten": f"kab. kota {kab_name}"}},
-                    self._match_phrase("kabupaten.text", kab_name),
+                    match_phrase("kabupaten.text", kab_name),
                 ], "minimum_should_match": 1}})
                 should.append({"term": {"kabupaten": {"value": f"kota {kab_name}", "boost": 25}}})
             elif want_kab:
@@ -1091,7 +974,7 @@ class ListSchoolHandler:
                     {"term": {"kabupaten": kab_name}},
                     {"term": {"kabupaten": f"kab. {kab_name}"}},
                     {"term": {"kabupaten": f"kota {kab_name}"}},
-                    self._match_phrase("kabupaten.text", kab_name),
+                    match_phrase("kabupaten.text", kab_name),
                 ], "minimum_should_match": 1}})
                 should.append({"term": {"kabupaten": {"value": f"kab. {kab_name}", "boost": 20}}})
                 should.append({"term": {"kabupaten": {"value": f"kota {kab_name}", "boost": 20}}})
@@ -1176,12 +1059,12 @@ class ListSchoolHandler:
                         ) + [{
                             "bool": {"should": [
                                 {"term":  {"desa_kelurahan": combined}},
-                                self._match_phrase("desa_kelurahan.text", combined),
+                                match_phrase("desa_kelurahan.text", combined),
                             ], "minimum_should_match": 1}
                         }],
                         "should": [
                             {"term": {"desa_kelurahan": {"value": combined, "boost": 30}}},
-                            self._match_phrase("desa_kelurahan.text", combined),
+                            match_phrase("desa_kelurahan.text", combined),
                         ],
                         "minimum_should_match": 1,
                     }},
@@ -1223,7 +1106,7 @@ class ListSchoolHandler:
                     ) + [{
                         "bool": {"should": [
                             {"term":  {"desa_kelurahan": desa}},
-                            self._match_phrase("desa_kelurahan.text", desa),
+                            match_phrase("desa_kelurahan.text", desa),
                         ], "minimum_should_match": 1}
                     }],
                     "should": [
@@ -1277,234 +1160,9 @@ class ListSchoolHandler:
             "is_ambiguous": False, "candidates": [],
         }
 
-    @staticmethod
-    def _match_phrase(field: str, value: str) -> Dict:
-        return {"match_phrase": {field: value}}
-
-    @staticmethod
-    def _match_phrase_boosted(field: str, value: str, boost: float) -> Dict:
-        return {"bool": {"should": [{"match_phrase": {field: value}}],
-                        "minimum_should_match": 1, "boost": boost}}
-
     def _build_query(self, parsed: Dict, wilayah_level: str = "kabupaten",
                     query_raw: str = "", intent=None) -> Dict:
-
-        bentuk     = parsed.get("bentuk")
-        bentuk_in  = parsed.get("bentuk_pendidikan_in")  # PAUD expand: list of jenjang
-        wilayah    = parsed.get("wilayah")
-        status     = parsed.get("status")
-        akreditasi = parsed.get("akreditasi")
-
-        if not status:
-            sn = (parsed.get("school_name") or "").lower()
-            if re.search(r"\bnegeri\b", sn) or re.search(r"\b n \b", sn):
-                status = "NEGERI"
-
-        # Deteksi multi-jenjang dari query: "sd, smp, sma di X" atau "sma dan sd di X"
-        # JENJANG_MAP diimport dari jenjang_constants — single source of truth
-        if query_raw:
-            _qr = query_raw.lower()
-            _multi_jenjang = re.findall(
-                r'\b(spk\s+(?:sd|smp|sma|smk|tk|kb)|sd|smp|sma|smk|ma|mts|mi|tk|paud|kb|ra|sps|tpa)\b', _qr
-            )
-            # Hapus duplikat, pertahankan urutan
-            _seen = set()
-            _multi_jenjang = [x for x in _multi_jenjang if not (_seen.add(x) or x in _seen)]
-            if len(_multi_jenjang) >= 2:
-                # Multi-jenjang: override bentuk dengan terms filter
-                _jenjang_es = []
-                for j in _multi_jenjang:
-                    if j == "paud":
-                        _jenjang_es.extend(_PAUD_BENTUK_EXPAND)
-                    else:
-                        _jenjang_es.append(JENJANG_MAP.get(j, j.upper()))
-                bentuk_in = list(dict.fromkeys(_jenjang_es))  # deduplicate
-                bentuk = None
-
-        filters = []
-        if bentuk_in:
-            filters.append({"terms": {"bentuk_pendidikan": bentuk_in}})
-        elif bentuk == "PAUD":
-            filters.append({"terms": {"bentuk_pendidikan": _PAUD_BENTUK_EXPAND}})
-        elif bentuk:
-            filters.append({"term": {"bentuk_pendidikan": bentuk}})
-        if status:
-            filters.append({"term": {"status_sekolah": status.upper()}})
-        akreditasi_in  = parsed.get("akreditasi_in")
-        akreditasi_gte = parsed.get("akreditasi_gte")
-        akreditasi_exc = parsed.get("akreditasi_exclude")
-
-        if akreditasi_in:
-            filters.append({"terms": {"akreditasi": akreditasi_in}})
-            logger.info("[LIST] akreditasi_in filter: %s", akreditasi_in)
-
-        elif akreditasi_gte:
-            filters.append({"terms": {"akreditasi": akreditasi_gte}})
-            logger.info("[LIST] akreditasi_gte filter: %s", akreditasi_gte)
-
-        elif akreditasi_exc:
-            filters.append({
-                "bool": {
-                    "must_not": [
-                        {"term": {"akreditasi": akreditasi_exc}}
-                    ]
-                }
-            })
-            logger.info("[LIST] akreditasi_exclude filter: %s", akreditasi_exc)
-
-        elif akreditasi:
-            filters.append({"term": {"akreditasi": akreditasi}})
-            logger.info("[LIST] akreditasi filter: %s", akreditasi)
-
-        # ── QC Filter — inject dari intent jika ada ──────────────────────────────
-        if intent is not None:
-            qc_filters = build_qc_filter(intent)
-            if qc_filters:
-                filters.extend(qc_filters)
-                logger.info("[LIST] QC filters injected: %s", qc_filters)
-
-        should = []
-
-        if wilayah:
-            wc        = self._strip_prefix(wilayah.lower())
-            q_check   = query_raw.lower() if query_raw else ""
-            want_kota = bool(re.search(r"\bkota\b", q_check)) and not bool(re.search(r"\b(kabupaten|kab)\b", q_check))
-            want_kab  = bool(re.search(r"\b(kabupaten|kab)\b", q_check)) and not bool(re.search(r"\bkota\b", q_check))
-
-            logger.info("[LIST] _build_query: wc=%s want_kab=%s want_kota=%s q=%s",
-                        wc, want_kab, want_kota, q_check[:60])
-
-            # Propagate ke parsed["wilayah"] agar header display eksplisit Kabupaten/Kota
-            _cur_wilayah = parsed.get("wilayah", "").lower()
-            if want_kab and not _cur_wilayah.startswith("kab"):
-                parsed["wilayah"] = f"kabupaten {wc}"
-            elif want_kota and not _cur_wilayah.startswith("kota"):
-                parsed["wilayah"] = f"kota {wc}"
-
-            if wilayah_level == "provinsi":
-                should += [
-                    {"match": {"provinsi.text": {"query": wc, "boost": 20}}},
-                    {"term":  {"provinsi": {"value": wc, "boost": 15}}},
-                    {"term":  {"provinsi": {"value": f"prov. {wc}", "boost": 15}}},
-                ]
-                filters.append({"bool": {"should": [
-                    {"match": {"provinsi.text": wc}},
-                    {"term":  {"provinsi": wc}},
-                    {"term":  {"provinsi": f"prov. {wc}"}},
-                ], "minimum_should_match": 1}})
-
-            elif wilayah_level == "desa_kelurahan":
-                should += [
-                    {"term":  {"desa_kelurahan": {"value": wc, "boost": 20}}},
-                    self._match_phrase("desa_kelurahan.text", wc),
-                    self._match_phrase("kecamatan.text", wc),
-                ]
-                filters.append({"bool": {"should": [
-                    {"term":  {"desa_kelurahan": wc}},
-                    self._match_phrase("desa_kelurahan.text", wc),
-                ], "minimum_should_match": 1}})
-
-            elif wilayah_level == "kecamatan":
-                # Jika user eksplisit sebut "kecamatan", filter STRICT hanya kecamatan
-                # Jangan ikutkan kabupaten — akan menyebabkan hasil kabupaten-wide
-                q_has_kec_hint = bool(re.search(r"\b(kecamatan|kec\.?)\b", q_check))
-                if q_has_kec_hint:
-                    should += [
-                        {"term":  {"kecamatan": {"value": wc, "boost": 25}}},
-                        {"term":  {"kecamatan": {"value": f"kec. {wc}", "boost": 25}}},
-                        self._match_phrase_boosted("kecamatan.text", wc, boost=25),
-                    ]
-                    filters.append({"bool": {"should": [
-                        {"term":  {"kecamatan": wc}},
-                        {"term":  {"kecamatan": f"kec. {wc}"}},
-                        self._match_phrase("kecamatan.text", wc),
-                    ], "minimum_should_match": 1}})
-                else:
-                    # Tanpa hint eksplisit: tetap include kabupaten sebagai fallback
-                    should += [
-                        {"term":  {"kecamatan": {"value": wc, "boost": 25}}},
-                        {"term":  {"kecamatan": {"value": f"kec. {wc}", "boost": 25}}},
-                        self._match_phrase_boosted("kecamatan.text", wc, boost=25),
-                        {"term":  {"kabupaten": {"value": wc, "boost": 10}}},
-                        {"term":  {"kabupaten": {"value": f"kab. {wc}", "boost": 10}}},
-                        {"term":  {"kabupaten": {"value": f"kota {wc}", "boost": 10}}},
-                        self._match_phrase("kabupaten.text", wc),
-                        {"match": {"provinsi.text": {"query": wc, "boost": 3}}},
-                    ]
-                    filters.append({"bool": {"should": [
-                        {"term":  {"kecamatan": wc}},
-                        {"term":  {"kecamatan": f"kec. {wc}"}},
-                        self._match_phrase("kecamatan.text", wc),
-                        {"term":  {"kabupaten": wc}},
-                        {"term":  {"kabupaten": f"kab. {wc}"}},
-                        {"term":  {"kabupaten": f"kota {wc}"}},
-                        self._match_phrase("kabupaten.text", wc),
-                    ], "minimum_should_match": 1}})
-
-            else:
-                if want_kab:
-                    should += [
-                        {"term": {"kabupaten": {"value": f"kab. {wc}", "boost": 30}}},
-                        {"term": {"kabupaten": {"value": wc, "boost": 5}}},
-                        self._match_phrase("kecamatan.text", wc),
-                        {"match": {"provinsi.text": {"query": wc, "boost": 2}}},
-                    ]
-                    filters.append({"bool": {"should": [
-                        {"term": {"kabupaten": f"kab. {wc}"}},
-                        {"term": {"kabupaten": wc}},
-                    ], "minimum_should_match": 1}})
-
-                elif want_kota:
-                    should += [
-                        {"term": {"kabupaten": {"value": f"kota {wc}", "boost": 30}}},
-                        {"term": {"kabupaten": {"value": f"kab. kota {wc}", "boost": 20}}},
-                        self._match_phrase("kecamatan.text", wc),
-                        {"match": {"provinsi.text": {"query": wc, "boost": 2}}},
-                    ]
-                    filters.append({"bool": {"should": [
-                        {"term": {"kabupaten": f"kota {wc}"}},
-                        {"term": {"kabupaten": f"kab. kota {wc}"}},
-                        self._match_phrase("kabupaten.text", wc),
-                        self._match_phrase("kecamatan.text", wc),
-                    ], "minimum_should_match": 1}})
-
-                else:
-                    should += [
-                        {"term": {"kabupaten": {"value": wc, "boost": 20}}},
-                        {"term": {"kabupaten": {"value": f"kab. {wc}", "boost": 20}}},
-                        {"term": {"kabupaten": {"value": f"kota {wc}", "boost": 20}}},
-                        {"term": {"kabupaten": {"value": f"kab. kota {wc}", "boost": 20}}},
-                        self._match_phrase("kabupaten.text", wc),
-                        self._match_phrase("kecamatan.text", wc),
-                        {"match": {"provinsi.text": {"query": wc, "boost": 3}}},
-                    ]
-                    filters.append({"bool": {"should": [
-                        {"term": {"kabupaten": wc}},
-                        {"term": {"kabupaten": f"kab. {wc}"}},
-                        {"term": {"kabupaten": f"kota {wc}"}},
-                        {"term": {"kabupaten": f"kab. kota {wc}"}},
-                        self._match_phrase("kabupaten.text", wc),
-                        self._match_phrase("kecamatan.text", wc),
-                    ], "minimum_should_match": 1}})
-
-        query_body = {
-            "size": 10, "track_total_hits": True,
-            "query": {"bool": {"filter": filters, "should": should,
-                               **({"minimum_should_match": 1} if should else {})}},
-            "collapse": {"field": "npsn"},
-            "sort": _build_sort_clause(_detect_sort_mode(query_raw, intent=intent), intent=intent),
-        }
-
-        logger.debug("[LIST] _build_query (pre-hybrid): %s", query_body)
-        return query_body
-
-    def _strip_prefix(self, text: str) -> str:
-        return re.sub(
-            r"^(kota\s+adm\.?\s*|kota\s+|kab\.?\s+|kabupaten\s+|"
-            r"prov\.?\s+|provinsi\s+|kec\.?\s+|kecamatan\s+|"
-            r"desa\s+|kelurahan\s+)",
-            "", text
-        ).strip()
+        return build_list_query(parsed, wilayah_level, query_raw, intent)
 
     def _format_hit(self, hit: Dict) -> Dict:
         src = hit["_source"]

@@ -410,10 +410,20 @@ def _format_ranking_result(
 ) -> Dict[str, Any]:
     """Build standard ELASTICSEARCH_GLOBAL_RANKING result from ES terms-agg buckets."""
     top = buckets[0] if buckets else {}
+
+    _q = query.lower()
+    _top_level = "provinsi"  # default
+    if any(w in _q for w in ("kabupaten", "kab.", "kota")):
+        _top_level = "kabupaten"
+    elif any(w in _q for w in ("kecamatan", "kec.")):
+        _top_level = "kecamatan"
+
     return {
         "status": ResultStatus.SUCCESS,
         "provider": "ELASTICSEARCH_GLOBAL_RANKING",
         "top_location": top.get("key"),
+        "top_level": _top_level,
+        "top_jenjang": jenjang,
         "total": top.get("doc_count"),
         "ranking": buckets,
         "entities": entities or {},
