@@ -192,3 +192,195 @@ class TestHandlerDanSplitDepth:
              patch("app.services.query_handlers.list_school_handler._find_location_candidates", return_value=[]):
             await handler.handle("sekolah di sini", _depth=1)
         mock_split.assert_not_called()
+
+
+# ──────────────────────────────────────────────────────────────────
+# Phase 16B: Unit tests for extracted sub-functions
+# ──────────────────────────────────────────────────────────────────
+
+@pytest.mark.unit
+class TestResolveProvinceSiblings:
+    def test_returns_none_when_no_siblings(self):
+        handler = _make_handler()
+        parsed = {"wilayah": "bandung"}
+        with patch("app.services.query_handlers.list_school_handler._has_province_siblings",
+                   return_value=False):
+            result = handler._resolve_province_siblings(parsed, "bandung", "provinsi")
+        assert result is None
+
+    def test_returns_none_and_updates_parsed_for_dominant_prov(self):
+        handler = _make_handler()
+        parsed = {"wilayah": "banten"}
+        candidates = [
+            {"level": "provinsi", "nama": "Banten"},
+            {"level": "desa_kelurahan", "nama": "Banten Desa"},
+        ]
+        with patch("app.services.query_handlers.list_school_handler._has_province_siblings", return_value=True), \
+             patch("app.services.query_handlers.list_school_handler._find_location_candidates", return_value=candidates):
+            result = handler._resolve_province_siblings(parsed, "banten", "provinsi")
+        assert result is None
+        assert parsed["wilayah"] == "Banten"
+
+    def test_returns_clarification_for_ambiguous_siblings(self):
+        handler = _make_handler()
+        parsed = {"wilayah": "banten"}
+        candidates = [
+            {"level": "provinsi", "nama": "Banten"},
+            {"level": "kabupaten", "nama": "Banten Kab"},
+        ]
+        with patch("app.services.query_handlers.list_school_handler._has_province_siblings", return_value=True), \
+             patch("app.services.query_handlers.list_school_handler._find_location_candidates", return_value=candidates):
+            result = handler._resolve_province_siblings(parsed, "banten", "provinsi")
+        assert isinstance(result, dict)
+        assert result["status"] == "clarification"
+        assert result["is_ambiguous"] is True
+
+    def test_returns_none_when_no_prov_candidates(self):
+        handler = _make_handler()
+        parsed = {"wilayah": "banten"}
+        candidates = [{"level": "desa_kelurahan", "nama": "Banten Desa"}]
+        with patch("app.services.query_handlers.list_school_handler._has_province_siblings", return_value=True), \
+             patch("app.services.query_handlers.list_school_handler._find_location_candidates", return_value=candidates):
+            result = handler._resolve_province_siblings(parsed, "banten", "provinsi")
+        assert isinstance(result, dict)
+        assert result["status"] == "clarification"
+
+
+@pytest.mark.unit
+class TestResolveDominantLocation:
+    def test_single_candidate_resolved(self):
+        handler = _make_handler()
+        candidates = [{"level": "kabupaten", "nama": "Kuningan"}]
+        clarification, new_wilayah, new_level = handler._resolve_dominant_location(
+            candidates, "kabupaten", None, "kuningan")
+        assert clarification is None
+        assert new_wilayah == "Kuningan"
+        assert new_level == "kabupaten"
+
+    def test_dominant_kab_auto_resolve(self):
+        handler = _make_handler()
+        candidates = [
+            {"level": "kabupaten", "nama": "Kuningan"},
+            {"level": "kecamatan", "nama": "Kuningan Kec"},
+            {"level": "desa_kelurahan", "nama": "Kuningan Desa"},
+        ]
+        clarification, new_wilayah, new_level = handler._resolve_dominant_location(
+            candidates, "kabupaten", None, "kuningan")
+        assert clarification is None
+        assert new_wilayah == "Kuningan"
+        assert new_level == "kabupaten"
+
+    def test_dominant_prov_auto_resolve(self):
+        handler = _make_handler()
+        candidates = [
+            {"level": "provinsi", "nama": "Banten"},
+            {"level": "desa_kelurahan", "nama": "Banten Desa"},
+        ]
+        clarification, new_wilayah, new_level = handler._resolve_dominant_location(
+            candidates, "provinsi", None, "banten")
+        assert clarification is None
+        assert new_wilayah == "Banten"
+        assert new_level == "provinsi"
+
+    def test_same_location_resolve_to_kecamatan(self):
+        handler = _make_handler()
+        # Semua candidates punya kabupaten + kecamatan yang sama → auto-resolve ke kec
+        candidates = [
+            {"level": "desa_kelurahan", "nama": "Cisauk Desa", "kabupaten": "Tangerang", "kecamatan": "Cisauk"},
+            {"level": "desa_kelurahan", "nama": "Cisauk RT", "kabupaten": "Tangerang", "kecamatan": "Cisauk"},
+        ]
+        clarification, new_wilayah, new_level = handler._resolve_dominant_location(
+            candidates, "kecamatan", None, "cisauk")
+        assert clarification is None
+        assert new_level == "kecamatan"
+        assert "cisauk" in new_wilayah.lower()
+
+    def test_multi_level_returns_clarification(self):
+        handler = _make_handler()
+        # 2 kabupaten berbeda → clarification
+        candidates = [
+            {"level": "kabupaten", "nama": "Bogor", "kabupaten": "Bogor", "kecamatan": "A"},
+            {"level": "kabupaten", "nama": "Bogor Kota", "kabupaten": "Bogor Kota", "kecamatan": "B"},
+        ]
+        clarification, new_wilayah, new_level = handler._resolve_dominant_location(
+            candidates, "kabupaten", None, "bogor")
+        assert isinstance(clarification, dict)
+        assert clarification["status"] == "clarification"
+
+    def test_intent_kab_guard_no_change(self):
+        handler = _make_handler()
+        # 2 kab → dominant-kab tidak trigger; intent guard kab fires → (None, "", "")
+        candidates = [
+            {"level": "kabupaten", "nama": "Bogor", "kabupaten": "Bogor", "kecamatan": "A"},
+            {"level": "kabupaten", "nama": "Bogor Kota", "kabupaten": "Bogor Kota", "kecamatan": "B"},
+        ]
+        intent = MagicMock()
+        intent.wilayah = MagicMock()
+        intent.wilayah.kabupaten = "bogor"
+        intent.wilayah.provinsi = None
+        clarification, new_wilayah, new_level = handler._resolve_dominant_location(
+            candidates, "kabupaten", intent, "bogor")
+        assert clarification is None
+        assert new_wilayah == ""
+
+
+_FILTER_PATCH = "app.services.query_handlers.list_school_handler.extract_filters_from_intent"
+
+
+@pytest.mark.unit
+class TestApplyFilterFromIntent:
+    def test_injects_bentuk_when_missing(self):
+        handler = _make_handler()
+        parsed = {}
+        with patch(_FILTER_PATCH, return_value={"bentuk_pendidikan": "SD"}):
+            handler._apply_filter_from_intent(parsed, None)
+        assert parsed["bentuk"] == "SD"
+
+    def test_does_not_overwrite_existing_bentuk(self):
+        handler = _make_handler()
+        parsed = {"bentuk": "SMP"}
+        with patch(_FILTER_PATCH, return_value={"bentuk_pendidikan": "SD"}):
+            handler._apply_filter_from_intent(parsed, None)
+        assert parsed["bentuk"] == "SMP"
+
+    def test_injects_status_sekolah(self):
+        handler = _make_handler()
+        parsed = {}
+        with patch(_FILTER_PATCH, return_value={"status_sekolah": "NEGERI"}):
+            handler._apply_filter_from_intent(parsed, None)
+        assert parsed["status"] == "NEGERI"
+
+    def test_injects_akreditasi_exact(self):
+        handler = _make_handler()
+        parsed = {}
+        with patch(_FILTER_PATCH, return_value={"akreditasi_exact": "A"}):
+            handler._apply_filter_from_intent(parsed, None)
+        assert parsed["akreditasi"] == "A"
+
+    def test_empty_filters_no_mutation(self):
+        handler = _make_handler()
+        parsed = {"bentuk": "SMA"}
+        with patch(_FILTER_PATCH, return_value={}):
+            handler._apply_filter_from_intent(parsed, None)
+        assert parsed == {"bentuk": "SMA"}
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestApplyTypoAndRetry:
+    async def test_returns_none_when_no_fuzzy(self):
+        handler = _make_handler()
+        with patch("app.services.query_handlers.list_school_handler._extract_main_keyword", return_value="bandung"), \
+             patch("app.services.query_handlers.list_school_handler._apply_typo_correction", return_value=None):
+            result = await handler._apply_typo_and_retry(
+                "daftar sd di bandung", {"wilayah": "bandung"}, "bandung", "kabupaten", False, None)
+        assert result is None
+
+    async def test_returns_none_when_same_kw(self):
+        handler = _make_handler()
+        with patch("app.services.query_handlers.list_school_handler._extract_main_keyword", return_value="bandung"), \
+             patch("app.services.query_handlers.list_school_handler._apply_typo_correction",
+                   return_value=("bandung", "kabupaten")):
+            result = await handler._apply_typo_and_retry(
+                "daftar sd di bandung", {"wilayah": "bandung"}, "bandung", "kabupaten", False, None)
+        assert result is None

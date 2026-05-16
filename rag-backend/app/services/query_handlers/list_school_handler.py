@@ -766,6 +766,180 @@ class ListSchoolHandler:
 
         return await self._query_single_wilayah(query, parsed, wilayah_level, has_level_hint, intent=intent)
 
+    def _resolve_province_siblings(
+        self, parsed: dict, wilayah_kw: str, wilayah_level: str
+    ) -> Optional[dict]:
+        """
+        Cek apakah wilayah_kw adalah nama provinsi yang punya sibling match.
+        Return clarification dict jika perlu disambiguasi, None jika bisa lanjut.
+        Mutates parsed["wilayah"] saat auto-resolve (dominant prov).
+        """
+        if not _has_province_siblings(wilayah_kw):
+            return None
+        candidates = _find_location_candidates(wilayah_kw)
+        prov_cands = [c for c in candidates if c["level"] == "provinsi"]
+        non_prov   = [c for c in candidates if c["level"] != "provinsi"]
+        if (len(prov_cands) == 1
+                and all(c["level"] == "desa_kelurahan" for c in non_prov)):
+            parsed["wilayah"] = prov_cands[0]["nama"]
+            logger.info("[LIST] Siblings override: dominant prov '%s'", prov_cands[0]["nama"])
+            return None
+        logger.info("[LIST] Province siblings found for '%s', clarification", wilayah_kw)
+        return {
+            "status": "clarification", "intent": "school_list",
+            "total": 0, "schools": [], "parsed": parsed,
+            "wilayah_level": wilayah_level, "is_ambiguous": True,
+            "keyword": wilayah_kw, "candidates": candidates,
+        }
+
+    def _resolve_dominant_location(
+        self, candidates: list, wilayah_level: str, intent, wilayah_kw: str
+    ) -> Tuple[Optional[dict], str, str]:
+        """
+        Resolve wilayah dari daftar kandidat ke satu pilihan.
+        Return: (clarification_dict_or_None, new_wilayah_value, new_wilayah_level)
+        Caller mengupdate parsed["wilayah"] dan wilayah_level jika new_wilayah tidak kosong.
+        """
+        if len(candidates) == 1:
+            single = candidates[0]
+            logger.info("[LIST] Single exact candidate '%s' level=%s, skip clarification",
+                        single["nama"], single["level"])
+            return None, single["nama"], single["level"]
+
+        kab_candidates  = [c for c in candidates if c["level"] == "kabupaten"]
+        prov_candidates = [c for c in candidates if c["level"] == "provinsi"]
+
+        if len(kab_candidates) == 1:
+            kab = kab_candidates[0]
+            logger.info(
+                "[LIST] Dominant kab auto-resolve: '%s' (%d sub-candidates ignored)",
+                kab["nama"], len(candidates) - 1,
+            )
+            return None, kab["nama"], "kabupaten"
+
+        if len(prov_candidates) == 1 and all(
+            c["level"] == "desa_kelurahan" for c in candidates if c["level"] != "provinsi"
+        ):
+            prov = prov_candidates[0]
+            logger.info(
+                "[LIST] Dominant prov auto-resolve: '%s' (%d desa-only sub-candidates ignored)",
+                prov["nama"], len(candidates) - 1,
+            )
+            return None, prov["nama"], "provinsi"
+
+        # Intent guard + same-location check
+        _intent_wil = getattr(intent, "wilayah", None) if intent else None
+        _intent_kab  = getattr(_intent_wil, "kabupaten", None) if _intent_wil else None
+        _intent_prov = getattr(_intent_wil, "provinsi", None) if _intent_wil else None
+
+        if _intent_kab and _intent_kab.lower().strip() == wilayah_kw:
+            logger.info("[LIST] same-location guard: intent.kabupaten='%s' matches wilayah_kw, skip", _intent_kab)
+            return None, "", ""  # no change, lanjut ke _build_query
+
+        if _intent_prov and _intent_prov.lower().strip() in wilayah_kw:
+            prov_val = _intent_prov.lower().strip()
+            logger.info("[LIST] same-location guard: intent.provinsi='%s', override ke provinsi", _intent_prov)
+            return None, prov_val, "provinsi"
+
+        kab_vals = set(c.get("kabupaten", "").lower() for c in candidates if c.get("kabupaten"))
+        kec_vals = set(c.get("kecamatan", "").lower() for c in candidates if c.get("kecamatan"))
+        if len(kab_vals) == 1 and len(kec_vals) == 1:
+            kec_clean = re.sub(r"^kec\.\s*", "", list(kec_vals)[0]).strip()
+            logger.info("[LIST] Same-location auto-resolve: all candidates → kec '%s'", kec_clean)
+            return None, kec_clean, "kecamatan"
+
+        logger.info("[LIST] Multi-level clarification: wilayah=%s candidates=%d", wilayah_kw, len(candidates))
+        return {
+            "status": "clarification", "intent": "school_list",
+            "total": 0, "schools": [], "parsed": {},
+            "wilayah_level": wilayah_level, "is_ambiguous": True,
+            "keyword": wilayah_kw, "candidates": candidates,
+        }, "", ""
+
+    async def _apply_typo_and_retry(
+        self, query: str, parsed: dict, wilayah_kw: str,
+        wilayah_level: str, has_level_hint: bool, intent,
+    ) -> Optional[dict]:
+        """
+        Jika total == 0, coba koreksi typo wilayah dan retry _query_single_wilayah.
+        Return hasil dict baru jika retry berhasil, None jika tidak ada kandidat typo.
+        """
+        kw_main = _extract_main_keyword(query)
+        fuzzy   = _apply_typo_correction(kw_main or wilayah_kw, query.lower())
+        if not fuzzy or fuzzy[0] == wilayah_kw:
+            return None
+        corrected_name, corrected_level = fuzzy
+        logger.info("[LIST] Typo after 0 results: '%s' → '%s'", wilayah_kw, corrected_name)
+        parsed2 = dict(parsed)
+        parsed2["wilayah"] = corrected_name
+        q_low = query.lower()
+        if re.search(r"\bprovinsi\b", q_low):
+            new_level = "provinsi"
+        elif re.search(r"\b(kabupaten|kab)\b", q_low):
+            new_level = "kabupaten"
+        elif re.search(r"\bkota\b", q_low):
+            new_level = "kabupaten"
+        elif re.search(r"\b(kecamatan|kec)\b", q_low):
+            new_level = "kecamatan"
+        elif re.search(r"\b(desa|kelurahan)\b", q_low):
+            new_level = "desa_kelurahan"
+        else:
+            new_level = corrected_level
+        return await self._query_single_wilayah(
+            query, parsed2, new_level, has_level_hint,
+            original_kw=wilayah_kw, corrected_kw=corrected_name,
+            intent=intent,
+        )
+
+    def _build_scattered_result(
+        self, schools: list, wilayah_kw: str, wilayah_level: str,
+        total: int, parsed: dict, has_level_hint: bool,
+    ) -> Optional[dict]:
+        """
+        Cek apakah hasil ES tersebar di banyak provinsi/kab (ambiguous).
+        Return clarification dict jika scattered, None jika aman.
+        """
+        is_desa_level = (wilayah_level == "desa_kelurahan" and bool(wilayah_kw))
+        if not has_level_hint or is_desa_level:
+            if _check_ambiguous(schools, wilayah_level, min_distinct=3, use_province_check=is_desa_level):
+                kw         = wilayah_kw or ""
+                candidates = _find_location_candidates(kw) if kw else []
+                logger.info("[LIST] Scattered: wilayah=%s candidates=%d", kw, len(candidates))
+                return {
+                    "status": "clarification", "intent": "school_list",
+                    "total": total, "schools": [], "parsed": parsed,
+                    "wilayah_level": wilayah_level, "is_ambiguous": True,
+                    "keyword": kw, "candidates": candidates,
+                }
+        return None
+
+    def _apply_qc_flags(self, parsed: dict, intent) -> dict:
+        """Inject flag qc_masalah_only / qc_field ke parsed jika intent menandainya."""
+        qc_masalah_only = getattr(intent, "qc_masalah_only", False) if intent else False
+        qc_field        = getattr(intent, "qc_field", None) if intent else None
+        qc_field_list   = getattr(intent, "qc_field_list", []) if intent else []
+        if qc_masalah_only:
+            parsed = {**parsed, "qc_masalah_only": True}
+            if qc_field:
+                parsed["qc_field"] = qc_field
+        if qc_field_list:
+            parsed["qc_field_list"] = qc_field_list
+        return parsed
+
+    def _apply_filter_from_intent(self, parsed: dict, intent) -> None:
+        """Inject filter bentuk/akreditasi/status dari intent ke parsed jika belum ada."""
+        _if = extract_filters_from_intent(intent)
+        if _if.get("bentuk_pendidikan") and not parsed.get("bentuk"):
+            parsed["bentuk"] = _if["bentuk_pendidikan"]
+        if _if.get("bentuk_pendidikan_in") and not parsed.get("bentuk_pendidikan_in"):
+            parsed["bentuk_pendidikan_in"] = _if["bentuk_pendidikan_in"]
+        if _if.get("akreditasi_exact") and not parsed.get("akreditasi"):
+            parsed["akreditasi"] = _if["akreditasi_exact"]
+        if _if.get("akreditasi_in") and not parsed.get("akreditasi_in"):
+            parsed["akreditasi_in"] = _if["akreditasi_in"]
+        if _if.get("status_sekolah") and not parsed.get("status"):
+            parsed["status"] = _if["status_sekolah"]
+
     async def _query_single_wilayah(
         self, query: str, parsed: dict, wilayah_level: str,
         has_level_hint: bool, intent,
@@ -777,131 +951,23 @@ class ListSchoolHandler:
 
         # Provinsi dengan sibling
         if not has_level_hint and not is_from_multikata and wilayah_level == "provinsi" and wilayah_kw:
-            if _has_province_siblings(wilayah_kw):
-                candidates = _find_location_candidates(wilayah_kw)
-                # Cek dominant prov sebelum clarification
-                # Jika hanya 1 provinsi dan sisa hanya desa → auto-resolve
-                prov_cands = [c for c in candidates if c["level"] == "provinsi"]
-                non_prov   = [c for c in candidates if c["level"] != "provinsi"]
-                if (len(prov_cands) == 1
-                        and all(c["level"] == "desa_kelurahan" for c in non_prov)):
-                    parsed["wilayah"] = prov_cands[0]["nama"]
-                    wilayah_level     = "provinsi"
-                    logger.info("[LIST] Siblings override: dominant prov '%s'", prov_cands[0]["nama"])
-                else:
-                    logger.info("[LIST] Province siblings found for '%s', clarification", wilayah_kw)
-                    return {
-                        "status": "clarification", "intent": "school_list",
-                        "total": 0, "schools": [], "parsed": parsed,
-                        "wilayah_level": wilayah_level, "is_ambiguous": True,
-                        "keyword": wilayah_kw, "candidates": candidates,
-                    }
+            result = self._resolve_province_siblings(parsed, wilayah_kw, wilayah_level)
+            if result is not None:
+                return result
 
         # Multi-level match
         if not has_level_hint and not is_from_multikata and wilayah_kw and _has_multi_level_match(wilayah_kw):
             candidates = _find_location_candidates(wilayah_kw)
+            clarification, new_wilayah, new_level = self._resolve_dominant_location(
+                candidates, wilayah_level, intent, wilayah_kw)
+            if isinstance(clarification, dict):
+                clarification["parsed"] = parsed
+                return clarification
+            if new_wilayah:
+                parsed["wilayah"] = new_wilayah
+                wilayah_level = new_level
 
-            if len(candidates) == 1:
-                single = candidates[0]
-                parsed["wilayah"] = single["nama"]
-                wilayah_level     = single["level"]
-                logger.info("[LIST] Single exact candidate '%s' level=%s, skip clarification",
-                            single["nama"], single["level"])
-            else:
-                # ── DOMINANT KAB AUTO-RESOLVE ────────────────────────
-                # Jika hanya ada 1 kandidat kabupaten dan semua kandidat
-                # lain (kec/desa) adalah child-nya → langsung resolve
-                # ke kabupaten tanpa clarification.
-                # Contoh: "kuningan" → kab. kuningan (1 kab + 1 kec + 7 desa)
-                kab_candidates = [c for c in candidates if c["level"] == "kabupaten"]
-                prov_candidates = [c for c in candidates if c["level"] == "provinsi"]
-                if len(kab_candidates) == 1:
-                    kab      = kab_candidates[0]
-                    sub_levels = [c for c in candidates if c["level"] != "kabupaten"]
-                    # Jika hanya ada 1 kandidat kabupaten, auto-resolve ke sana.
-                    # Sub-levels (kec/desa) yang muncul dianggap noise atau
-                    # disambiguasi yang tidak diperlukan — kabupaten lebih dominan.
-                    parsed["wilayah"] = kab["nama"]
-                    wilayah_level     = "kabupaten"
-                    logger.info(
-                        "[LIST] Dominant kab auto-resolve: '%s' (%d sub-candidates ignored)",
-                        kab["nama"], len(sub_levels)
-                    )
-                    # Lanjutkan ke _build_query (jangan return clarification)
-                elif len(prov_candidates) == 1 and all(
-                    c["level"] in ("desa_kelurahan",) for c in candidates if c["level"] != "provinsi"
-                ):
-                    # ── DOMINANT PROV AUTO-RESOLVE ───────────────────────
-                    # Jika hanya ada 1 kandidat provinsi dan sisa hanya desa
-                    # → auto-resolve ke provinsi (mis. "banten" → prov. banten)
-                    prov = prov_candidates[0]
-                    sub_levels = [c for c in candidates if c["level"] != "provinsi"]
-                    parsed["wilayah"] = prov["nama"]
-                    wilayah_level     = "provinsi"
-                    logger.info(
-                        "[LIST] Dominant prov auto-resolve: '%s' (%d desa-only sub-candidates ignored)",
-                        prov["nama"], len(sub_levels)
-                    )
-                    # Lanjutkan ke _build_query
-                else:
-                    # ── GUARD: jika intent sudah punya wilayah jelas, skip same-location ──
-                    _intent_wil_check = getattr(intent, "wilayah", None) if intent else None
-                    _intent_kab = getattr(_intent_wil_check, "kabupaten", None) if _intent_wil_check else None
-                    _intent_prov = getattr(_intent_wil_check, "provinsi", None) if _intent_wil_check else None
-                    if _intent_kab and _intent_kab.lower().strip() == wilayah_kw:
-                        # Intent sudah benar di level kabupaten, gunakan itu
-                        logger.info(
-                            "[LIST] same-location guard: intent.kabupaten='%s' matches wilayah_kw, skip",
-                            _intent_kab,
-                        )
-                        # wilayah_kw dan wilayah_level sudah benar, lanjutkan ke _build_query
-                    elif _intent_prov and _intent_prov.lower().strip() in wilayah_kw:
-                        # Intent di level provinsi (mis. "jakarta" → provinsi DKI Jakarta)
-                        parsed["wilayah"] = _intent_prov.lower().strip()
-                        wilayah_level = "provinsi"
-                        logger.info(
-                            "[LIST] same-location guard: intent.provinsi='%s', override ke provinsi",
-                            _intent_prov,
-                        )
-                    else:
-                        # ── SAME-LOCATION CHECK (logic lama) ─────────────
-                        # Jika semua candidates menunjuk ke kabupaten+kecamatan
-                        # yang sama (mis. desa Cisauk + kec. Cisauk di Kab. Tangerang)
-                        # → auto-resolve ke kecamatan (lebih luas = lebih useful)
-                        kab_vals = set(c.get("kabupaten", "").lower() for c in candidates if c.get("kabupaten"))
-                        kec_vals = set(c.get("kecamatan", "").lower() for c in candidates if c.get("kecamatan"))
-                        if len(kab_vals) == 1 and len(kec_vals) == 1:
-                            kec_name = list(kec_vals)[0]
-                            kec_clean = re.sub(r"^kec\.\s*", "", kec_name).strip()
-                            parsed["wilayah"] = kec_clean
-                            wilayah_level = "kecamatan"
-                            logger.info(
-                                "[LIST] Same-location auto-resolve: all candidates → kec '%s'",
-                                kec_clean
-                            )
-                            # Lanjutkan ke _build_query
-                        else:
-                            logger.info("[LIST] Multi-level clarification: wilayah=%s candidates=%d",
-                                        wilayah_kw, len(candidates))
-                            return {
-                                "status": "clarification", "intent": "school_list",
-                                "total": 0, "schools": [], "parsed": parsed,
-                                "wilayah_level": wilayah_level, "is_ambiguous": True,
-                                "keyword": wilayah_kw, "candidates": candidates,
-                            }
-
-        from app.services.core.es_query_builder import extract_filters_from_intent
-        _intent_filters = extract_filters_from_intent(intent)
-        if _intent_filters.get("bentuk_pendidikan") and not parsed.get("bentuk"):
-            parsed["bentuk"] = _intent_filters["bentuk_pendidikan"]
-        if _intent_filters.get("bentuk_pendidikan_in") and not parsed.get("bentuk_pendidikan_in"):
-            parsed["bentuk_pendidikan_in"] = _intent_filters["bentuk_pendidikan_in"]
-        if _intent_filters.get("akreditasi_exact") and not parsed.get("akreditasi"):
-            parsed["akreditasi"] = _intent_filters["akreditasi_exact"]
-        if _intent_filters.get("akreditasi_in") and not parsed.get("akreditasi_in"):
-            parsed["akreditasi_in"] = _intent_filters["akreditasi_in"]
-        if _intent_filters.get("status_sekolah") and not parsed.get("status"):
-            parsed["status"] = _intent_filters["status_sekolah"]
+        self._apply_filter_from_intent(parsed, intent)
 
         _qvec = None
         try:
@@ -926,68 +992,17 @@ class ListSchoolHandler:
         breakdown_jenjang, breakdown_status = extract_breakdowns(result)
         # Typo correction jika 0 hasil
         if total == 0 and wilayah_kw and not corrected_kw:
-            kw_main = _extract_main_keyword(query)
-            fuzzy   = _apply_typo_correction(kw_main or wilayah_kw, query.lower())
-            if fuzzy and fuzzy[0] != wilayah_kw:
-                corrected_name, corrected_level = fuzzy
-                logger.info("[LIST] Typo after 0 results: '%s' → '%s'", wilayah_kw, corrected_name)
-                parsed2 = dict(parsed)
-                parsed2["wilayah"] = corrected_name
-                q_low = query.lower()
-                if re.search(r"\bprovinsi\b", q_low):
-                    new_level = "provinsi"
-                elif re.search(r"\b(kabupaten|kab)\b", q_low):
-                    new_level = "kabupaten"
-                elif re.search(r"\bkota\b", q_low):
-                    new_level = "kabupaten"
-                elif re.search(r"\b(kecamatan|kec)\b", q_low):
-                    new_level = "kecamatan"
-                elif re.search(r"\b(desa|kelurahan)\b", q_low):
-                    new_level = "desa_kelurahan"
-                else:
-                    new_level = corrected_level
-                return await self._query_single_wilayah(
-                    query, parsed2, new_level, has_level_hint,
-                    original_kw=wilayah_kw, corrected_kw=corrected_name,
-                    intent=intent,
-                )
+            retry = await self._apply_typo_and_retry(
+                query, parsed, wilayah_kw, wilayah_level, has_level_hint, intent)
+            if retry is not None:
+                return retry
 
-        # ── SCATTERED CHECK ──────────────────────────────────────
-        # Untuk desa: cek SELALU (meski has_level_hint=True) karena
-        # nama desa bisa sama di banyak provinsi.
-        # Province check untuk semua desa (single-kata maupun multi-kata).
-        is_desa_level = (wilayah_level == "desa_kelurahan" and bool(wilayah_kw))
-        should_check_scattered = (not has_level_hint) or is_desa_level
+        scattered = self._build_scattered_result(
+            schools, wilayah_kw, wilayah_level, total, parsed, has_level_hint)
+        if scattered is not None:
+            return scattered
 
-        is_scattered = False
-        if should_check_scattered:
-            is_scattered = _check_ambiguous(
-                schools, wilayah_level,
-                min_distinct=3,
-                use_province_check=is_desa_level,
-            )
-
-        if is_scattered:
-            kw         = wilayah_kw or ""
-            candidates = _find_location_candidates(kw) if kw else []
-            logger.info("[LIST] Scattered: wilayah=%s candidates=%d", kw, len(candidates))
-            return {
-                "status": "clarification", "intent": "school_list",
-                "total": total, "schools": [], "parsed": parsed,
-                "wilayah_level": wilayah_level, "is_ambiguous": True,
-                "keyword": kw, "candidates": candidates,
-            }
-
-        # Tambahkan flag QC ke parsed agar narrator tahu ini query residu
-        _qc_masalah_only = getattr(intent, "qc_masalah_only", False) if intent else False
-        _qc_field        = getattr(intent, "qc_field", None) if intent else None
-        _qc_field_list   = getattr(intent, "qc_field_list", []) if intent else []
-        if _qc_masalah_only:
-            parsed = {**parsed, "qc_masalah_only": True}
-            if _qc_field:
-                parsed["qc_field"] = _qc_field
-        if _qc_field_list:
-            parsed["qc_field_list"] = _qc_field_list
+        parsed = self._apply_qc_flags(parsed, intent)
 
         response = {
             "status": "success", "intent": "school_list",

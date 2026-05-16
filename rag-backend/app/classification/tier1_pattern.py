@@ -47,6 +47,7 @@ _PATTERNS: list[tuple[str, str, float]] = [
 
     # --- GEO / NEARBY ---
     ("geo_terdekat",    r"\b(terdekat|paling dekat|dekat dengan|sekitar|radius)\b", 0.90),
+    ("geo_dari_posisi", r"\b(dari rumah saya|dari posisi saya|dari lokasi (saya|ini)|dari tempat saya)\b", 0.88),
     ("geo_koordinat",   r"\b(koordinat|latitude|longitude|lat\s*[\-\d]|lon\s*[\-\d])\b", 0.95),
     ("geo_landmark",    r"\b(dari|dekat)\s+\b(stasiun|terminal|bandara|mall|rumah sakit|"
                         r"kantor|masjid|gereja|monas|bundaran)\b", 0.85),

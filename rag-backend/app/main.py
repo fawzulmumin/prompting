@@ -29,11 +29,12 @@ from pydantic import BaseModel, Field, field_validator  # noqa: F401 — kept fo
 
 from app.api.models import AskRequest, AskResponse  # noqa: E402
 from app.api.stream import router as stream_router
+from app.api.routes.health import router as health_router
 from app.services.core.ask_pipeline import run_ask_pipeline
 from app.utils.task_queue import get_task_queue
 
 from elasticsearch import AsyncElasticsearch
-from elasticsearch.exceptions import ConnectionError as ESConnectionError
+
 
 # ── ROUTING: satu sistem, LLM-based ──────────────────────────────────────────
 from app.services.core.cognitive_router import (
@@ -102,7 +103,7 @@ from app.services.search.search_service import (
 # ── INFRA ─────────────────────────────────────────────────────────────────────
 from app.services.location_service import initialize_location_index
 from app.services.rate_limit_service import check_rate_limit
-from app.services.embedding_service import get_embedding_model, get_embedding_cache_stats, EMBEDDING_ENABLED
+from app.services.embedding_service import get_embedding_model
 from app.services.confidence_engine import compute_rag_confidence, compute_aggregation_confidence
 from app.router import route_with_fallback
 from app.providers.deepseek import close_deepseek_client
@@ -153,6 +154,9 @@ async def lifespan(app: FastAPI):
         await initialize_location_index(es_client)
         await asyncio.to_thread(build_reference_locations)
         await get_task_queue().start()
+        from app.utils.arq_pool import get_arq_pool
+        await get_arq_pool()
+        logger.info("[MAIN] arq pool initialized")
         logger.info("All services initialized")
     except Exception as e:
         logger.error(f"Startup init failed: {e}", exc_info=True)
@@ -160,6 +164,11 @@ async def lifespan(app: FastAPI):
     yield
     logger.info("Shutting down...")
     await asyncio.sleep(1)
+    try:
+        from app.utils.arq_pool import close_arq_pool
+        await close_arq_pool()
+    except Exception as e:
+        logger.warning(f"Error closing arq pool: {e}")
     try:
         await get_task_queue().stop()
         logger.info("TaskQueue stopped")
@@ -201,6 +210,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(stream_router)
+app.include_router(health_router)
 
 # =================================================
 # HELPERS
@@ -345,12 +355,23 @@ async def ask_question(
     for func, args, kwargs in result.pop("_bg_tasks", []):
         background_tasks.add_task(func, *args, **kwargs)
     bg_trigger = result.pop("_bg_trigger", None)
-    tq = get_task_queue()
-    for func, args, kwargs in result.pop("_bg_queue", []):
-        await tq.enqueue(func(*args, **kwargs))
-    if bg_trigger:
-        from app.background.trigger import trigger_background_jobs
-        await trigger_background_jobs(bg_trigger, background_tasks)
+    try:
+        from app.utils.arq_pool import get_arq_pool
+        pool = await get_arq_pool()
+        for func, args, kwargs in result.pop("_bg_queue", []):
+            job_name = f"job_{func.__name__}"
+            try:
+                await pool.enqueue_job(job_name, *args, **kwargs)
+            except Exception as e:
+                logger.warning("[MAIN] arq enqueue failed for %s: %s", job_name, e)
+        if bg_trigger:
+            try:
+                await pool.enqueue_job("job_trigger_background_jobs", payload=bg_trigger)
+            except Exception as e:
+                logger.warning("[MAIN] arq trigger enqueue failed: %s", e)
+    except Exception as e:
+        logger.warning("[MAIN] arq pool unavailable, dropping bg_queue: %s", e)
+        result.pop("_bg_queue", None)
 
     clean = {k: v for k, v in result.items() if not k.startswith("_")}
     return AskResponse(**clean)
@@ -399,16 +420,6 @@ async def ooc_alerts(_=Depends(_require_report_key)):
     except Exception as e:
         return {"error": str(e)}
     return {"total": len(alerts), "alerts": alerts[-50:]}
-
-
-@app.get("/health")
-async def health_check():
-    embed_cache = get_embedding_cache_stats() if EMBEDDING_ENABLED else {"status": "disabled"}
-    try:
-        await es_client.ping(request_timeout=2)
-        return {"status": "UP", "embedding_cache": embed_cache}
-    except ESConnectionError:
-        return JSONResponse(status_code=503, content={"status": "DOWN", "embedding_cache": embed_cache})
 
 
 # ========== MAIN ==========

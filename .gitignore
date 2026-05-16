@@ -1,14 +1,7 @@
-# Claude settings
-.claude/
-
 # OS
 .DS_Store
 Thumbs.db
 
-CLAUDE.md
-
-# Kubernetes secrets — template (k8s/secret-*.yaml) aman di-commit karena hanya berisi
-# placeholder. Gitignore ini mencegah commit accidental setelah placeholder diisi nilai asli.
-# Jika ingin commit template baru, gunakan: git add -f k8s/secret-*.yaml
+# Kubernetes secrets
 k8s/secret-backend.yaml
 k8s/secret-middleware.yaml

@@ -6,7 +6,10 @@ uvicorn==0.40.0
 elasticsearch==8.12.0
 
 # Redis Client
-redis==7.1.0
+redis==5.3.1
+
+# Async job queue (arq — Redis-backed, guarantee delivery on restart)
+arq==0.28.0
 
 # NLP & Embeddings (untuk ingestion dan runtime)
 sentence-transformers==5.2.2

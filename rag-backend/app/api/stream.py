@@ -86,22 +86,30 @@ async def ask_stream_generator(
             yield_queue.put_nowait({"_error": f"Pipeline error: {e}"})
             return
 
-        # Non-critical background tasks — fire-and-forget via asyncio
-        for func, args, kwargs in result.pop("_bg_queue", []):
-            try:
-                asyncio.create_task(func(*args, **kwargs))
-            except Exception:
-                pass
+        # Dispatch _bg_queue via arq (guaranteed delivery on Redis)
+        bg_trigger = result.pop("_bg_trigger", None)
+        try:
+            from app.utils.arq_pool import get_arq_pool
+            pool = await get_arq_pool()
+            for func, args, kwargs in result.pop("_bg_queue", []):
+                job_name = f"job_{func.__name__}"
+                try:
+                    await pool.enqueue_job(job_name, *args, **kwargs)
+                except Exception as e:
+                    logger.warning("[Stream] arq enqueue failed for %s: %s", job_name, e)
+            if bg_trigger:
+                try:
+                    await pool.enqueue_job("job_trigger_background_jobs", payload=bg_trigger)
+                except Exception as e:
+                    logger.warning("[Stream] arq trigger enqueue failed: %s", e)
+        except Exception as e:
+            logger.warning("[Stream] arq pool unavailable, dropping bg_queue: %s", e)
+            result.pop("_bg_queue", None)
+
+        # _bg_tasks remain fire-and-forget (save_chat_history via asyncio)
         for func, args, kwargs in result.pop("_bg_tasks", []):
             try:
                 asyncio.create_task(func(*args, **kwargs))
-            except Exception:
-                pass
-        bg_trigger = result.pop("_bg_trigger", None)
-        if bg_trigger:
-            try:
-                from app.background.trigger import trigger_background_jobs
-                asyncio.create_task(trigger_background_jobs(bg_trigger))
             except Exception:
                 pass
 

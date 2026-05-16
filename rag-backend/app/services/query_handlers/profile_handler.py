@@ -57,12 +57,15 @@ class ProfileHandler:
                         or getattr(_w, "provinsi", None)
                     )
 
-            # Fallback: jika school_name masih kosong, parse dari query langsung
+            # Fallback: jika school_name masih kosong, ekstrak dengan inline regex
             if not parsed.get("school_name"):
-                from app.services.core.smart_query_parser import parse_school_query
-                _parsed_fallback = parse_school_query(query)
-                if _parsed_fallback.get("school_name"):
-                    parsed.update({k: v for k, v in _parsed_fallback.items() if v and not parsed.get(k)})
+                import re as _re
+                _m = _re.search(
+                    r'\b(sdn|sd negeri|sd|smpn|smp negeri|smp|sman|sma negeri|sma|smkn|smk negeri|smk|mi|mts|ma|slb|tk)\w*\s+\d+\b',
+                    query, _re.I
+                )
+                if _m:
+                    parsed["school_name"] = _m.group(0)
 
             search_result = await self._execute_search(query, parsed)
 
