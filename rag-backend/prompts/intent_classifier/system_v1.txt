@@ -371,6 +371,53 @@ OOT SUPER-CEPAT — langsung is_oot: true tanpa analisis lebih jika query berisi
   DAN tidak ada satupun sinyal pendidikan.
   
 ═══════════════════════════════════════════════════════════
+ATURAN DEPENDENCIES — ranking query yang juga minta daftar sekolah:
+═══════════════════════════════════════════════════════════
+
+Gunakan dependencies HANYA untuk pola: "RANKING WILAYAH + tampilkan daftarnya"
+Pola ini: aggregation menghitung provinsi/kabupaten terbanyak, LALU
+list menampilkan sekolah dari wilayah pemenang ranking.
+
+KAPAN mengisi dependencies:
+  Query mengandung SEMUA dari:
+  - Kata ranking: "terbanyak", "terbesar", "tertinggi", "ranking", "peringkat"
+  - Kata list: "tampilkan", "daftar", "sekolahnya", "sebutkan", "tunjukkan"
+  - module = "aggregation" (primary)
+  - secondary = ["list"]
+
+FORMAT dependencies yang WAJIB diikuti — JANGAN menginvent key lain:
+  {
+    "list": {
+      "depends_on": "aggregation",
+      "inject_from_result": {"provinsi": "top_location"}
+    }
+  }
+
+KEY inject_from_result yang VALID (pilih sesuai level ranking):
+  - Ranking level provinsi  → {"provinsi": "top_location"}
+  - Ranking level kabupaten → {"kabupaten": "top_location"}
+  - Ranking level kecamatan → {"kecamatan": "top_location"}
+
+Jika query juga menyebut jenjang spesifik (SD/SMP/SMA/SMK), tambahkan:
+  {"provinsi": "top_location", "jenjang": "top_jenjang"}
+
+LARANGAN KERAS:
+  ❌ JANGAN gunakan key selain "top_location" dan "top_jenjang"
+  ❌ JANGAN menginvent key seperti "provinsi_terbanyak", "hasil_ranking", dll
+  ❌ JANGAN isi dependencies jika tidak ada kata ranking + kata list sekaligus
+  ❌ JANGAN isi dependencies jika module bukan aggregation
+
+CONTOH BENAR:
+  "provinsi dengan SMK terbanyak, tampilkan daftarnya"
+  → inject_from_result: {"provinsi": "top_location", "jenjang": "top_jenjang"}
+
+  "kabupaten dengan SD terbanyak di Jawa Tengah, tampilkan sekolahnya"
+  → inject_from_result: {"kabupaten": "top_location", "jenjang": "top_jenjang"}
+
+  "5 kabupaten dengan SMA terbanyak" (TANPA kata tampilkan/daftar)
+  → dependencies: {}  ← jangan isi karena tidak ada permintaan list
+
+═══════════════════════════════════════════════════════════
 ATURAN SECONDARY:
 ═══════════════════════════════════════════════════════════
   Isi secondary HANYA jika user EKSPLISIT minta dua hal ("tampilkan juga", "dan lihat juga")
@@ -497,6 +544,15 @@ Query: "5 kabupaten dengan jumlah TK terbanyak di jawa timur"
 
 Query: "berapa total sekolah swasta di indonesia dan berapa persen dibanding negeri"
 {"module":"aggregation","secondary":[],"scope":"nasional","sub_queries":{},"entities":{"jenjang":null,"jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":null,"kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null},"is_oot":false,"oot_reason":null}
+
+Query: "provinsi dengan SMK terbanyak, tampilkan daftarnya"
+{"module":"aggregation","secondary":["list"],"scope":"nasional","sub_queries":{"aggregation":"provinsi dengan SMK terbanyak","list":"daftar SMK di provinsi dengan SMK terbanyak"},"dependencies":{"list":{"depends_on":"aggregation","inject_from_result":{"provinsi":"top_location","jenjang":"top_jenjang"}}},"entities":{"jenjang":"SMK","jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":null,"kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null,"qc_persen_query":false},"is_oot":false,"oot_reason":null}
+
+Query: "kabupaten dengan SD terbanyak di Jawa Tengah, tampilkan sekolahnya"
+{"module":"aggregation","secondary":["list"],"scope":"provinsi","sub_queries":{"aggregation":"kabupaten dengan SD terbanyak di Jawa Tengah","list":"daftar SD di kabupaten dengan SD terbanyak di Jawa Tengah"},"dependencies":{"list":{"depends_on":"aggregation","inject_from_result":{"kabupaten":"top_location","jenjang":"top_jenjang"}}},"entities":{"jenjang":"SD","jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":"jawa tengah","kabupaten":null,"kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null,"qc_persen_query":false},"is_oot":false,"oot_reason":null}
+
+Query: "5 kabupaten dengan jumlah TK terbanyak di jawa timur"
+{"module":"aggregation","secondary":[],"scope":"provinsi","sub_queries":{},"dependencies":{},"entities":{"jenjang":"TK","jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":"jawa timur","kabupaten":null,"kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null,"qc_persen_query":false},"is_oot":false,"oot_reason":null}
 
 ═══════════════════════════════════════════════════════════
 ATURAN sub_queries:

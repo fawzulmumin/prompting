@@ -842,7 +842,12 @@ async def handle_aggregation_query(
                 es_client, group_field=level, size=_sz, jenjang_filter=_jf
             )
             if buckets:
-                return _format_ranking_result(query, buckets, confidence=0.85, jenjang=_jf)
+                result = _format_ranking_result(query, buckets, confidence=0.85, jenjang=_jf)
+                logger.info(
+                    "[AGG] pure_ranking result: top_location=%s top_level=%s top_jenjang=%s",
+                    result.get("top_location"), result.get("top_level"), result.get("top_jenjang"),
+                )
+                return result
     # ── Fallback: intent=None → assume nasional scope ────────────────────────
     if intent is None:
         from app.services.core.cognitive_router import CognitiveIntent, WilayahEntities

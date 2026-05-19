@@ -64,14 +64,23 @@ def _format_qc_status(value) -> str:
     return v_str
 
 
+def _has_any(d: dict) -> bool:
+    """True jika ada field non-None dalam dict."""
+    return any(v is not None for v in d.values())
+
+
 def format_profile_markdown(profile: dict) -> str:
-    identitas  = profile.get("identitas", {})
-    lokasi     = profile.get("lokasi", {})
-    kontak     = profile.get("kontak", {})
-    infra      = profile.get("infrastruktur", {})
+    identitas   = profile.get("identitas", {})
+    lokasi      = profile.get("lokasi", {})
+    kontak      = profile.get("kontak", {})
+    infra       = profile.get("infrastruktur", {})
     kepemilikan = profile.get("kepemilikan", {})
-    legalitas  = profile.get("legalitas", {})
-    qc         = profile.get("kualitas_data", {})
+    legalitas   = profile.get("legalitas", {})
+    qc          = profile.get("kualitas_data", {})
+    siswa       = profile.get("siswa", {})
+    guru        = profile.get("guru", {})
+    tendik      = profile.get("tendik", {})
+    sarana      = profile.get("sarana_prasarana", {})
 
     # ── Identitas ──────────────────────────────────────────────────────────────
     markdown = f"""### Profil Sekolah Lengkap
@@ -125,9 +134,60 @@ def format_profile_markdown(profile: dict) -> str:
 - **Tanggal SK Izin Operasional:** {safe_count(legalitas.get("tanggal_sk_izin_operasional"))}
 
 ---
-
-## Kualitas Data
 """
+
+    # ── Peserta Didik ──────────────────────────────────────────────────────────
+    if _has_any(siswa):
+        markdown += "\n## Peserta Didik\n"
+        markdown += f"- **Total Siswa:** {safe_count(siswa.get('total'))}\n"
+        markdown += f"- **Laki-laki / Perempuan:** {safe_count(siswa.get('laki_laki'))} / {safe_count(siswa.get('perempuan'))}\n"
+        if siswa.get("baru_laki") is not None or siswa.get("baru_perempuan") is not None:
+            markdown += f"- **Siswa Baru L/P:** {safe_count(siswa.get('baru_laki'))} / {safe_count(siswa.get('baru_perempuan'))}\n"
+        if siswa.get("lulus_laki") is not None or siswa.get("lulus_perempuan") is not None:
+            markdown += f"- **Lulusan L/P:** {safe_count(siswa.get('lulus_laki'))} / {safe_count(siswa.get('lulus_perempuan'))}\n"
+        markdown += "\n---\n"
+
+    # ── Guru & Tendik ──────────────────────────────────────────────────────────
+    if _has_any(guru) or _has_any(tendik):
+        markdown += "\n## Guru & Tenaga Kependidikan\n"
+        if _has_any(guru):
+            markdown += f"- **Total Guru:** {safe_count(guru.get('total'))}\n"
+            markdown += f"- **Guru L/P:** {safe_count(guru.get('laki_laki'))} / {safe_count(guru.get('perempuan'))}\n"
+            if guru.get("pns") is not None:
+                markdown += f"- **PNS:** {safe_count(guru.get('pns'))}\n"
+            if guru.get("p3k") is not None:
+                markdown += f"- **P3K:** {safe_count(guru.get('p3k'))}\n"
+            if guru.get("honor") is not None:
+                markdown += f"- **Honorer:** {safe_count(guru.get('honor'))}\n"
+            if guru.get("sertifikasi") is not None:
+                markdown += f"- **Bersertifikasi:** {safe_count(guru.get('sertifikasi'))}\n"
+            if guru.get("s1_keatas") is not None:
+                markdown += f"- **Pendidikan S1+:** {safe_count(guru.get('s1_keatas'))}\n"
+        if _has_any(tendik):
+            markdown += f"- **Tendik L/P:** {safe_count(tendik.get('laki_laki'))} / {safe_count(tendik.get('perempuan'))}\n"
+            if tendik.get("total") is not None:
+                markdown += f"- **Total Tendik:** {safe_count(tendik.get('total'))}\n"
+        markdown += "\n---\n"
+
+    # ── Sarana & Prasarana ─────────────────────────────────────────────────────
+    if _has_any(sarana):
+        markdown += "\n## Sarana & Prasarana\n"
+        if sarana.get("tipe_jamban") is not None:
+            markdown += f"- **Tipe Jamban:** {safe_count(sarana.get('tipe_jamban'))}\n"
+        if sarana.get("kecukupan_air") is not None:
+            markdown += f"- **Kecukupan Air:** {safe_count(sarana.get('kecukupan_air'))}\n"
+        if sarana.get("sumber_air") is not None:
+            markdown += f"- **Sumber Air:** {safe_count(sarana.get('sumber_air'))}\n"
+        if sarana.get("minum_siswa") is not None:
+            markdown += f"- **Unit Air Minum:** {safe_count(sarana.get('minum_siswa'))}\n"
+        if sarana.get("toilet_laki") is not None or sarana.get("toilet_perempuan") is not None:
+            markdown += f"- **Toilet L/P:** {safe_count(sarana.get('toilet_laki'))} / {safe_count(sarana.get('toilet_perempuan'))}\n"
+        if sarana.get("total_komputer") is not None:
+            markdown += f"- **Komputer:** {safe_count(sarana.get('total_komputer'))}\n"
+        markdown += "\n---\n"
+
+    # ── Kualitas Data ──────────────────────────────────────────────────────────
+    markdown += "\n## Kualitas Data\n"
 
     # Baris ringkasan skor QC
     persen_bersih  = qc.get("persen_bersih")

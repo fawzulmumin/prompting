@@ -469,14 +469,20 @@ def _keyword_fallback(query: str) -> CognitiveIntent:
     # Pattern: terbanyak/tertinggi/terbesar/ranking + tampilkan/daftar/list/sekolahnya
     # → aggregation feeds list via top_location injection
     # ═══════════════════════════════════════════════════════════════
-    _RANKING_DEP = {"terbanyak", "tertinggi", "terbesar"}
-    _LIST_DEP    = {"tampilkan", "daftar", "list", "sekolahnya", "sebutkan"}
+    _RANKING_DEP = {
+        "terbanyak", "tertinggi", "terbesar", "terkecil", "terendah",
+        "ranking", "peringkat", "teratas",
+    }
+    _LIST_DEP = {
+        "tampilkan", "daftar", "list", "sekolahnya", "sebutkan",
+        "tunjukkan", "lihat", "cari", "apa saja", "mana saja",
+        "sekolah apa", "sekolah mana",
+    }
     _has_ranking_dep = any(w in q for w in _RANKING_DEP) or bool(_re.search(r'\branking\b', q))
-    _has_list_dep    = any(w in q for w in _LIST_DEP)
+    _has_list_dep    = any(w in q for w in _LIST_DEP) or "list" in secondary
 
     dependencies: Dict[str, Dict[str, Any]] = {}
-    if _has_ranking_dep and _has_list_dep:
-        module = "aggregation"
+    if _has_ranking_dep and _has_list_dep and module == "aggregation":
         if "list" not in secondary:
             secondary.append("list")
 
@@ -497,6 +503,10 @@ def _keyword_fallback(query: str) -> CognitiveIntent:
                 "inject_from_result": _inject_map,
             }
         }
+        logger.info(
+            "[keyword_fallback] dependency detected: rank_level=%s inject_map=%s",
+            _rank_level, _inject_map,
+        )
         if not _sub_queries:
             _sub_queries = {"aggregation": query, "list": query}
 

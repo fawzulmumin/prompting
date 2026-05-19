@@ -162,8 +162,11 @@ def fetch_agent_batch(
 ) -> Dict[str, Dict[str, Any]]:
     """
     Ambil data numerik terbaru dari idx_prompting_agent per batch NPSN.
-    Menggunakan search+terms+collapse bukan mget karena _id di agent bukan NPSN.
-    collapse per npsn + sort tahun DESC, semester_id DESC → ambil semester terbaru.
+
+    FIX v2: Ganti collapse+size approach dengan search tanpa collapse,
+    lalu deduplicate manual per npsn (ambil tahun+semester terbaru).
+    collapse+size tidak menjamin return N unique NPSN karena collapse
+    bekerja setelah scoring, bukan sebagai pre-filter.
     """
     if not npsns:
         return {}
@@ -171,23 +174,34 @@ def fetch_agent_batch(
         resp = es.search(
             index=AGENT_INDEX,
             body={
-                "size": len(npsns),
+                "size": len(npsns) * 5,  # buffer: max 5 semester per sekolah
                 "query": {"bool": {"filter": [{"terms": {"npsn": npsns}}]}},
-                "collapse": {"field": "npsn"},
                 "sort": [
                     {"tahun": {"order": "desc"}},
                     {"semester_id": {"order": "desc"}},
                 ],
-                "_source": AGENT_FIELDS,
+                "_source": AGENT_FIELDS + ["npsn"],
             },
         )
+
+        # Deduplicate: untuk setiap npsn, ambil yang pertama (tahun+semester terbaru)
         result: Dict[str, Dict[str, Any]] = {}
         for hit in resp.get("hits", {}).get("hits", []):
             src = hit.get("_source", {})
             npsn = src.get("npsn")
-            if npsn:
-                result[npsn] = src
+            if npsn and npsn not in result:
+                result[npsn] = {k: v for k, v in src.items() if k in AGENT_FIELDS}
+
+        missing = set(npsns) - set(result.keys())
+        if missing:
+            logger.debug(
+                "[SYNC] %d NPSN tidak ditemukan di agent (sekolah baru/belum ada data): %s...",
+                len(missing),
+                list(missing)[:3],
+            )
+
         return result
+
     except Exception as exc:
         logger.warning("[SYNC] fetch_agent_batch error: %s", exc)
         return {}
@@ -265,7 +279,10 @@ def process_batch(
 
     # FIXED: search+terms+collapse bukan mget (karena _id di agent bukan NPSN)
     agent_lookup = fetch_agent_batch(es, npsns)
-    logger.debug("[SYNC] agent_lookup hits: %d / %d", len(agent_lookup), len(npsns))
+    logger.info(
+        "[SYNC] agent_lookup: %d/%d NPSN ditemukan di agent",
+        len(agent_lookup), len(npsns),
+    )
 
     # Merge + bulk
     actions = []

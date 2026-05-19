@@ -168,6 +168,41 @@ async def classify_and_extract(
     except Exception as _lr_exc:
         logger.warning("[LocationResolver] skipped: %s", _lr_exc)
 
+    # ── Validate dependencies inject_from_result ─────────────────────────────
+    # Guard: jika LLM menginvent key yang tidak ada di return value handler,
+    # re-generate dependencies dari keyword_fallback yang sudah terbukti benar.
+    _VALID_RESULT_KEYS   = {"top_location", "top_jenjang", "top_level"}
+    _VALID_INJECT_FIELDS = {"provinsi", "kabupaten", "kecamatan", "desa", "jenjang"}
+    _deps = getattr(intent, "dependencies", {}) or {}
+    _deps_invalid = False
+    for _dep_module, _dep_cfg in _deps.items():
+        _inject_map = (_dep_cfg or {}).get("inject_from_result", {})
+        for _intent_field, _result_key in _inject_map.items():
+            if _result_key not in _VALID_RESULT_KEYS or _intent_field not in _VALID_INJECT_FIELDS:
+                logger.warning(
+                    "[CognitiveRouter] invalid inject_from_result: "
+                    "field=%r key=%r — will re-generate from keyword_fallback",
+                    _intent_field, _result_key,
+                )
+                _deps_invalid = True
+                break
+
+    if _deps_invalid:
+        _fb_intent = _keyword_fallback(query)
+        if _fb_intent.dependencies:
+            intent.dependencies = _fb_intent.dependencies
+            for _dep_mod in _fb_intent.dependencies:
+                if _dep_mod not in intent.secondary:
+                    intent.secondary.append(_dep_mod)
+            logger.info(
+                "[CognitiveRouter] dependencies overridden from keyword_fallback: %s",
+                intent.dependencies,
+            )
+        else:
+            intent.dependencies = {}
+            logger.info("[CognitiveRouter] dependencies cleared (no valid fallback)")
+    # ─────────────────────────────────────────────────────────────────────────
+
     # Cache write
     if use_cache:
         try:

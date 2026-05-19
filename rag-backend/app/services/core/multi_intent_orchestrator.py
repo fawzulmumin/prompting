@@ -312,24 +312,40 @@ def _build_injected_intent(original_intent, parent_result: dict, inject_map: dic
 
     _DIRECT_INTENT_FIELDS = {"jenjang"}
 
+    injected_any = False
     for field_name, result_key in inject_map.items():
         injected_value = parent_result.get(result_key)
         if not injected_value:
+            logger.warning(
+                "[Orchestrator] inject_from_result: key=%r not found in parent_result "
+                "(available keys: %s)",
+                result_key,
+                list(parent_result.keys()),
+            )
             continue
 
         if field_name in _DIRECT_INTENT_FIELDS:
             setattr(new_intent, field_name, str(injected_value))
             logger.info(
-                "[Orchestrator] inject direct field: intent.%s = %r",
+                "[Orchestrator] inject direct: intent.%s = %r",
                 field_name, injected_value,
             )
+            injected_any = True
         elif hasattr(new_intent.wilayah, field_name):
             setattr(new_intent.wilayah, field_name, str(injected_value).lower())
             new_intent.scope = field_name
             logger.info(
-                "[Orchestrator] inject wilayah field: intent.wilayah.%s = %r, scope=%s",
+                "[Orchestrator] inject wilayah: intent.wilayah.%s = %r, scope=%s",
                 field_name, injected_value, field_name,
             )
+            injected_any = True
+
+    if not injected_any:
+        logger.warning(
+            "[Orchestrator] _build_injected_intent: no field injected! "
+            "inject_map=%s parent_result_keys=%s",
+            inject_map, list(parent_result.keys()),
+        )
 
     return new_intent
 
