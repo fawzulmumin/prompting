@@ -8,7 +8,26 @@ Output: dict ES query siap kirim
 import logging
 from typing import Dict, Any, List, Optional
 
+from app.services.core.aggregation_core import PULAU_PROVINSI_MAP
+
 logger = logging.getLogger(__name__)
+
+_INFRASTRUKTUR_FILTER_MAP: Dict[str, Dict] = {
+    "tidak_ada_internet": {
+        "bool": {
+            "should": [
+                {"bool": {"must_not": [{"exists": {"field": "akses_internet"}}]}},
+                {"term": {"akses_internet": "Tidak Ada"}},
+            ],
+            "minimum_should_match": 1,
+        }
+    },
+    "tidak_ada_listrik": {
+        "bool": {"must_not": [{"exists": {"field": "sumber_listrik"}}]}
+    },
+    "komputer_minim": {"range": {"total_komputer": {"lte": 5}}},
+    "tidak_ada_toilet": {"range": {"toilet_siswa_laki": {"lte": 0}}},
+}
 
 
 def _build_provinsi_filter(provinsi_value: str) -> dict:
@@ -97,6 +116,9 @@ def build_wilayah_filter(intent) -> List[Dict]:
         filters.append({"term": {"kabupaten": wil.kabupaten.lower()}})
     elif wil.provinsi:
         filters.append(_build_provinsi_filter(wil.provinsi.lower()))
+    elif getattr(wil, "pulau", None) and wil.pulau in PULAU_PROVINSI_MAP:
+        filters.append({"terms": {"provinsi": PULAU_PROVINSI_MAP[wil.pulau]}})
+        logger.debug("[ES_BUILDER] pulau filter: %s → %d provinsi", wil.pulau, len(PULAU_PROVINSI_MAP[wil.pulau]))
     # scope nasional → tidak ada filter wilayah
 
     return filters
@@ -260,6 +282,11 @@ def build_es_query(
     # ── QC Filter ──
     qc_filters = build_qc_filter(intent)
     hard_filters.extend(qc_filters)
+
+    # ── Infrastruktur Filter ──
+    _infra = getattr(intent, "infrastruktur_filter", None)
+    if _infra and _infra in _INFRASTRUKTUR_FILTER_MAP:
+        hard_filters.append(_INFRASTRUKTUR_FILTER_MAP[_infra])
 
     # ── Nama Sekolah → SCORING ──
     if intent.nama_sekolah:
@@ -624,7 +651,8 @@ def extract_filters_from_intent(intent) -> Dict[str, Any]:
         elif mode == "exclude":
             filters["akreditasi_exclude"] = intent.akreditasi
         elif intent.akreditasi in ("TT", "BELUM"):
-            filters["akreditasi_in"] = ["TT", "Belum", "belum terakreditasi", "-"]
+            # ES menyimpan sekolah tidak terakreditasi sebagai "Tidak Terakreditasi"
+            filters["akreditasi_exact"] = "Tidak Terakreditasi"
         else:
             filters["akreditasi_exact"] = intent.akreditasi
 
@@ -649,6 +677,9 @@ def extract_filters_from_intent(intent) -> Dict[str, Any]:
 
     if getattr(intent, "qc_persen_max", None) is not None:
         filters["qc_persen_max"] = float(intent.qc_persen_max)
+
+    if getattr(intent, "infrastruktur_filter", None):
+        filters["infrastruktur_filter"] = intent.infrastruktur_filter
 
     return filters
 

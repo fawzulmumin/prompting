@@ -17,6 +17,7 @@ from app.services.core.aggregation_core import (
     normalize_entity_hierarchy,
     execute_nested_aggregation_query,
     _build_provinsi_filter,
+    build_metric_aggs,
 )
 from app.services.query_handlers import profile_handler
 from app.services.core.es_query_builder import extract_filters_from_intent
@@ -272,10 +273,21 @@ def _build_kabupaten_filter(val: str) -> dict:
     }
 
 
+_COMPARISON_METRIC_LABEL: Dict[str, str] = {
+    "siswa":             "Jumlah Siswa",
+    "guru":              "Jumlah Guru",
+    "guru_honor":        "Guru Honorer",
+    "guru_sertifikasi":  "Guru Bersertifikasi",
+    "guru_s1":           "Guru S1+",
+    "tendik":            "Tenaga Kependidikan",
+}
+
+
 def _build_comparison_agg_query(
     entities: dict,
     jenjang: str = None,
     qf: dict = None,
+    metric_target: str = None,
 ) -> dict:
     import json as _json
     filters = []
@@ -321,15 +333,10 @@ def _build_comparison_agg_query(
         elif qf.get("qc_persen_min") is not None:
             filters.append({"range": {"qc_score.persen_bersih": {"gte": float(qf["qc_persen_min"])}}})
 
-    # pakai npsn langsung (karena sudah keyword)
-    count_field = "npsn"
-
     query_body = {
         "size": 0,
         "query": {"bool": {"filter": filters}},
-        "aggs": {
-            "total_sekolah": {"value_count": {"field": count_field}},
-        }
+        "aggs": build_metric_aggs(metric_target),
     }
     logger.debug("[COMPARISON_AGG] ES query: %s", _json.dumps(query_body, default=str)[:800])
     return query_body
@@ -394,7 +401,8 @@ async def _fetch_location_data(
         normalized["akreditasi_exact"] = qf["akreditasi_exact"]
 
     jenjang = qf.get("bentuk_pendidikan")
-    agg_query = _build_comparison_agg_query(entities, jenjang, qf=qf)
+    metric_target = getattr(intent, "metric_target", None)
+    agg_query = _build_comparison_agg_query(entities, jenjang, qf=qf, metric_target=metric_target)
 
     es_result = await es_client.search(
         index=os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc"),
@@ -402,12 +410,13 @@ async def _fetch_location_data(
     )
 
     aggs = es_result.get("aggregations", {})
-    total_sekolah = aggs.get("total_sekolah", {}).get("value", 0)
+    _agg_bucket = aggs.get("main_metric") or aggs.get("total_sekolah") or {}
+    total_value = int(_agg_bucket.get("value") or 0)
     display_value = get_display_value(entities)
 
     return {
         "value": display_value,
-        "count": total_sekolah,
+        "count": total_value,
         "entities": entities,
     }
 
@@ -415,23 +424,35 @@ async def _fetch_location_data(
 def _build_comparison_markdown(
     results: List[Dict[str, Any]],
     jenjang_label: Optional[str] = None,
+    metric_target: Optional[str] = None,
 ) -> str:
     """
     Build perbandingan markdown from sorted results list.
     Each result must have keys: 'value', 'count'.
     """
-    if jenjang_label:
+    metric_label = _COMPARISON_METRIC_LABEL.get(metric_target or "", "")
+
+    if metric_label:
+        header_suffix = f"{jenjang_label} " if jenjang_label else ""
+        markdown = f"### Perbandingan {metric_label} {header_suffix}\n\n".rstrip() + "\n\n"
+        unit = metric_label.lower()
+    elif jenjang_label:
         markdown = f"### Perbandingan Sekolah {jenjang_label}\n\n"
+        unit = "sekolah"
     else:
         markdown = "### Perbandingan Jumlah Sekolah\n\n"
+        unit = "sekolah"
 
     for r in results:
         label = format_location(r["value"])
-        markdown += f"- {label}: **{r['count']:,} sekolah**\n"
+        markdown += f"- {label}: **{r['count']:,} {unit}**\n"
 
     best_label = format_location(results[0]["value"])
     markdown += f"\n---\n"
-    markdown += f"Wilayah dengan sekolah terbanyak adalah **{best_label}**."
+    if metric_label:
+        markdown += f"Wilayah dengan {unit} terbanyak adalah **{best_label}**."
+    else:
+        markdown += f"Wilayah dengan sekolah terbanyak adalah **{best_label}**."
     return markdown
 
 
@@ -645,8 +666,9 @@ async def handle_comparison_query(
     qf = filters or extract_filters_from_intent(intent)
     jenjang = qf.get("bentuk_pendidikan")
     jenjang_label = jenjang.upper() if jenjang else None
+    metric_target = getattr(intent, "metric_target", None)
 
-    markdown = _build_comparison_markdown(results, jenjang_label=jenjang_label)
+    markdown = _build_comparison_markdown(results, jenjang_label=jenjang_label, metric_target=metric_target)
     total_hits = sum(r["count"] for r in results)
  
     confidence = compute_comparison_confidence(

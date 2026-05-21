@@ -29,7 +29,9 @@ from app.services.core.result_model import ResultStatus, build_result
 def mock_es():
     es = AsyncMock()
     es.search.return_value = {
+        "hits": {"total": {"value": 1500}},
         "aggregations": {
+            "main_metric": {"value": 1500},
             "total": {"value": 1500},
             "by_status": {"buckets": [
                 {"key": "NEGERI", "doc_count": 900},

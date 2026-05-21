@@ -330,6 +330,8 @@ def _prompt_aggregation(
     jenjang_requested: Optional[List[str]] = None,
     metric_target: Optional[str] = None,
     metric_label: str = "satuan pendidikan",
+    distribusi: Optional[list] = None,
+    distribusi_field: Optional[str] = None,
 ) -> str:
     status_info   = f" ({status_filter})" if status_filter else ""
     konteks_bench = _benchmark_label(total, level)
@@ -508,6 +510,25 @@ def _prompt_aggregation(
             f"\n- Persentase yang memenuhi filter: {pct_of_total}%"
         )
 
+    # ── Distribusi section ────────────────────────────────────────────────────
+    distribusi_section = ""
+    if distribusi and distribusi_field:
+        _DIST_LABELS = {
+            "sumber_listrik":      "Sumber Listrik",
+            "akses_internet":      "Akses Internet",
+            "sumber_air":          "Sumber Air",
+            "waktu_penyelenggaraan": "Waktu Belajar",
+        }
+        dist_label = _DIST_LABELS.get(distribusi_field, distribusi_field)
+        dist_lines = ", ".join(
+            f"{item['key']}: {item['count']:,} ({item['pct']}%)"
+            for item in distribusi[:8]
+        )
+        distribusi_section = (
+            f"\n- Distribusi {dist_label}: {dist_lines}"
+            f"\n  (Catatan: ceritakan distribusi ini sebagai informasi utama jawaban)"
+        )
+
     # Label subjek dinamis: "sekolah" untuk count biasa, "siswa laki-laki" dll untuk metric
     _is_school_count = not metric_target or metric_target == "sekolah"
     subyek = "sekolah" if _is_school_count else metric_label
@@ -526,7 +547,7 @@ DATA AGREGASI:
 - Wilayah      : {wilayah} (level: {level_label})
 - Metrik       : {metric_label}
 - Jumlah {subyek}{status_info}: {total:,}{filter_section}{pct_section}
-- Konteks      : jumlah ini {konteks_bench}{breakdown_section}{drilldown_section}
+- Konteks      : jumlah ini {konteks_bench}{breakdown_section}{distribusi_section}{drilldown_section}
 
 {instruksi}
 

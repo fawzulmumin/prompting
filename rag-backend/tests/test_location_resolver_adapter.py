@@ -253,6 +253,32 @@ async def test_kab_aceh_explicit_prefix_skips_alias(mock_get_resolver, mock_es):
 # ── Regression: handler imports ───────────────────────────────────────────────
 
 @pytest.mark.unit
+@pytest.mark.asyncio
+async def test_province_prefix_provinsi_jakarta(mock_es):
+    """'Provinsi Jakarta' → strip prefix → alias 'jakarta' → provinsi='prov. dki jakarta'."""
+    from app.services.core.location_resolver_adapter import resolve_location_from_query
+    result = await resolve_location_from_query("Provinsi Jakarta", mock_es)
+    assert result["status"] == ResultStatus.SUCCESS
+    assert result["metadata"]["method"] == "province_alias"
+    entities = result["data"]["entities"]
+    assert entities.get("provinsi") == "prov. dki jakarta"
+    assert "kabupaten" not in entities
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_province_prefix_provinsi_dki_jakarta(mock_es):
+    """'provinsi dki jakarta' → strip prefix → alias 'dki jakarta' → provinsi='prov. dki jakarta'."""
+    from app.services.core.location_resolver_adapter import resolve_location_from_query
+    result = await resolve_location_from_query("provinsi dki jakarta", mock_es)
+    assert result["status"] == ResultStatus.SUCCESS
+    assert result["metadata"]["method"] == "province_alias"
+    entities = result["data"]["entities"]
+    assert entities.get("provinsi") == "prov. dki jakarta"
+    assert "kabupaten" not in entities
+
+
+@pytest.mark.unit
 def test_aggregation_handler_still_imports():
     """aggregation_handler imports without error after switching to adapter."""
     import importlib

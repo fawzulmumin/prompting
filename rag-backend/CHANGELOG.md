@@ -112,6 +112,81 @@
 
 ---
 
+## Phase 19 — Fitur Baru & Bug Fix (Mei 2026)
+**Test count:** 697 passed, 44 skipped, 71 xfailed (up from 647 baseline Phase 18)
+
+| Sub-phase | File(s) | Perubahan |
+|-----------|---------|-----------|
+| P19-A: Akreditasi TT | `prompts/intent_classifier/system_v1.txt` | Few-shot "Provinsi Jakarta" → DKI Jakarta, "belum terakreditasi" → akreditasi TT |
+| P19-B: Metric target (agg+comp) | `aggregation_core.py`, `comparison_handler.py` | `build_metric_aggs()` dipakai di comparison query; `_build_comparison_markdown()` render label siswa/guru/tendik; `_fetch_location_data()` baca dari `main_metric` agg key; `_COMPARISON_METRIC_LABEL` dict |
+| P19-C: Wilayah pulau | `intent_models.py`, `aggregation_core.py`, `es_query_builder.py` | `WilayahEntities.pulau` field; `PULAU_PROVINSI_MAP` 9 zona; `scope=pulau`; `build_wilayah_filter()` handles pulau; `VALID_SCOPES` includes `"pulau"` |
+| P19-D: Graceful fallback lokasi | `location_resolver.py`, `retrieval_retry_handler.py` | Drop unresolved desa jika kecamatan tersedia; drop unresolved kecamatan jika kabupaten tersedia; `_MAX_RETRY_ATTEMPTS=2` guard; 5 test baru `TestGracefulFallback` |
+| P19-E: Infrastruktur filter | `intent_models.py`, `es_query_builder.py`, `cognitive_router.py`, `system_v1.txt` | `CognitiveIntent.infrastruktur_filter` field; `_INFRASTRUKTUR_FILTER_MAP` 4 kondisi (internet/listrik/komputer/toilet); wired ke `build_es_query()` + `extract_filters_from_intent()`; `setdefault` cache guard; INFRASTRUKTUR rules + 3 few-shot examples |
+| P19-F: Golden set | `tests/golden_set/golden_set_v1.yaml` | +8 cases: metric_001–005 (metric_target), pulau_001–002 (scope pulau), infra_001 (infrastruktur_filter) |
+| P19-G: Test suite | `tests/test_comparison_handler.py`, `tests/test_location_resolver.py` | +3 test comparison metric label/siswa/tendik; +5 test graceful fallback desa/kecamatan |
+
+---
+
+## Phase 19 E2E Bug Fix (2026-05-21)
+**Test count:** 347 passed (unit) setelah semua fix diterapkan.
+
+Root cause ditemukan via E2E testing terhadap live server. 10 bug fix total.
+
+| Bug | File | Perubahan |
+|-----|------|-----------|
+| `execute_nested_aggregation_query` abaikan `main_metric.value` | `aggregation_core.py` | Baca `aggs.main_metric.value` sebagai `effective_total` jika `metric_target != sekolah` |
+| `akreditasi_in` tidak diapply ke ES filter | `list_school_handler.py` | `_query_single_wilayah` + `_handle_nasional_list`: baca `parsed.akreditasi_in` → `{"terms": {"akreditasi": ...}}` |
+| Cache key v5 return stale intent tanpa `metric_target`/`pulau` | `cognitive_router.py` | Bump ke `cognitive_router:v6:` |
+| `"pulau"` tidak ada di `_LOCATION_FIELDS` | `location_resolver_adapter.py` | Tambah `"pulau"` ke set agar `validate_location_presence` return True |
+| `scope=pulau` tidak ditangani di `_build_resolution` | `aggregation_handler.py` | Tambah handler `scope=pulau` + import `PULAU_PROVINSI_MAP` |
+| `"pulau"` tidak ada di level detection `_handle_single_wilayah` | `aggregation_handler.py` | Tambah `"pulau"` ke loop `current_level` dan kondisi `use_nested` |
+| `metric_target` schema LLM hanya `sekolah\|null` | `prompts/intent_classifier/system_v1.txt` | Perluas schema ke semua nilai valid (`siswa\|guru\|guru_pns\|...`) |
+| LLM tidak isi `wilayah.pulau` walau `scope=pulau` | `aggregation_handler.py` | Ekstrak nama pulau dari query via regex jika `wilayah.pulau=None` |
+| `wilayah_keys` tidak include `"pulau"` → route ke nasional | `aggregation_handler.py` | Tambah `"pulau"` ke `wilayah_keys` tuple |
+| Akreditasi TT disimpan sbg `"Tidak Terakreditasi"` di ES bukan `"TT"` | `aggregation_core.py`, `list_school_handler.py`, `es_query_builder.py` | `_AKRED_ES_ALIAS` map; `extract_filters_from_intent` gunakan `akreditasi_exact="Tidak Terakreditasi"`; fallback `_AKRED_ES_ALIAS` di filter builder |
+| `siswa_total`/`guru_total`/tendik script tidak ada di index | `aggregation_core.py` | Graceful fallback: jika `is_numeric` tapi `main_metric_val==0` dan `total_doc>0`, gunakan `total_doc` |
+
+**Known remaining issues (sesi sebelumnya, sekarang resolved di bawah):**
+- ~~C8/C9/C10 (pulau): narasi masih label "nasional"~~ → FIXED (lihat Phase 19 Follow-up)
+- ~~B4/B7 (siswa/tendik): field tidak ada di ES index~~ → FIXED — query ke idx_sekolah_profile
+- A2: 0 docs benar (ES confirm tidak ada SD TT di Kota Surabaya), routing via ELASTICSEARCH_PROFILE
+
+---
+
+## Phase 19 Follow-up (2026-05-21)
+**Test count:** 697 passed, 44 skipped, 71 xfailed (tidak ada regresi)
+
+Dua fix lanjutan setelah sesi E2E sebelumnya.
+
+| Bug | File | Perubahan |
+|-----|------|-----------|
+| Metric siswa/guru/tendik selalu 0 — query ke index salah | `aggregation_core.py` | `_METRIC_NEEDS_PROFILE` set; `execute_nested_aggregation_query` pilih `idx_sekolah_profile` jika `metric_target` ada di set; graceful fallback hanya untuk qc index |
+| Narasi pulau bilang "Seluruh Indonesia" | `response_formatter.py`, `narrator_service.py` | `build_location_label`: cek key `"pulau"` → return `"Pulau {X.title()}"` sebelum cek geo levels; `detect_level`: tambah `"pulau"` ke urutan loop |
+
+---
+
+## Phase 19 Bug Fix — Distribusi, Location & Diagnostik (2026-05-21)
+**Test count:** 697 passed, 44 skipped, 71 xfailed (baseline Phase 18: 647)
+
+Bug fix lanjutan dari sesi E2E ke-2. Fokus: distribusi_field end-to-end, location resolver accuracy, nasional scope index routing, dan diagnostik anomali data.
+
+| Sub-phase | File(s) | Perubahan |
+|-----------|---------|-----------|
+| P19-H: Fix distribusi_field inference | `aggregation_handler.py`, `aggregation_core.py` | Tambah `_DISTRIBUSI_NEEDS_PROFILE` frozenset (`{"sumber_air"}`); import dan gunakan di `_handle_nasional_scope()` agar query distribusi `sumber_air` routing ke `idx_sekolah_profile`; tambah pre-inference log `[AGG] pre-inference: metric_target=... distribusi_field=...` sebelum blok `_infer_distribusi_field()` |
+| P19-I: Fix narrator untuk distribusi | `narrator_service.py`, `narrator_prompts.py`, `ask_pipeline.py` | Tambah param `distribusi: Optional[list]` dan `distribusi_field: Optional[str]` ke `narrate_aggregation()` dan `_prompt_aggregation()`; tambah distribusi section di prompt body dengan label mapping (sumber_listrik/akses_internet/sumber_air/waktu_penyelenggaraan); `ask_pipeline.py` pass `result.get("distribusi")` dan `result.get("distribusi_field")` ke narrator |
+| P19-J: Fix location resolver desa cibunar | `location_resolver.py` | Fix disambiguasi desa "Cibunar" — sebelumnya resolve ke Balapulang, Tegal; sekarang resolve ke Parungpanjang, Bogor sesuai konteks kecamatan |
+| P19-K: Fix nasional scope metric_target routing | `aggregation_handler.py`, `aggregation_core.py` | `_handle_nasional_scope()` sebelumnya hardcode ke `ELASTICSEARCH_INDEX`; sekarang cek `_metric_target in _METRIC_NEEDS_PROFILE` dan routing ke `idx_sekolah_profile` jika perlu (sama dengan `_handle_single_wilayah`) |
+| P19-L: Diagnostic warning data anomali | `aggregation_core.py` | Tambah `[AGG_CORE] SUSPICIOUS: sum(field)=X == doc_count=Y` warning jika `sum(metric_field) == doc_count` untuk numeric field di profile index — deteksi dini field yang berisi flag (0/1) bukan count aktual |
+
+**Verifikasi Bug 1 (guru_p3k):** ES stats confirm `max=75, avg=1.43, sum=121258` — bukan flag. Data valid. Tidak ada perubahan `_METRIC_MAP`.
+
+**Known issues — dilanjutkan di Phase 20:**
+- Narasi `guru_p3k` masih menyebut "satuan pendidikan" alih-alih "guru PPPK" — butuh `metric_label` mapping di narrator
+- Distribusi nasional (mis. `sumber_listrik` tanpa filter wilayah) masih query ke `idx_sekolah_qc` — butuh extend `_DISTRIBUSI_NEEDS_PROFILE` atau gunakan `idx_sekolah_profile` sebagai default untuk semua distribusi query
+- Angka distribusi listrik nasional (204) kemungkinan undercount akibat index salah
+
+---
+
 ## Resolved Post-CHANGELOG (2026-04-21)
 
 | Item | File | Perubahan |

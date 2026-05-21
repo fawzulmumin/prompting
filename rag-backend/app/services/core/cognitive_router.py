@@ -79,7 +79,7 @@ def _canonical_query(q: str) -> str:
 
 def _cache_key(q: str) -> str:
     h = hashlib.md5(_canonical_query(q).encode()).hexdigest()
-    return f"cognitive_router:v5:{h}"
+    return f"cognitive_router:v6:{h}"
 
 
 # ── Main orchestrator ────────────────────────────────────────────────────────
@@ -108,6 +108,9 @@ async def classify_and_extract(
                 cached_copy.setdefault("qc_persen_max", None)
                 cached_copy.setdefault("qc_field_list", [])
                 cached_copy.setdefault("qc_persen_query", False)
+                cached_copy.setdefault("infrastruktur_filter", None)
+                cached_copy.setdefault("distribusi_field", None)
+                wil_data.setdefault("pulau", None)
                 intent = CognitiveIntent(**cached_copy)
                 intent.wilayah = WilayahEntities(**wil_data)
                 return intent

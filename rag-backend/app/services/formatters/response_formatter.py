@@ -347,6 +347,9 @@ def build_reject_answer() -> Dict[str, Any]:
     
  
 def build_location_label(context: Dict[str, Any]) -> str:
+    pulau = context.get("pulau")
+    if pulau:
+        return f"Pulau {pulau.title()}"
     levels = [
         context.get("desa_kelurahan"),
         context.get("kecamatan"),

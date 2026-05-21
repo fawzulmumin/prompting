@@ -1902,3 +1902,139 @@ cases:
       module: out_of_context
     tags: [qc, list, akreditasi, data_kotor]
     notes: "List QC dengan filter akreditasi A dan kondisi data kotor."
+
+  # ---------------------------------------------------------------------------
+  # AKREDITASI TT — Bug Fix (akreditasi_tt_001)
+  # ---------------------------------------------------------------------------
+
+  - id: akreditasi_tt_001
+    query: "SMA mana saja yang belum terakreditasi di Provinsi Jakarta?"
+    expected:
+      module: list
+      scope: provinsi
+      entities:
+        jenjang: [SMA]
+        akreditasi: TT
+        provinsi: "dki jakarta"
+    must_not:
+      module: out_of_context
+    tags: [list, akreditasi_tt, belum_terakreditasi, jakarta, provinsi_prefix]
+    notes: "Bug fix: 'belum terakreditasi' → akreditasi TT; 'Provinsi Jakarta' → resolve ke DKI Jakarta."
+
+  # ---------------------------------------------------------------------------
+  # METRIC TARGET — Siswa/Guru/Tendik dalam comparison (5 cases)
+  # ---------------------------------------------------------------------------
+
+  - id: metric_001
+    query: "berapa siswa SD di Bandung vs Bogor"
+    expected:
+      module: comparison
+      entities:
+        jenjang: [SD]
+        metric_target: siswa
+        wilayah: ["bandung", "bogor"]
+    must_not:
+      module: out_of_context
+    tags: [comparison, metric_target, siswa, kabupaten]
+    notes: "Comparison dengan metric siswa — harus set metric_target: siswa."
+
+  - id: metric_002
+    query: "jumlah siswa SMP di Jawa Barat lebih banyak mana dibanding Jawa Timur"
+    expected:
+      module: comparison
+      entities:
+        jenjang: [SMP]
+        metric_target: siswa
+        wilayah: ["jawa barat", "jawa timur"]
+    must_not:
+      module: out_of_context
+    tags: [comparison, metric_target, siswa, provinsi]
+    notes: "Comparison provinsi dengan metric siswa."
+
+  - id: metric_003
+    query: "mana lebih banyak guru honorer antara Jakarta dan Surabaya"
+    expected:
+      module: comparison
+      entities:
+        metric_target: guru_honor
+        wilayah: ["jakarta", "surabaya"]
+    must_not:
+      module: out_of_context
+    tags: [comparison, metric_target, guru_honor, kabupaten]
+    notes: "Comparison guru honorer dua kota."
+
+  - id: metric_004
+    query: "berapa total siswa SMA negeri di kabupaten Bekasi"
+    expected:
+      module: aggregation
+      scope: kabupaten
+      entities:
+        jenjang: [SMA]
+        status: NEGERI
+        metric_target: siswa
+        kabupaten: "bekasi"
+    must_not:
+      module: out_of_context
+    tags: [aggregation, metric_target, siswa, kabupaten, status]
+    notes: "Aggregation metric siswa dengan filter status dan jenjang."
+
+  - id: metric_005
+    query: "berapa tenaga kependidikan SD di seluruh Jawa Tengah"
+    expected:
+      module: aggregation
+      scope: provinsi
+      entities:
+        jenjang: [SD]
+        metric_target: tendik
+        provinsi: "jawa tengah"
+    must_not:
+      module: out_of_context
+    tags: [aggregation, metric_target, tendik, provinsi]
+    notes: "Aggregation tendik — metric_target: tendik."
+
+  # ---------------------------------------------------------------------------
+  # PULAU / ZONA GEOGRAFIS (2 cases)
+  # ---------------------------------------------------------------------------
+
+  - id: pulau_001
+    query: "berapa total SD di pulau Jawa"
+    expected:
+      module: aggregation
+      scope: pulau
+      entities:
+        jenjang: [SD]
+        pulau: jawa
+    must_not:
+      module: out_of_context
+    tags: [aggregation, pulau, jawa, scope_pulau]
+    notes: "Aggregation dengan scope pulau Jawa — harus set scope: pulau dan entities.pulau."
+
+  - id: pulau_002
+    query: "daftar SMA di Kalimantan"
+    expected:
+      module: list
+      scope: pulau
+      entities:
+        jenjang: [SMA]
+        pulau: kalimantan
+    must_not:
+      module: out_of_context
+    tags: [list, pulau, kalimantan, scope_pulau]
+    notes: "List dengan scope pulau Kalimantan."
+
+  # ---------------------------------------------------------------------------
+  # INFRASTRUKTUR FILTER (1 case)
+  # ---------------------------------------------------------------------------
+
+  - id: infra_001
+    query: "sekolah yang tidak punya akses internet di NTT"
+    expected:
+      module: list
+      scope: provinsi
+      entities:
+        infrastruktur_filter: tidak_ada_internet
+        provinsi: "nusa tenggara timur"
+    must_not:
+      module: out_of_context
+    tags: [list, infrastruktur, tidak_ada_internet, provinsi]
+    notes: "Filter infrastruktur — tidak ada internet harus menghasilkan infrastruktur_filter: tidak_ada_internet."

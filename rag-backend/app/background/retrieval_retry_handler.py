@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 _LOG_DIR  = Path(__file__).parent.parent / "logs"
 _LOG_FILE = _LOG_DIR / "low_score_events.csv"
 
+# Maximum ES retry attempts per request (expanded + keyword_only).
+# Guards against any future loop extension accidentally causing unbounded retries.
+_MAX_RETRY_ATTEMPTS = 2
+
 
 def _append_retry_log(
     query: str,
@@ -82,9 +86,12 @@ async def retry_with_expanded_query(
     if not original_loc_filter:
         return [], False
 
+    attempts = 0
+
     # ── Attempt 1: expand (hapus kecamatan) ──────────────────────────
     expanded = _build_expanded_filter(original_loc_filter)
-    if expanded != original_loc_filter:
+    if expanded != original_loc_filter and attempts < _MAX_RETRY_ATTEMPTS:
+        attempts += 1
         hits_expanded = await perform_search(
             es_client=es_client,
             query_text=query,
@@ -102,20 +109,22 @@ async def retry_with_expanded_query(
             return hits_expanded, True
 
     # ── Attempt 2: keyword_only (hapus semua filter lokasi) ───────────
-    hits_keyword = await perform_search(
-        es_client=es_client,
-        query_text=query,
-        size=size,
-        filter_level=None,
-        location_filter=None,
-    )
-    score_keyword = compute_context_sufficiency_score(hits_keyword)
-    _append_retry_log(query, "keyword_only", score_before, score_keyword, len(hits_keyword))
-    logger.info(
-        "[RETRY] keyword_only: %d hits, score %.3f → %.3f",
-        len(hits_keyword), score_before, score_keyword,
-    )
-    if score_keyword >= 0.3:
-        return hits_keyword, True
+    if attempts < _MAX_RETRY_ATTEMPTS:
+        attempts += 1
+        hits_keyword = await perform_search(
+            es_client=es_client,
+            query_text=query,
+            size=size,
+            filter_level=None,
+            location_filter=None,
+        )
+        score_keyword = compute_context_sufficiency_score(hits_keyword)
+        _append_retry_log(query, "keyword_only", score_before, score_keyword, len(hits_keyword))
+        logger.info(
+            "[RETRY] keyword_only: %d hits, score %.3f → %.3f",
+            len(hits_keyword), score_before, score_keyword,
+        )
+        if score_keyword >= 0.3:
+            return hits_keyword, True
 
     return [], False

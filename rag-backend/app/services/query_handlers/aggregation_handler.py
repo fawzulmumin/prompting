@@ -25,9 +25,13 @@ from app.services.core.aggregation_core import (
     execute_drilldown_query,
     normalize_entity_hierarchy,
     build_metric_aggs,
+    build_distribusi_aggs,
     build_filters,
     build_qc_aggs,
     handle_qc_percentage_query as _handle_qc_percentage_query,
+    PULAU_PROVINSI_MAP,
+    _METRIC_NEEDS_PROFILE,
+    _DISTRIBUSI_NEEDS_PROFILE,
 )
 from app.services.core.es_query_builder import (
     extract_filters_from_intent,
@@ -236,6 +240,18 @@ async def _handle_nasional_scope(
     """
     logger.info("[AGG] Scope nasional detected")
 
+    _metric_target = getattr(intent, 'metric_target', None)
+    _distribusi_field = getattr(intent, 'distribusi_field', None)
+    _use_profile_index = (
+        _metric_target in _METRIC_NEEDS_PROFILE
+        or _distribusi_field in _DISTRIBUSI_NEEDS_PROFILE
+    )
+    index = (
+        os.getenv("ELASTICSEARCH_PROFILE_INDEX", "idx_sekolah_profile")
+        if _use_profile_index
+        else os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc")
+    )
+
     query_filters = extract_filters_from_intent(intent)
 
     normalized: Dict[str, Any] = {}
@@ -258,46 +274,38 @@ async def _handle_nasional_scope(
     es_query = build_aggregation_query(normalized)
 
     es_query.setdefault("aggs", {})
+    es_query["aggs"].update(build_metric_aggs(_metric_target))
     es_query["aggs"]["by_provinsi"] = {
         "terms": {
             "field": "provinsi",
             "size": 38
         }
     }
+    if _distribusi_field:
+        es_query["aggs"].update(build_distribusi_aggs(_distribusi_field))
+    es_query["track_total_hits"] = True
 
     logger.debug("AGG NASIONAL QUERY: %s", es_query)
 
-    result = await es_client.search(
-        index=os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc"),
-        body=es_query
-    )
+    result = await es_client.search(index=index, body=es_query)
 
-    logger.debug(
-        "[AGG] by_status raw buckets: %s",
-        result.get("aggregations", {}).get("by_status", {}).get("buckets", [])
-    )
-    logger.debug(
-        "[AGG] by_jenjang raw buckets count: %d",
-        len(result.get("aggregations", {}).get("by_jenjang", {}).get("buckets", []))
-    )
+    _aggs = result.get("aggregations", {})
+    _total_raw = result.get("hits", {}).get("total", {})
+    _total_doc = _total_raw.get("value", 0) if isinstance(_total_raw, dict) else _total_raw
 
-    total = (
-        result.get("aggregations", {})
-        .get("total", {})
-        .get("value", 0)
-    )
+    logger.debug("[AGG] by_status raw buckets: %s", _aggs.get("by_status", {}).get("buckets", []))
+    logger.debug("[AGG] by_jenjang raw buckets count: %d", len(_aggs.get("by_jenjang", {}).get("buckets", [])))
 
-    prov_buckets = (
-        result.get("aggregations", {})
-        .get("by_provinsi", {})
-        .get("buckets", [])
-    )
+    _main_metric_val = _aggs.get("main_metric", {}).get("value")
+    _is_numeric = bool(_metric_target and _metric_target != "sekolah")
+    if _is_numeric:
+        total = int(_main_metric_val or 0)
+    else:
+        total = int(_main_metric_val or _total_doc)
 
-    status_buckets = (
-        result.get("aggregations", {})
-        .get("by_status", {})
-        .get("buckets", [])
-    )
+    prov_buckets = _aggs.get("by_provinsi", {}).get("buckets", [])
+
+    status_buckets = _aggs.get("by_status", {}).get("buckets", [])
     # Sum values per uppercase key — ES may have both "Swasta" and "SWASTA"
     # as separate keyword buckets; accumulate to avoid last-write-wins overwrite.
     breakdown_status_nasional: Dict[str, int] = {}
@@ -308,16 +316,25 @@ async def _handle_nasional_scope(
                 breakdown_status_nasional.get(k, 0) + b["doc_count"]
             )
 
-    jenjang_buckets = (
-        result.get("aggregations", {})
-        .get("by_jenjang", {})
-        .get("buckets", [])
-    )
+    jenjang_buckets = _aggs.get("by_jenjang", {}).get("buckets", [])
     breakdown_jenjang_nasional: Dict[str, int] = {
         b["key"]: b["doc_count"]
         for b in jenjang_buckets
         if b.get("key")
     }
+
+    _distribusi_result = None
+    if _distribusi_field:
+        _dist_buckets = _aggs.get("distribusi", {}).get("buckets", [])
+        _dist_total = sum(b["doc_count"] for b in _dist_buckets)
+        _distribusi_result = [
+            {
+                "key": b["key"],
+                "count": b["doc_count"],
+                "pct": round(b["doc_count"] / _dist_total * 100, 1) if _dist_total > 0 else 0,
+            }
+            for b in _dist_buckets
+        ]
 
     confidence = compute_aggregation_confidence(
         query=query,
@@ -333,6 +350,9 @@ async def _handle_nasional_scope(
         "status": ResultStatus.SUCCESS,
         "provider": "ELASTICSEARCH_AGGREGATION_NASIONAL",
         "total": total,
+        "metric_target": _metric_target or "sekolah",
+        "distribusi": _distribusi_result,
+        "distribusi_field": _distribusi_field,
         "ranking": prov_buckets,
         "breakdown_status": breakdown_status_nasional or None,
         "breakdown_jenjang": breakdown_jenjang_nasional or None,
@@ -482,6 +502,27 @@ async def _build_resolution(
 ) -> Dict[str, Any]:
     """Build resolution dict: trust intent scope/wilayah or call location resolver."""
     _scope = getattr(intent, "scope", None)
+
+    if _scope == "pulau":
+        w = getattr(intent, "wilayah", None)
+        _pulau = (getattr(w, "pulau", None) or "").lower().strip() if w else ""
+        # Fallback: extract pulau name from query when LLM didn't fill wilayah.pulau
+        if not _pulau:
+            _m = re.search(r'\bpulau\s+(\w+)', query, re.IGNORECASE)
+            if _m:
+                _pulau = _m.group(1).lower().strip()
+                logger.info("[AGG] pulau extracted from query: %r", _pulau)
+        if _pulau and _pulau in PULAU_PROVINSI_MAP:
+            logger.info("[AGG] intent.scope=pulau, pulau=%s → multi-provinsi filter", _pulau)
+            return {
+                "status": ResultStatus.SUCCESS,
+                "provider": "SYSTEM",
+                "data": {"entities": {"pulau": _pulau}},
+                "reason": None,
+                "metadata": {"pulau_scope": True, "pulau": _pulau},
+                "confidence": None,
+            }
+        logger.warning("[AGG] scope=pulau but pulau=%r not in PULAU_PROVINSI_MAP → fallback", _pulau)
 
     if _scope == "nasional":
         w = getattr(intent, "wilayah", None)
@@ -670,12 +711,12 @@ async def _handle_single_wilayah(
         logger.info("[AGG] filter akreditasi =: %s", query_filters["akreditasi_exact"])
 
     current_level = None
-    for lvl in ("desa_kelurahan", "kecamatan", "kabupaten", "provinsi"):
+    for lvl in ("desa_kelurahan", "kecamatan", "kabupaten", "provinsi", "pulau"):
         if lvl in normalized:
             current_level = lvl
             break
 
-    use_nested = current_level in ("provinsi", "kabupaten")
+    use_nested = current_level in ("provinsi", "kabupaten", "pulau")
     DRILLDOWN_MAP = {"provinsi": "kabupaten", "kabupaten": "kecamatan"}
     drilldown_field = DRILLDOWN_MAP.get(current_level)
 
@@ -684,6 +725,7 @@ async def _handle_single_wilayah(
     drilldown_top3 = []
 
     _metric_target = normalized.pop("metric_target", None) or entities.get("metric_target")
+    _distribusi_field = getattr(intent, 'distribusi_field', None)
     _qc_masalah_only = getattr(intent, 'qc_masalah_only', False) or normalized.get('qc_masalah_only', False)
     _extra_qc_aggs: Dict[str, Any] = build_qc_aggs() if _qc_masalah_only else {}
 
@@ -692,7 +734,11 @@ async def _handle_single_wilayah(
 
     if use_nested:
         import asyncio as _asyncio
-        nested_task = execute_nested_aggregation_query(es_client, normalized, metric_target=_metric_target)
+        nested_task = execute_nested_aggregation_query(
+            es_client, normalized,
+            metric_target=_metric_target,
+            distribusi_field=_distribusi_field,
+        )
         _drilldown_size = _extract_ranking_size(query) if is_ranking_query(query) else 3
         drilldown_task = (
             execute_drilldown_query(es_client, normalized, drilldown_field, size=_drilldown_size)
@@ -733,11 +779,13 @@ async def _handle_single_wilayah(
             total = nested_result["total"]
             breakdown_jenjang = nested_result["breakdown_jenjang"]
             breakdown_status = nested_result["breakdown_status"]
+            _distribusi_from_nested = nested_result.get("distribusi")
             logger.info("NESTED AGG total=%s jenjang_keys=%s status_keys=%s",
                 total, list(breakdown_jenjang.keys())[:5], list(breakdown_status.keys()))
     else:
         total = await _run_metric_query()
         _qc_aggs_result = {}
+        _distribusi_from_nested = None
 
     logger.info(f"AGG TOTAL = {total}")
     logger.info(f"AGG ENTITIES = {entities}")
@@ -805,6 +853,8 @@ async def _handle_single_wilayah(
         "provider": "ELASTICSEARCH_AGGREGATION",
         "total": total,
         "metric_target": _metric_target or "sekolah",
+        "distribusi": _distribusi_from_nested,
+        "distribusi_field": _distribusi_field,
         "total_all": total_all,
         "pct_of_total": pct_of_total,
         "active_filters": query_filters,
@@ -822,6 +872,54 @@ async def _handle_single_wilayah(
 
     await set_cache(cache_key, result, 3600)
     return result
+
+
+# ── Metric-target keyword patterns (ordered most-specific first) ─────────────
+# Used to infer metric_target when Tier 2 classifies but doesn't extract it
+_METRIC_KW_PATTERNS: list = [
+    (re.compile(r'\bguru\s+p(?:3k|ppk?)\b|\bpppk\b|\bp3k\b', re.I), "guru_p3k"),
+    (re.compile(r'\bguru\s+(?:laki[- ]?laki|pria|lk)\b', re.I),       "guru_l"),
+    (re.compile(r'\bguru\s+(?:perempuan|wanita|pr)\b', re.I),           "guru_p_gender"),
+    (re.compile(r'\b(?:total\s+)?komputer\b', re.I),                    "total_komputer"),
+    (re.compile(r'\bsiswa\s+baru\b', re.I),                             "siswa_baru"),
+    (re.compile(r'\bsiswa\s+mengulang\b', re.I),                        "siswa_mengulang"),
+    (re.compile(r'\bsiswa\s+lulus\b', re.I),                            "siswa_lulus"),
+    (re.compile(r'\bguru\s+(?:pns|asn)\b', re.I),                       "guru_pns"),
+    (re.compile(r'\bguru\s+honor(?:er)?\b', re.I),                      "guru_honor"),
+    (re.compile(r'\bguru\s+sertifika(?:si)?\b', re.I),                  "guru_sertifikasi"),
+    (re.compile(r'\btendik\b|\btenaga\s+kependidikan\b', re.I),         "tendik"),
+    (re.compile(r'\b(?:siswa|murid|peserta\s+didik)\b', re.I),          "siswa"),
+    (re.compile(r'\bguru\b', re.I),                                     "guru"),
+]
+
+def _infer_metric_target(query: str) -> Optional[str]:
+    """Infer metric_target from query text when Tier 2 didn't extract it."""
+    for pattern, metric in _METRIC_KW_PATTERNS:
+        if pattern.search(query):
+            return metric
+    return None
+
+
+# ── Distribusi field keyword patterns ────────────────────────────────────────
+_DISTRIBUSI_PATTERNS: list = [
+    (re.compile(r'\b(listrik|sumber.?listrik|PLN|diesel|tenaga.?surya|genset)\b', re.I),
+     "sumber_listrik"),
+    (re.compile(r'\b(internet|akses.?internet|wifi|online|provider.?internet|jenis.?internet)\b', re.I),
+     "akses_internet"),
+    (re.compile(r'\b(sumber.?air|air.?minum|air.?bersih|PAM|sumur|sungai|air.?yang.?dipakai)\b', re.I),
+     "sumber_air"),
+    (re.compile(r'\b(pagi|sore|waktu.?belajar|waktu.?penyelenggaraan|shift|sesi.?belajar)\b', re.I),
+     "waktu_penyelenggaraan"),
+]
+
+
+def _infer_distribusi_field(query: str) -> Optional[str]:
+    """Infer distribusi_field from query text when LLM/Tier2 didn't extract it."""
+    q = query.lower()
+    for pattern, field in _DISTRIBUSI_PATTERNS:
+        if pattern.search(q):
+            return field
+    return None
 
 
 async def handle_aggregation_query(
@@ -862,6 +960,25 @@ async def handle_aggregation_query(
     # ── Early routing: qc_persen_query ───────────────────────────────────────
     if getattr(intent, "qc_persen_query", False):
         return await _handle_qc_percentage_query(intent, es_client, query)
+
+    logger.info("[AGG] pre-inference: metric_target=%s distribusi_field=%s query='%s'",
+                getattr(intent, 'metric_target', None),
+                getattr(intent, 'distribusi_field', None),
+                query[:50])
+
+    # ── Infer metric_target from query if Tier 2 didn't extract it ───────────
+    if not getattr(intent, 'metric_target', None):
+        _inferred_metric = _infer_metric_target(query)
+        if _inferred_metric:
+            intent.metric_target = _inferred_metric
+            logger.info("[AGG] metric_target inferred from query: %r → %r", query[:60], _inferred_metric)
+
+    # ── Infer distribusi_field from query if LLM didn't extract it ───────────
+    if not getattr(intent, 'distribusi_field', None):
+        _inferred_dist = _infer_distribusi_field(query)
+        if _inferred_dist:
+            intent.distribusi_field = _inferred_dist
+            logger.info("[AGG] distribusi_field inferred from query: %r → %r", query[:60], _inferred_dist)
 
     resolution = await _build_resolution(query, es_client, intent, kwargs)
     logger.debug("[AGG] resolution=%s", resolution)
@@ -981,7 +1098,7 @@ async def handle_aggregation_query(
     # NASIONAL SCOPE HANDLING
     # =====================================================
     if isinstance(entities, dict):
-        wilayah_keys = ("provinsi", "kabupaten", "kecamatan", "desa_kelurahan")
+        wilayah_keys = ("provinsi", "kabupaten", "kecamatan", "desa_kelurahan", "pulau")
         has_wilayah_filter = any(entities.get(k) for k in wilayah_keys)
         if not has_wilayah_filter:
             # Ranking query without location filter → global ranking (e.g. "5 provinsi dengan SD terbanyak")

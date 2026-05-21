@@ -63,6 +63,7 @@ PROVINCE_ALIAS_MAP: Dict[str, str] = {
     "babel":           "prov. kepulauan bangka belitung",
     "diy":             "prov. d.i. yogyakarta",
     "dki":             "prov. dki jakarta",
+    "dki jakarta":     "prov. dki jakarta",
 }
 
 # Prefixes that signal the user explicitly chose kabupaten/kecamatan level —
@@ -187,7 +188,9 @@ async def resolve_location_from_query(
     # kab/kec prefix, resolve directly to province scope (confidence=1.0).
     _loc_lower = loc_text.lower().strip()
     if not _is_explicit_kab_kec(_loc_lower):
-        _prov_canonical = PROVINCE_ALIAS_MAP.get(_loc_lower)
+        # Strip prefix administratif sebelum alias lookup
+        _stripped = re.sub(r'^(provinsi|prov\.?)\s+', '', _loc_lower).strip()
+        _prov_canonical = PROVINCE_ALIAS_MAP.get(_stripped) or PROVINCE_ALIAS_MAP.get(_loc_lower)
         if _prov_canonical:
             logger.debug("[LR_ADAPTER] province alias: '%s' → '%s'", _loc_lower, _prov_canonical)
             _ent: Dict[str, Any] = {"provinsi": _prov_canonical}
@@ -246,7 +249,7 @@ async def resolve_location_from_query(
 
 # ── Validator helpers (migrated from entity_service.py Phase 9) ───────────────
 
-_LOCATION_FIELDS = {"provinsi", "kabupaten", "kecamatan", "desa_kelurahan"}
+_LOCATION_FIELDS = {"provinsi", "kabupaten", "kecamatan", "desa_kelurahan", "pulau"}
 
 
 def validate_location_presence(entities: Dict[str, Any]) -> bool:
@@ -312,7 +315,9 @@ def _resolve_parts(parts: list) -> list:
         # Province alias fast-path for each VS part
         loc_lower = loc_text.lower().strip()
         if not _is_explicit_kab_kec(loc_lower):
-            prov_canonical = PROVINCE_ALIAS_MAP.get(loc_lower)
+            # Strip prefix administratif sebelum alias lookup
+            _stripped_part = re.sub(r'^(provinsi|prov\.?)\s+', '', loc_lower).strip()
+            prov_canonical = PROVINCE_ALIAS_MAP.get(_stripped_part) or PROVINCE_ALIAS_MAP.get(loc_lower)
             if prov_canonical:
                 result.append({"provinsi": prov_canonical})
                 continue

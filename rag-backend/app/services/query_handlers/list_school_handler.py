@@ -448,6 +448,7 @@ class ListSchoolHandler:
         bentuk     = parsed.get("bentuk")
         status     = parsed.get("status")
         akred      = parsed.get("akreditasi")
+        akred_in   = parsed.get("akreditasi_in")  # TT / multi-value
 
         if bentuk_in:
             es_filters.append({"terms": {"bentuk_pendidikan": bentuk_in}})
@@ -455,8 +456,12 @@ class ListSchoolHandler:
             es_filters.append({"term": {"bentuk_pendidikan": bentuk}})
         if status:
             es_filters.append({"term": {"status_sekolah": status.upper()}})
-        if akred:
-            es_filters.append({"term": {"akreditasi": akred}})
+        if akred_in:
+            es_filters.append({"terms": {"akreditasi": akred_in}})
+        elif akred:
+            from app.services.core.aggregation_core import _AKRED_ES_ALIAS
+            akred_mapped = _AKRED_ES_ALIAS.get(akred.upper(), akred)
+            es_filters.append({"term": {"akreditasi": akred_mapped}})
         es_filters.extend(qc_filters_nas)
 
         sort_mode  = _detect_sort_mode(query, intent=intent)
@@ -916,10 +921,11 @@ class ListSchoolHandler:
         filters = []
         should  = []
 
-        bentuk    = parsed.get("bentuk")
-        bentuk_in = parsed.get("bentuk_pendidikan_in")  # PAUD expand
-        akreditasi = parsed.get("akreditasi")
-        status    = parsed.get("status")
+        bentuk      = parsed.get("bentuk")
+        bentuk_in   = parsed.get("bentuk_pendidikan_in")  # PAUD expand
+        akreditasi  = parsed.get("akreditasi")
+        akred_in    = parsed.get("akreditasi_in")         # TT / multi-value
+        status      = parsed.get("status")
 
         if not status:
             sn = (parsed.get("school_name") or "").lower()
@@ -933,9 +939,14 @@ class ListSchoolHandler:
             filters.append({"term": {"bentuk_pendidikan": bentuk}})
         if status:
             filters.append({"term": {"status_sekolah": status.upper()}})
-        if akreditasi:
-            filters.append({"term": {"akreditasi": akreditasi}})
-            logger.info("[LIST] Multi: filter akreditasi=%s", akreditasi)
+        if akred_in:
+            filters.append({"terms": {"akreditasi": akred_in}})
+            logger.info("[LIST] Multi: filter akreditasi_in=%s", akred_in)
+        elif akreditasi:
+            from app.services.core.aggregation_core import _AKRED_ES_ALIAS
+            akred_mapped = _AKRED_ES_ALIAS.get(akreditasi.upper(), akreditasi)
+            filters.append({"term": {"akreditasi": akred_mapped}})
+            logger.info("[LIST] Multi: filter akreditasi=%s → ES=%s", akreditasi, akred_mapped)
 
         if desa:
             filters.append({"bool": {"should": [

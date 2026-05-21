@@ -688,9 +688,9 @@ async def test_aggregation_double_bridge_does_not_overwrite_jenjang(make_intent)
 
     captured_entities = {}
 
-    async def _fake_nested(es_client, entities, metric_target=None):
+    async def _fake_nested(es_client, entities, metric_target=None, distribusi_field=None):
         captured_entities.update(entities)
-        return {"total": 99, "breakdown_jenjang": {}, "breakdown_status": {}}
+        return {"total": 99, "breakdown_jenjang": {}, "breakdown_status": {}, "distribusi": None, "distribusi_field": None}
 
     with (
         patch(

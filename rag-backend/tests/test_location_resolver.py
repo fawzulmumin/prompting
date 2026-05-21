@@ -372,3 +372,50 @@ class TestResolvedWilayahIntegration:
         from app.services.core.location_resolver import resolve_wilayah
         r = resolve_wilayah(W(provinsi="jawa barat"))
         assert r.provinsi == "jawa barat"
+
+
+class TestGracefulFallback:
+    """Unresolved desa/kecamatan should fall back to parent scope, not block query."""
+
+    def test_desa_unresolved_with_kecamatan_drops_desa(self, resolver):
+        # "cibunar" is NOT in MOCK_INDEX desa_kelurahan, "ciputat" IS in kecamatan
+        r = resolver.resolve(W(desa="cibunar", kecamatan="ciputat"))
+        assert r.desa is None, "Unresolved desa should be dropped when kecamatan is available"
+        assert r.kecamatan == "ciputat"
+        assert r.kabupaten == "kota tangerang selatan"
+        assert r.provinsi == "banten"
+        # Confidence should reflect only the resolved kecamatan, not the unresolved desa
+        assert r.confidence >= 0.9
+
+    def test_desa_unresolved_without_kecamatan_keeps_raw(self, resolver):
+        # No kecamatan fallback available → raw value is preserved (passthrough)
+        r = resolver.resolve(W(desa="cibunar"))
+        assert r.desa == "cibunar"
+        assert r.method == "unresolved"
+        assert r.confidence == 0.0
+
+    def test_kecamatan_unresolved_with_kabupaten_drops_kecamatan(self, resolver):
+        # "parungpanjang" is NOT in MOCK_INDEX kecamatan, "bogor" IS in kabupaten
+        r = resolver.resolve(W(kecamatan="parungpanjang", kabupaten="bogor"))
+        assert r.kecamatan is None, "Unresolved kecamatan should be dropped when kabupaten is available"
+        assert r.kabupaten == "bogor"
+        assert r.provinsi == "jawa barat"
+        assert r.confidence >= 0.9
+
+    def test_kecamatan_unresolved_without_kabupaten_keeps_raw(self, resolver):
+        # No kabupaten fallback → raw value is preserved
+        r = resolver.resolve(W(kecamatan="parungpanjang"))
+        assert r.kecamatan == "parungpanjang"
+        assert r.method == "unresolved"
+        assert r.confidence == 0.0
+
+    def test_desa_unresolved_kecamatan_also_unresolved_uses_raw_desa(self, resolver):
+        # Both desa and kecamatan are unknown — kecamatan condition not satisfied
+        # (kecamatan IS provided but won't resolve either — still triggers the drop
+        #  because we check wilayah.kecamatan is truthy, not whether it resolves)
+        r = resolver.resolve(W(desa="cibunar", kecamatan="parungpanjang"))
+        # desa is dropped because kecamatan is provided (even if kecamatan also unresolved)
+        assert r.desa is None
+        # kecamatan unresolved with no kabupaten → stays raw
+        assert r.kecamatan == "parungpanjang"
+        assert r.method == "unresolved"

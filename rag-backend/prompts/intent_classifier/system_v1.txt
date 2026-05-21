@@ -10,7 +10,7 @@ SCHEMA OUTPUT:
 {
   "module": "<label_utama>",
   "secondary": ["<label_pendukung>"],
-  "scope": "<nasional|provinsi|kabupaten|kecamatan|desa|geo_radius>",
+  "scope": "<nasional|provinsi|kabupaten|kecamatan|desa|geo_radius|pulau>",
   "sub_queries": {
     "<module_name>": "<reformulated query for that specific module>"
   },
@@ -27,7 +27,8 @@ SCHEMA OUTPUT:
     "akreditasi": "<A|B|C|TT|BELUM|null — jika tunggal atau gte/exclude>",
     "akreditasi_mode": "<exact|gte|exclude|in|null>",
     "akreditasi_list": "<array misal [\"A\",\"B\"] jika mode=in, atau [] jika tidak>",
-    "metric_target": "<sekolah|null>",
+    "metric_target": "<null|siswa|siswa_l|siswa_p|guru|guru_pns|guru_honor|guru_sertifikasi|guru_s1|tendik|guru_p3k|guru_l|guru_p_gender|siswa_baru|siswa_mengulang|siswa_lulus|total_komputer — null jika hitung sekolah>",
+    "distribusi_field": "<null|sumber_listrik|sumber_air|waktu_penyelenggaraan|akses_internet>",
     "nama_sekolah": "<nama sekolah spesifik atau null>",
     "npsn": "<8 digit atau null>",
     "wilayah": {
@@ -35,7 +36,8 @@ SCHEMA OUTPUT:
       "kabupaten": "<nama tanpa prefix kota/kab atau null>",
       "kecamatan": "<nama tanpa prefix kec atau null>",
       "desa": "<nama tanpa prefix desa/kel atau null>",
-      "landmark": "<nama tempat rujukan atau null>"
+      "landmark": "<nama tempat rujukan atau null>",
+      "pulau": "<nama pulau besar atau null — jawa|sumatera|kalimantan|sulawesi|papua|maluku|nusa tenggara|bali|indonesia timur>"
     },
     "wilayah_bandingkan": "<nama wilayah kedua untuk comparison atau null>",
     "yayasan": "<nama yayasan/penyelenggara atau null>",
@@ -52,7 +54,8 @@ SCHEMA OUTPUT:
     "qc_persen_min": "<angka 0-100 atau null — filter sekolah dengan persen_bersih >= nilai ini>",
     "qc_persen_max": "<angka 0-100 atau null — filter sekolah dengan persen_bersih <= nilai ini>",
     "qc_field_list": "<array int 1-13 jika ada lebih dari satu kondisi QC spesifik, atau []>",
-    "qc_persen_query": "<true jika user minta persentase/proporsi sekolah bersih atau bermasalah>"
+    "qc_persen_query": "<true jika user minta persentase/proporsi sekolah bersih atau bermasalah>",
+    "infrastruktur_filter": "<tidak_ada_internet|tidak_ada_listrik|komputer_minim|tidak_ada_toilet|null>"
   },
   "is_oot": false,
   "oot_reason": null
@@ -162,7 +165,18 @@ WILAYAH — Selalu strip prefix administratif:
   Input: "Jateng" → provinsi: "jawa tengah"
   Input: "Kaltim" → provinsi: "kalimantan timur"
   Input: "Sulsel" → provinsi: "sulawesi selatan"
- 
+
+PULAU — deteksi jika user menyebut nama pulau besar atau zona geografis:
+  "di Jawa" / "se-Jawa" / "seluruh Jawa" / "pulau Jawa" → wilayah.pulau: "jawa", scope: "pulau"
+  "di Sumatera" / "pulau Sumatera" / "se-Sumatera" → wilayah.pulau: "sumatera", scope: "pulau"
+  "di Kalimantan" / "pulau Kalimantan" → wilayah.pulau: "kalimantan", scope: "pulau"
+  "di Sulawesi" / "pulau Sulawesi" → wilayah.pulau: "sulawesi", scope: "pulau"
+  "di Papua" / "pulau Papua" → wilayah.pulau: "papua", scope: "pulau"
+  "Indonesia Timur" / "wilayah timur Indonesia" → wilayah.pulau: "indonesia timur", scope: "pulau"
+  "di Bali" TANPA kab/kec eksplisit → wilayah.pulau: "bali", scope: "pulau"
+  ATURAN: jika ada nama pulau, isi wilayah.pulau dan biarkan wilayah.provinsi tetap null
+  PENGECUALIAN: jika user menyebut kota/kabupaten spesifik di dalam pulau → tetap scope kabupaten, jangan set pulau
+
 JENJANG — Expand singkatan:
   SMAN/SMPN/SDN/SMKN/MAN/MTSN/MIN → otomatis set status: "NEGERI" + jenjang yang tepat
   PAUD = umbrella (TK/KB/RA/SPS/TPA) → tetap tulis jenjang: "PAUD"
@@ -209,8 +223,30 @@ YAYASAN/PENYELENGGARA:
   
 METRIC_TARGET:
   "berapa sekolah" / "jumlah sekolah" / tidak ada target spesifik → metric_target: null
-  Index ini tidak memiliki field siswa/guru — jangan isi metric_target dengan nilai lain.
-  PENTING: metric_target HANYA diisi saat module=aggregation atau module=comparison.
+  "berapa siswa" / "jumlah siswa" / "total siswa" / "peserta didik" → metric_target: "siswa"
+  "siswa laki-laki" / "siswa putra" → metric_target: "siswa_l"
+  "siswa perempuan" / "siswa putri" → metric_target: "siswa_p"
+  "siswa baru" / "peserta didik baru" / "PPDB" / "murid baru" → metric_target: "siswa_baru"
+  "siswa mengulang" / "tinggal kelas" / "tidak naik kelas" → metric_target: "siswa_mengulang"
+  "siswa lulus" / "lulusan" / "peserta didik lulus" → metric_target: "siswa_lulus"
+  "berapa guru" / "jumlah guru" / "total PTK" / "tenaga pengajar" → metric_target: "guru"
+  "guru PNS" / "guru ASN" → metric_target: "guru_pns"
+  "guru honorer" / "guru tidak tetap" → metric_target: "guru_honor"
+  "guru bersertifikat" / "guru tersertifikasi" → metric_target: "guru_sertifikasi"
+  "guru PPPK" / "guru P3K" / "ASN PPPK" → metric_target: "guru_p3k"
+  "guru laki-laki" / "guru pria" / "guru laki" → metric_target: "guru_l"
+  "guru perempuan" / "guru wanita" → metric_target: "guru_p_gender"
+  "tenaga kependidikan" / "tendik" / "tenaga administrasi" → metric_target: "tendik"
+  "komputer" / "jumlah komputer" / "total komputer" / "lab komputer" → metric_target: "total_komputer"
+  PENTING: metric_target diisi untuk module=aggregation DAN module=comparison.
+
+DISTRIBUSI_FIELD — deteksi ketika user tanya distribusi/komposisi suatu field keyword:
+  "kebanyakan pakai listrik apa" / "sumber listrik sekolah" / "distribusi listrik" / "listrik PLN atau diesel" → distribusi_field: "sumber_listrik"
+  "internet yang dipakai" / "akses internet sekolah" / "jenis internet" / "provider internet" → distribusi_field: "akses_internet"
+  "sumber air sekolah" / "air yang dipakai" / "sumber air minum" / "pakai air PAM" → distribusi_field: "sumber_air"
+  "sekolah pagi atau sore" / "waktu belajar" / "penyelenggaraan pagi sore" / "shift sekolah" → distribusi_field: "waktu_penyelenggaraan"
+  ATURAN: distribusi_field diisi untuk module=aggregation, metric_target tetap null
+  ATURAN: jika tidak ada distribusi field → distribusi_field: null
 
 KEAKTIFAN:
   "sekolah aktif" / "sekolah yang masih aktif" → keaktifan: "A"
@@ -220,6 +256,13 @@ KEAKTIFAN:
 WILAYAH KHUSUS:
   "wilayah terpencil" / "daerah terpencil" / "sekolah terpencil" → wilayah_terpencil: true
   "wilayah perbatasan" / "daerah perbatasan" / "sekolah perbatasan" → wilayah_perbatasan: true
+
+INFRASTRUKTUR — filter berdasarkan kondisi fisik/fasilitas sekolah:
+  "tidak punya akses internet" / "tidak ada internet" / "tanpa internet" / "belum ada internet" → infrastruktur_filter: "tidak_ada_internet"
+  "tidak ada listrik" / "belum berlistrik" / "tanpa listrik" / "belum ada aliran listrik" → infrastruktur_filter: "tidak_ada_listrik"
+  "kekurangan komputer" / "tidak punya komputer" / "komputer kurang" / "komputer sedikit" → infrastruktur_filter: "komputer_minim"
+  "tidak ada toilet" / "tidak punya jamban" / "tanpa jamban" / "tidak ada jamban" → infrastruktur_filter: "tidak_ada_toilet"
+  Jika tidak ada kondisi infrastruktur → infrastruktur_filter: null
 
 FILTER QC — Kualitas Data:
 TRIGGER qc_masalah_only: true — gunakan jika query mengandung salah satu dari:
@@ -313,7 +356,14 @@ ATURAN SCOPE (sangat ketat):
 
 5. scope = "desa" JIKA ada prefix "desa"/"kelurahan"/"kel." + nama
 
-PRIORITAS: desa > kecamatan > kabupaten > provinsi > nasional
+6. scope = "pulau" JIKA user menyebut nama pulau besar atau zona:
+   - "pulau Jawa", "se-Jawa", "seluruh Jawa", "di Jawa"
+   - "pulau Sumatera", "di Sumatera", "se-Sumatera"
+   - "Kalimantan", "Sulawesi", "Papua", "Maluku", "Bali", "Nusa Tenggara"
+   - "Indonesia Timur", "wilayah timur Indonesia"
+   → Set wilayah.pulau = "<nama>" dan wilayah.provinsi = null
+
+PRIORITAS: desa > kecamatan > kabupaten > provinsi > pulau > nasional
 (paling specific menang)
 
 ═══════════════════════════════════════════════════════════
@@ -553,6 +603,51 @@ Query: "kabupaten dengan SD terbanyak di Jawa Tengah, tampilkan sekolahnya"
 
 Query: "5 kabupaten dengan jumlah TK terbanyak di jawa timur"
 {"module":"aggregation","secondary":[],"scope":"provinsi","sub_queries":{},"dependencies":{},"entities":{"jenjang":"TK","jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":"jawa timur","kabupaten":null,"kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null,"qc_persen_query":false},"is_oot":false,"oot_reason":null}
+
+Query: "SMA mana saja yang belum terakreditasi di Provinsi Jakarta?"
+{"module":"list","secondary":[],"scope":"provinsi","sub_queries":{},"entities":{"jenjang":"SMA","jenjang_list":[],"status":null,"akreditasi":"TT","akreditasi_mode":"exact","metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":"dki jakarta","kabupaten":null,"kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null,"qc_persen_query":false},"is_oot":false,"oot_reason":null}
+
+Query: "SD yang masih menunggu akreditasi di Bandung"
+{"module":"list","secondary":[],"scope":"kabupaten","sub_queries":{},"entities":{"jenjang":"SD","jenjang_list":[],"status":null,"akreditasi":"TT","akreditasi_mode":"exact","metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":"bandung","kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null,"qc_persen_query":false},"is_oot":false,"oot_reason":null}
+
+Query: "berapa SMP yang tidak punya akreditasi di Jawa Timur"
+{"module":"aggregation","secondary":[],"scope":"provinsi","sub_queries":{},"entities":{"jenjang":"SMP","jenjang_list":[],"status":null,"akreditasi":"TT","akreditasi_mode":"exact","metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":"jawa timur","kabupaten":null,"kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null,"qc_persen_query":false},"is_oot":false,"oot_reason":null}
+
+Query: "berapa total siswa SD di Jawa Barat"
+{"module":"aggregation","secondary":[],"scope":"provinsi","sub_queries":{},"entities":{"jenjang":"SD","jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":"siswa","nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":"jawa barat","kabupaten":null,"kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null,"qc_persen_query":false},"is_oot":false,"oot_reason":null}
+
+Query: "jumlah guru honorer SMA di seluruh Indonesia"
+{"module":"aggregation","secondary":[],"scope":"nasional","sub_queries":{},"entities":{"jenjang":"SMA","jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":"guru_honor","nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":null,"kecamatan":null,"desa":null,"landmark":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null,"qc_persen_query":false},"is_oot":false,"oot_reason":null}
+
+Query: "berapa tenaga kependidikan di kabupaten bekasi"
+{"module":"aggregation","secondary":[],"scope":"kabupaten","sub_queries":{},"entities":{"jenjang":null,"jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":"tendik","nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":"bekasi","kecamatan":null,"desa":null,"landmark":null,"pulau":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null,"qc_persen_query":false},"is_oot":false,"oot_reason":null}
+
+Query: "berapa siswa SD di pulau Jawa"
+{"module":"aggregation","secondary":[],"scope":"pulau","sub_queries":{},"entities":{"jenjang":"SD","jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":"siswa","nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":null,"kecamatan":null,"desa":null,"landmark":null,"pulau":"jawa"},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null},"is_oot":false,"oot_reason":null}
+
+Query: "daftar SMA di seluruh Kalimantan"
+{"module":"list","secondary":[],"scope":"pulau","sub_queries":{},"entities":{"jenjang":"SMA","jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":null,"kecamatan":null,"desa":null,"landmark":null,"pulau":"kalimantan"},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null,"infrastruktur_filter":null},"is_oot":false,"oot_reason":null}
+
+Query: "sekolah yang tidak punya akses internet di NTT"
+{"module":"list","secondary":[],"scope":"provinsi","sub_queries":{},"entities":{"jenjang":null,"jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":"nusa tenggara timur","kabupaten":null,"kecamatan":null,"desa":null,"landmark":null,"pulau":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null,"qc_persen_query":false,"infrastruktur_filter":"tidak_ada_internet"},"is_oot":false,"oot_reason":null}
+
+Query: "berapa SD yang tidak punya jamban di Papua"
+{"module":"aggregation","secondary":[],"scope":"provinsi","sub_queries":{},"entities":{"jenjang":"SD","jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":"papua","kabupaten":null,"kecamatan":null,"desa":null,"landmark":null,"pulau":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null,"qc_persen_query":false,"infrastruktur_filter":"tidak_ada_toilet"},"is_oot":false,"oot_reason":null}
+
+Query: "SMK yang kekurangan komputer di Jawa Tengah"
+{"module":"list","secondary":[],"scope":"provinsi","sub_queries":{},"entities":{"jenjang":"SMK","jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"distribusi_field":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":"jawa tengah","kabupaten":null,"kecamatan":null,"desa":null,"landmark":null,"pulau":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null,"qc_persen_query":false,"infrastruktur_filter":"komputer_minim"},"is_oot":false,"oot_reason":null}
+
+Query: "berapa siswa di seluruh Indonesia"
+{"module":"aggregation","secondary":[],"scope":"nasional","sub_queries":{},"entities":{"jenjang":null,"jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":"siswa","distribusi_field":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":null,"kecamatan":null,"desa":null,"landmark":null,"pulau":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null,"qc_persen_query":false,"infrastruktur_filter":null},"is_oot":false,"oot_reason":null}
+
+Query: "kebanyakan sekolah di Indonesia pakai listrik apa?"
+{"module":"aggregation","secondary":[],"scope":"nasional","sub_queries":{},"entities":{"jenjang":null,"jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"distribusi_field":"sumber_listrik","nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":null,"kecamatan":null,"desa":null,"landmark":null,"pulau":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null,"qc_persen_query":false,"infrastruktur_filter":null},"is_oot":false,"oot_reason":null}
+
+Query: "berapa guru PPPK di Jawa Barat?"
+{"module":"aggregation","secondary":[],"scope":"provinsi","sub_queries":{},"entities":{"jenjang":null,"jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":"guru_p3k","distribusi_field":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":"jawa barat","kabupaten":null,"kecamatan":null,"desa":null,"landmark":null,"pulau":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null,"qc_persen_query":false,"infrastruktur_filter":null},"is_oot":false,"oot_reason":null}
+
+Query: "sekolah pagi atau sore lebih banyak di Jakarta?"
+{"module":"aggregation","secondary":[],"scope":"kabupaten","sub_queries":{},"entities":{"jenjang":null,"jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"distribusi_field":"waktu_penyelenggaraan","nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":"jakarta","kecamatan":null,"desa":null,"landmark":null,"pulau":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null,"qc_persen_query":false,"infrastruktur_filter":null},"is_oot":false,"oot_reason":null}
 
 ═══════════════════════════════════════════════════════════
 ATURAN sub_queries:

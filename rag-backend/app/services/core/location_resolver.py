@@ -125,15 +125,26 @@ class LocationResolver:
                 context_kabupaten=wilayah.kabupaten,
                 context_kecamatan=wilayah.kecamatan,
             )
-            result.desa = canonical
-            worst_method, worst_conf = self._degrade(worst_method, worst_conf, method, conf)
-            if ambiguous:
-                any_ambiguous = True
-                all_candidates = cands
-                worst_conf = min(worst_conf, 0.5)
-            # Enrich kecamatan/kabupaten/provinsi
-            if canonical:
-                self._enrich_from_desa(canonical, result, LOCATION_HIERARCHY)
+            # Graceful fallback: if desa is unresolved but kecamatan is available,
+            # drop the unresolved desa so kecamatan scope is used instead.
+            if method == "unresolved" and wilayah.kecamatan:
+                logger.info(
+                    "[LocationResolver] desa '%s' unresolved — dropping to kecamatan '%s' scope",
+                    wilayah.desa, wilayah.kecamatan,
+                )
+            else:
+                result.desa = canonical
+                worst_method, worst_conf = self._degrade(worst_method, worst_conf, method, conf)
+                if ambiguous:
+                    any_ambiguous = True
+                    all_candidates = cands
+                    worst_conf = min(worst_conf, 0.5)
+                # Enrich kecamatan/kabupaten/provinsi — pass kecamatan context for disambiguation
+                if canonical:
+                    self._enrich_from_desa(
+                        canonical, result, LOCATION_HIERARCHY,
+                        context_kecamatan=wilayah.kecamatan,
+                    )
 
         # ── Process kecamatan (only if not already enriched from desa) ────
         if wilayah.kecamatan and result.kecamatan is None:
@@ -144,17 +155,25 @@ class LocationResolver:
                 LOCATION_HIERARCHY,
                 context_kabupaten=wilayah.kabupaten or result.kabupaten,
             )
-            result.kecamatan = canonical
-            worst_method, worst_conf = self._degrade(worst_method, worst_conf, method, conf)
-            if ambiguous:
-                any_ambiguous = True
-                all_candidates = cands
-                worst_conf = min(worst_conf, 0.5)
-            if canonical and result.kabupaten is None:
-                self._enrich_from_kecamatan(
-                    canonical, result, LOCATION_HIERARCHY,
-                    context_kabupaten=wilayah.kabupaten,
+            # Graceful fallback: if kecamatan is unresolved but kabupaten is available,
+            # drop the unresolved kecamatan so kabupaten scope is used instead.
+            if method == "unresolved" and (wilayah.kabupaten or result.kabupaten):
+                logger.info(
+                    "[LocationResolver] kecamatan '%s' unresolved — dropping to kabupaten scope",
+                    wilayah.kecamatan,
                 )
+            else:
+                result.kecamatan = canonical
+                worst_method, worst_conf = self._degrade(worst_method, worst_conf, method, conf)
+                if ambiguous:
+                    any_ambiguous = True
+                    all_candidates = cands
+                    worst_conf = min(worst_conf, 0.5)
+                if canonical and result.kabupaten is None:
+                    self._enrich_from_kecamatan(
+                        canonical, result, LOCATION_HIERARCHY,
+                        context_kabupaten=wilayah.kabupaten,
+                    )
 
         # ── Process kabupaten (only if not already enriched) ──────────────
         if wilayah.kabupaten and result.kabupaten is None:
@@ -303,7 +322,13 @@ class LocationResolver:
                 if ctx in e.get("kecamatan", "").lower()
             ]
             if len(filtered) == 1:
+                logger.debug(
+                    "[LocationResolver] desa '%s' disambiguated by kecamatan '%s'",
+                    name, context_kecamatan,
+                )
                 return False, []
+            if filtered:
+                candidates = [dict(e, name=name) for e in filtered]
 
         return True, candidates[:5]
 
@@ -311,17 +336,35 @@ class LocationResolver:
     # Hierarchy enrichment helpers
     # ──────────────────────────────────────────────────────────────────────
 
-    def _enrich_from_desa(self, desa_canonical: str, result: ResolvedWilayah, hierarchy: dict):
+    def _enrich_from_desa(
+        self,
+        desa_canonical: str,
+        result: ResolvedWilayah,
+        hierarchy: dict,
+        context_kecamatan: Optional[str] = None,
+    ):
         key = desa_canonical.lower()
         entries = hierarchy.get("desa_kelurahan", {}).get(key, [])
-        if entries:
-            e = entries[0]
-            if result.kecamatan is None and e.get("kecamatan"):
-                result.kecamatan = e["kecamatan"]
-            if result.kabupaten is None and e.get("kabupaten"):
-                result.kabupaten = e["kabupaten"]
-            if result.provinsi is None and e.get("provinsi"):
-                result.provinsi = e["provinsi"]
+        if not entries:
+            return
+        chosen = entries[0]
+        # Disambiguate by kecamatan context when multiple entries share the same desa name
+        if context_kecamatan and len(entries) > 1:
+            ctx = context_kecamatan.lower()
+            for e in entries:
+                if ctx in e.get("kecamatan", "").lower():
+                    chosen = e
+                    logger.debug(
+                        "[LocationResolver] desa '%s' enriched via kecamatan context '%s'",
+                        desa_canonical, context_kecamatan,
+                    )
+                    break
+        if result.kecamatan is None and chosen.get("kecamatan"):
+            result.kecamatan = chosen["kecamatan"]
+        if result.kabupaten is None and chosen.get("kabupaten"):
+            result.kabupaten = chosen["kabupaten"]
+        if result.provinsi is None and chosen.get("provinsi"):
+            result.provinsi = chosen["provinsi"]
 
     def _enrich_from_kecamatan(
         self,

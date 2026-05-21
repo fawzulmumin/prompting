@@ -374,7 +374,7 @@ def detect_level(entities: Dict[str, Any]) -> str:
         level = detect_level(entities)
         answer = await narrate_aggregation(wilayah, total, template_md, level=level)
     """
-    for lvl in ("desa_kelurahan", "kecamatan", "kabupaten", "provinsi"):
+    for lvl in ("desa_kelurahan", "kecamatan", "kabupaten", "provinsi", "pulau"):
         if entities.get(lvl):
             return lvl
     return "nasional"
@@ -395,6 +395,8 @@ async def narrate_aggregation(
     active_filters: Optional[Dict] = None,
     jenjang_requested: Optional[List[str]] = None,
     metric_target: Optional[str] = None,
+    distribusi: Optional[list] = None,
+    distribusi_field: Optional[str] = None,
 ) -> str:
     if total == 0:
         return _zero_result_message(wilayah, active_filters, modul="aggregation")
@@ -434,6 +436,8 @@ async def narrate_aggregation(
         jenjang_requested=jenjang_requested,
         metric_target=metric_target,
         metric_label=metric_label,
+        distribusi=distribusi,
+        distribusi_field=distribusi_field,
     )
 
     has_breakdown = bool(breakdown_jenjang or breakdown_status or drilldown_top3)

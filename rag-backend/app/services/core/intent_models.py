@@ -15,6 +15,7 @@ class WilayahEntities:
     kecamatan:  Optional[str] = None
     desa:       Optional[str] = None
     landmark:   Optional[str] = None
+    pulau:      Optional[str] = None
     ambiguous:  bool = False
     candidates: list = field(default_factory=list)
 
@@ -42,6 +43,8 @@ class CognitiveIntent:
     koordinat_user:   bool = False
     radius_km:        Optional[float] = None
     metric_target:    Optional[str] = None
+    distribusi_field: Optional[str] = None  # "sumber_listrik"|"sumber_air"|"waktu_penyelenggaraan"|"akses_internet"
+    infrastruktur_filter: Optional[str] = None  # "tidak_ada_internet"|"tidak_ada_listrik"|"komputer_minim"|"tidak_ada_toilet"
 
     # QC filters
     qc_masalah_only:  bool = False
@@ -96,7 +99,7 @@ VALID_MODULES = {
 }
 
 VALID_SCOPES = {
-    "nasional", "provinsi", "kabupaten", "kecamatan", "desa", "geo_radius"
+    "nasional", "provinsi", "kabupaten", "kecamatan", "desa", "geo_radius", "pulau"
 }
 
 

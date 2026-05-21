@@ -27,7 +27,7 @@ from app.services.core.result_model import ResultStatus
 def mock_es():
     es = AsyncMock()
     es.search.return_value = {
-        "aggregations": {"total_sekolah": {"value": 100}}
+        "aggregations": {"main_metric": {"value": 100}}
     }
     return es
 
@@ -97,6 +97,25 @@ def test_build_comparison_markdown_with_jenjang():
     md = _build_comparison_markdown(results, jenjang_label="SMK")
     assert "SMK" in md
     assert "Surabaya" in md
+
+
+@pytest.mark.unit
+def test_build_comparison_markdown_with_metric_siswa():
+    results = [
+        {"value": "Bandung", "count": 50000, "entities": {}},
+        {"value": "Bogor",   "count": 30000, "entities": {}},
+    ]
+    md = _build_comparison_markdown(results, metric_target="siswa")
+    assert "siswa" in md.lower()
+    assert "50.000" in md or "50,000" in md
+    assert "Bandung" in md
+
+
+@pytest.mark.unit
+def test_build_comparison_markdown_with_metric_tendik():
+    results = [{"value": "Surabaya", "count": 8000, "entities": {}}]
+    md = _build_comparison_markdown(results, metric_target="tendik")
+    assert "tenaga kependidikan" in md.lower()
 
 
 @pytest.mark.unit
@@ -209,7 +228,7 @@ async def test_jenjang_comparison_total_hits(mock_agg, mock_es):
 @pytest.mark.asyncio
 async def test_fetch_location_data_returns_count(mock_es):
     mock_es.search.return_value = {
-        "aggregations": {"total_sekolah": {"value": 42}}
+        "aggregations": {"main_metric": {"value": 42}}
     }
     result = await _fetch_location_data(
         {"kabupaten": "kab. bandung"},
@@ -218,6 +237,26 @@ async def test_fetch_location_data_returns_count(mock_es):
     assert result["count"] == 42
     assert "value" in result
     assert "entities" in result
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_fetch_location_data_with_metric_siswa(mock_es):
+    mock_es.search.return_value = {
+        "aggregations": {"main_metric": {"value": 12345}}
+    }
+    from types import SimpleNamespace
+    intent = SimpleNamespace(metric_target="siswa", jenjang=None, jenjang_list=[], status=None,
+                             akreditasi=None, akreditasi_mode=None, akreditasi_list=[],
+                             yayasan=None, qc_masalah_only=False, qc_min_masalah=None,
+                             qc_field=None, qc_field_list=[], qc_persen_min=None,
+                             qc_persen_max=None, infrastruktur_filter=None)
+    result = await _fetch_location_data(
+        {"provinsi": "prov. jawa barat"},
+        mock_es,
+        intent=intent,
+    )
+    assert result["count"] == 12345
 
 
 # ── handle_comparison_query (integration-level with mocks) ───────────────────

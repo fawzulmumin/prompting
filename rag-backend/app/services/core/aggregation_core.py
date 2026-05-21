@@ -35,16 +35,80 @@ def _build_provinsi_filter(provinsi_value: str) -> dict:
         }
     return {"term": {"provinsi": provinsi_value}}
 
+# ── Akreditasi alias — map nilai LLM ke nilai ES aktual ──────────────────────
+# ES menyimpan sekolah tidak terakreditasi sebagai "Tidak Terakreditasi" (bukan "TT")
+_AKRED_ES_ALIAS: Dict[str, str] = {
+    "TT":     "Tidak Terakreditasi",
+    "BELUM":  "Tidak Terakreditasi",
+    "-":      "Tidak Terakreditasi",
+}
+
+# ── Metric fields yang ada di idx_sekolah_profile (BUKAN idx_sekolah_qc) ────
+_METRIC_NEEDS_PROFILE: frozenset = frozenset({
+    "siswa", "siswa_l", "siswa_p",
+    "guru", "guru_pns", "guru_honor", "guru_sertifikasi", "guru_s1",
+    "tendik",
+    "guru_p3k", "guru_l", "guru_p_gender", "total_komputer",
+    "siswa_baru", "siswa_mengulang", "siswa_lulus",
+})
+
+# ── Distribusi fields yang HANYA ada di idx_sekolah_profile ─────────────────
+# sumber_listrik / akses_internet / waktu_penyelenggaraan ada di kedua index.
+# sumber_air hanya dari idx_prompting_agent → hanya di profile index.
+_DISTRIBUSI_NEEDS_PROFILE: frozenset = frozenset({"sumber_air"})
+
 # ── Metric target mapping ────────────────────────────────────────────────────
-# Index baru (idx_sekolah_qc) tidak punya field siswa/guru — hanya count sekolah.
-_METRIC_MAP: Dict[str, tuple] = {}
+_METRIC_MAP: Dict[str, str] = {
+    "siswa":            "siswa_total",
+    "siswa_l":          "siswa_l",
+    "siswa_p":          "siswa_p",
+    "guru":             "guru_total",
+    "guru_pns":         "guru_pns",
+    "guru_honor":       "guru_honor",
+    "guru_sertifikasi": "guru_sertifikasi",
+    "guru_s1":          "guru_s1_keatas",
+    "tendik":           None,   # script sum tendik_l + tendik_p
+    "guru_p3k":         "guru_p3k",
+    "guru_l":           "guru_l",
+    "guru_p_gender":    "guru_p",
+    "total_komputer":   "total_komputer",
+    "siswa_baru":       None,   # script sum siswa_baru_l + siswa_baru_p
+    "siswa_mengulang":  None,   # script sum siswa_mengulang_l + siswa_mengulang_p
+    "siswa_lulus":      None,   # script sum siswa_lulus_l + siswa_lulus_p
+}
+
+# ── Script-based metrics: pair of (field_l, field_p) to sum ──────────────────
+_SCRIPT_PAIRS: Dict[str, tuple] = {
+    "tendik":        ("tendik_l",           "tendik_p"),
+    "siswa_baru":    ("siswa_baru_l",        "siswa_baru_p"),
+    "siswa_mengulang": ("siswa_mengulang_l", "siswa_mengulang_p"),
+    "siswa_lulus":   ("siswa_lulus_l",       "siswa_lulus_p"),
+}
 
 def build_metric_aggs(metric_target: Optional[str]) -> Dict[str, Any]:
-    """
-    Bangun ES aggregation clause untuk metric yang diminta.
-    Index baru hanya mendukung count sekolah — selalu fallback ke value_count.
-    """
+    """Bangun ES aggregation clause untuk metric yang diminta."""
+    if not metric_target or metric_target == "sekolah":
+        return {"main_metric": {"value_count": {"field": "npsn"}}}
+
+    es_field = _METRIC_MAP.get(metric_target)
+    if es_field:
+        return {"main_metric": {"sum": {"field": es_field}}}
+
+    if metric_target in _SCRIPT_PAIRS:
+        f1, f2 = _SCRIPT_PAIRS[metric_target]
+        script = (
+            f"doc['{f1}'].size() > 0 && doc['{f2}'].size() > 0 "
+            f"? doc['{f1}'].value + doc['{f2}'].value : 0"
+        )
+        return {"main_metric": {"sum": {"script": {"source": script}}}}
+
+    # Fallback ke count sekolah
     return {"main_metric": {"value_count": {"field": "npsn"}}}
+
+
+def build_distribusi_aggs(field_name: str, size: int = 15) -> Dict[str, Any]:
+    """Bangun ES terms aggregation untuk distribusi field keyword."""
+    return {"distribusi": {"terms": {"field": field_name, "size": size}}}
 
 def build_qc_aggs() -> Dict[str, Any]:
     """
@@ -117,7 +181,8 @@ async def execute_aggregation_query(
 async def execute_nested_aggregation_query(
     es_client: AsyncElasticsearch,
     entities: Dict[str, Any],
-    metric_target: Optional[str] = None,          # ← NEW
+    metric_target: Optional[str] = None,
+    distribusi_field: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Jalankan count + breakdown jenjang & status dalam SATU query ES.
@@ -131,19 +196,31 @@ async def execute_nested_aggregation_query(
         }
         atau None jika gagal.
     """
-    index = os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc")
+    # Pilih index: siswa/guru/tendik hanya ada di idx_sekolah_profile;
+    # sumber_air juga hanya ada di profile index.
+    _use_profile_index = (
+        metric_target in _METRIC_NEEDS_PROFILE
+        or distribusi_field in _DISTRIBUSI_NEEDS_PROFILE
+    )
+    index = (
+        os.getenv("ELASTICSEARCH_PROFILE_INDEX", "idx_sekolah_profile")
+        if _use_profile_index
+        else os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc")
+    )
     filters = build_filters(entities)
     _akreditasi = entities.get("akreditasi")
     jenjang_multi = entities.get("jenjang_multi")
 
     # Metric aggs — dinamis berdasarkan target
     metric_aggs = build_metric_aggs(metric_target)
+    logger.info("[AGG_CORE] METRIC AGG INJECTED: metric_target=%r agg=%s index=%s",
+                metric_target, metric_aggs, index)
 
     body = {
         "size": 0,
         "query": {"bool": {"filter": filters}},
         "aggs": {
-            **metric_aggs,                          # ← main_metric (sum/count)
+            **metric_aggs,
             "by_jenjang": {
                 "terms": {
                     "field": "bentuk_pendidikan",
@@ -153,11 +230,12 @@ async def execute_nested_aggregation_query(
             },
             "by_status": {
                 "terms": {"field": "status_sekolah", "size": 5}
-            }
+            },
+            **(build_distribusi_aggs(distribusi_field) if distribusi_field else {}),
         },
         "track_total_hits": True
     }
- 
+
     logger.debug("NESTED AGG FILTERS: %s", filters)
     # ── Dynamic aggregation: multi-jenjang + akreditasi ─────────────────
     if _akreditasi and jenjang_multi:
@@ -185,49 +263,118 @@ async def execute_nested_aggregation_query(
             request_timeout=10
         )
  
-        # Total
+        # Document count (always needed for breakdown context)
         total_raw = response.get("hits", {}).get("total", {})
-        total = total_raw.get("value", 0) if isinstance(total_raw, dict) else total_raw
- 
-        # Breakdown jenjang
-        jenjang_buckets = (
-            response.get("aggregations", {})
-            .get("by_jenjang", {})
-            .get("buckets", [])
-        )
-        breakdown_jenjang = {
-            b["key"]: b["doc_count"]
-            for b in jenjang_buckets
-        }
- 
-        # Breakdown status
-        status_buckets = (
-            response.get("aggregations", {})
-            .get("by_status", {})
-            .get("buckets", [])
-        )
-        breakdown_status = {
-            b["key"]: b["doc_count"]
-            for b in status_buckets
-        }
- 
         total_doc = total_raw.get("value", 0) if isinstance(total_raw, dict) else total_raw
 
+        # Metric value — use main_metric agg if metric_target != sekolah
+        aggs = response.get("aggregations", {})
+        _main = aggs.get("main_metric", {})
+        main_metric_val = _main.get("value")
+        logger.info("[AGG_CORE] MAIN METRIC RESULT: metric_target=%r main=%s total_doc=%s",
+                    metric_target, _main, total_doc)
+        is_numeric = metric_target and metric_target != "sekolah"
+        # Bug-1 diagnostic: jika sum == doc_count untuk field numerik di profile index,
+        # kemungkinan field berisi flag (0/1) bukan count aktual.
+        if (is_numeric and _use_profile_index and main_metric_val is not None
+                and total_doc > 0 and int(main_metric_val) == total_doc):
+            logger.warning(
+                "[AGG_CORE] SUSPICIOUS: sum(%s)=%.0f == doc_count=%d — "
+                "field mungkin flag bukan count aktual. Verifikasi di ES.",
+                metric_target, main_metric_val, total_doc
+            )
+        if (
+            is_numeric
+            and not _use_profile_index  # profile index seharusnya punya data
+            and (main_metric_val is None or main_metric_val == 0)
+            and total_doc > 0
+        ):
+            # Field tidak ada di qc index — graceful fallback ke school count
+            logger.warning(
+                "[AGG_CORE] metric_target=%s returned 0 dari qc index; "
+                "fallback ke doc_count=%d", metric_target, total_doc
+            )
+            effective_total = total_doc
+            metric_target = None  # Treat as school count to avoid misleading labels
+        else:
+            effective_total = int(main_metric_val or 0) if is_numeric else total_doc
+
+        # Breakdown jenjang
+        jenjang_buckets = aggs.get("by_jenjang", {}).get("buckets", [])
+        breakdown_jenjang = {b["key"]: b["doc_count"] for b in jenjang_buckets}
+
+        # Breakdown status
+        status_buckets = aggs.get("by_status", {}).get("buckets", [])
+        breakdown_status = {b["key"]: b["doc_count"] for b in status_buckets}
+
+        # Distribusi field jika diminta
+        distribusi_result = None
+        if distribusi_field:
+            dist_buckets = aggs.get("distribusi", {}).get("buckets", [])
+            dist_total = sum(b["doc_count"] for b in dist_buckets)
+            distribusi_result = [
+                {
+                    "key": b["key"],
+                    "count": b["doc_count"],
+                    "pct": round(b["doc_count"] / dist_total * 100, 1) if dist_total > 0 else 0,
+                }
+                for b in dist_buckets
+            ]
+
         return {
-            "total": total_doc,
-            "total_doc": total_doc,
-            "metric_target": "sekolah",
+            "total":             effective_total,
+            "total_doc":         total_doc,
+            "metric_target":     metric_target or "sekolah",
             "breakdown_jenjang": breakdown_jenjang,
             "breakdown_status":  breakdown_status,
+            "distribusi":        distribusi_result,
+            "distribusi_field":  distribusi_field,
         }
  
     except (ApiError, TransportError):
         logger.exception("Nested aggregation failed, falling back to count")
         return None
  
+PULAU_PROVINSI_MAP: Dict[str, List[str]] = {
+    "jawa": [
+        "prov. dki jakarta", "prov. jawa barat", "prov. jawa tengah",
+        "prov. jawa timur", "prov. banten", "prov. d.i. yogyakarta",
+    ],
+    "sumatera": [
+        "prov. aceh", "prov. sumatera utara", "prov. sumatera barat",
+        "prov. riau", "prov. kepulauan riau", "prov. jambi",
+        "prov. sumatera selatan", "prov. bengkulu", "prov. lampung",
+        "prov. kepulauan bangka belitung",
+    ],
+    "kalimantan": [
+        "prov. kalimantan barat", "prov. kalimantan tengah",
+        "prov. kalimantan selatan", "prov. kalimantan timur",
+        "prov. kalimantan utara",
+    ],
+    "sulawesi": [
+        "prov. sulawesi utara", "prov. gorontalo", "prov. sulawesi tengah",
+        "prov. sulawesi barat", "prov. sulawesi selatan", "prov. sulawesi tenggara",
+    ],
+    "papua": [
+        "prov. papua", "prov. papua barat", "prov. papua selatan",
+        "prov. papua tengah", "prov. papua pegunungan", "prov. papua barat daya",
+    ],
+    "maluku": ["prov. maluku", "prov. maluku utara"],
+    "nusa tenggara": ["prov. nusa tenggara barat", "prov. nusa tenggara timur"],
+    "bali": ["prov. bali"],
+    "indonesia timur": [
+        "prov. kalimantan timur", "prov. kalimantan utara", "prov. sulawesi utara",
+        "prov. sulawesi tengah", "prov. sulawesi selatan", "prov. sulawesi tenggara",
+        "prov. sulawesi barat", "prov. gorontalo", "prov. maluku", "prov. maluku utara",
+        "prov. papua", "prov. papua barat", "prov. nusa tenggara timur",
+        "prov. nusa tenggara barat", "prov. bali",
+    ],
+}
+
+
 def build_filters(entities: Dict[str, Any]) -> List[Dict[str, Any]]:
     filters = []
- 
+
     # Key-key internal yang TIDAK boleh jadi term filter langsung di generic loop
     _SKIP_KEYS = {
         "hierarchy_warning",
@@ -249,7 +396,19 @@ def build_filters(entities: Dict[str, Any]) -> List[Dict[str, Any]]:
         "qc_persen_min",
         "qc_persen_max",
         "qc_field_list",
+        # Pulau — ditangani secara eksplisit di bawah
+        "pulau",
+        "provinsi_list",
     }
+
+    # ── Pulau → expand ke terms filter multi-provinsi ─────────────────────────
+    _pulau = entities.get("pulau")
+    if _pulau and _pulau in PULAU_PROVINSI_MAP:
+        filters.append({"terms": {"provinsi": PULAU_PROVINSI_MAP[_pulau]}})
+        logger.debug("[AGG_CORE] pulau filter: %s → %d provinsi", _pulau, len(PULAU_PROVINSI_MAP[_pulau]))
+    elif entities.get("provinsi_list"):
+        filters.append({"terms": {"provinsi": entities["provinsi_list"]}})
+        logger.debug("[AGG_CORE] provinsi_list filter: %d provinsi", len(entities["provinsi_list"]))
 
     # Jika ada area_group (mis. purwokerto → list kecamatan),
     # tambahkan terms filter untuk kecamatan
@@ -323,10 +482,11 @@ def build_filters(entities: Dict[str, Any]) -> List[Dict[str, Any]]:
             })
 
         else:  # exact
+            _akred_val = _AKRED_ES_ALIAS.get(_akreditasi.upper(), _akreditasi.upper())
             filters.append({
-                "term": {"akreditasi": _akreditasi.upper()}
+                "term": {"akreditasi": _akred_val}
             })
-            logger.debug("[AGG_CORE] akreditasi exact filter: %s", _akreditasi.upper())
+            logger.debug("[AGG_CORE] akreditasi exact filter: %s → %s", _akreditasi.upper(), _akred_val)
     
     # Akreditasi filter — gunakan terms (multiple values) atau term (single)
     elif "akreditasi_gte" in entities and entities["akreditasi_gte"]:

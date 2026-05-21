@@ -698,6 +698,8 @@ async def _handle_aggregation_route(
             active_filters=result.get("active_filters"),
             jenjang_requested=result.get("jenjang_requested"),
             metric_target=result.get("metric_target"),
+            distribusi=result.get("distribusi"),
+            distribusi_field=result.get("distribusi_field"),
         )
 
     resolution_metadata = result.get("metadata", {}) or {}
