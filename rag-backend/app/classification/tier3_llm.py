@@ -145,6 +145,10 @@ class LLMClassifier:
                 koordinat_user=bool(ent.get("koordinat_user", False)),
                 radius_km=_safe_float(ent.get("radius_km")),
                 metric_target=_norm(ent.get("metric_target")),
+                metric_target_list=[
+                    m for m in (ent.get("metric_target_list") or [])
+                    if isinstance(m, str) and m.strip()
+                ],
                 distribusi_field=_norm(ent.get("distribusi_field")),
                 infrastruktur_filter=_norm(ent.get("infrastruktur_filter")),
                 keaktifan=_norm(ent.get("keaktifan")),

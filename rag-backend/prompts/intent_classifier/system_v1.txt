@@ -28,6 +28,7 @@ SCHEMA OUTPUT:
     "akreditasi_mode": "<exact|gte|exclude|in|null>",
     "akreditasi_list": "<array misal [\"A\",\"B\"] jika mode=in, atau [] jika tidak>",
     "metric_target": "<null|siswa|siswa_l|siswa_p|guru|guru_pns|guru_honor|guru_sertifikasi|guru_s1|tendik|guru_p3k|guru_l|guru_p_gender|siswa_baru|siswa_mengulang|siswa_lulus|total_komputer — null jika hitung sekolah>",
+    "metric_target_list": "<array metric jika user minta lebih dari satu, contoh [\"siswa_l\",\"siswa_p\"], atau []>",
     "distribusi_field": "<null|sumber_listrik|sumber_air|waktu_penyelenggaraan|akses_internet>",
     "nama_sekolah": "<nama sekolah spesifik atau null>",
     "npsn": "<8 digit atau null>",
@@ -120,6 +121,13 @@ ATURAN 3 — COMPARISON vs AGGREGATION:
   Isi wilayah_bandingkan untuk wilayah kedua
   PENGECUALIAN: jika perbandingan adalah antara DUA STATUS (negeri vs swasta),
   gunakan aggregation (bukan comparison) karena comparison_handler hanya support dua wilayah.
+
+ATURAN 3 KLARIFIKASI — COMPARISON hanya untuk DUA WILAYAH berbeda:
+  "lebih banyak negeri atau swasta di Jakarta?" → AGGREGATION (satu wilayah, dua kategori status — BUKAN comparison)
+  "guru PPPK vs guru honorer di Jawa Tengah?" → AGGREGATION dengan metric_target_list: ["guru_p3k","guru_honor"]
+  "Jawa Tengah vs Jawa Timur berapa sekolah?" → COMPARISON (dua wilayah berbeda)
+  "mana lebih banyak siswa laki-laki atau perempuan di SMA Jawa Barat?" → AGGREGATION + metric_target_list: ["siswa_l","siswa_p"]
+  Kunci: comparison_handler butuh DUA LOKASI BERBEDA. Dua kategori dalam satu lokasi = aggregation.
 
 KASUS KHUSUS — COMPARISON + SPK:
   "perbandingan SPK SMA di Aceh dan Bali"
@@ -239,6 +247,18 @@ METRIC_TARGET:
   "tenaga kependidikan" / "tendik" / "tenaga administrasi" → metric_target: "tendik"
   "komputer" / "jumlah komputer" / "total komputer" / "lab komputer" → metric_target: "total_komputer"
   PENTING: metric_target diisi untuk module=aggregation DAN module=comparison.
+
+METRIC_TARGET_LIST — gunakan saat user tanya DUA ATAU LEBIH metric sekaligus dalam satu query:
+  "guru laki-laki dan guru perempuan" → metric_target: null, metric_target_list: ["guru_l","guru_p_gender"]
+  "siswa laki-laki dan siswa perempuan" → metric_target: null, metric_target_list: ["siswa_l","siswa_p"]
+  "guru PNS dan honorer" → metric_target: null, metric_target_list: ["guru_pns","guru_honor"]
+  "siswa baru dan siswa lulus" → metric_target: null, metric_target_list: ["siswa_baru","siswa_lulus"]
+  "guru dan siswa" → metric_target: null, metric_target_list: ["guru","siswa"]
+  "siswa mengulang dan siswa lulus" → metric_target: null, metric_target_list: ["siswa_mengulang","siswa_lulus"]
+  "guru PPPK dan guru honorer" → metric_target: null, metric_target_list: ["guru_p3k","guru_honor"]
+  ATURAN: jika ada DUA atau lebih metric eksplisit → isi metric_target_list, biarkan metric_target: null
+  ATURAN: jika hanya satu metric → isi metric_target saja, metric_target_list: []
+  ATURAN: metric_target_list: [] (kosong) jika tidak ada multi-metric
 
 DISTRIBUSI_FIELD — deteksi ketika user tanya distribusi/komposisi suatu field keyword:
   "kebanyakan pakai listrik apa" / "sumber listrik sekolah" / "distribusi listrik" / "listrik PLN atau diesel" → distribusi_field: "sumber_listrik"
@@ -635,7 +655,16 @@ Query: "berapa SD yang tidak punya jamban di Papua"
 {"module":"aggregation","secondary":[],"scope":"provinsi","sub_queries":{},"entities":{"jenjang":"SD","jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":"papua","kabupaten":null,"kecamatan":null,"desa":null,"landmark":null,"pulau":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null,"qc_persen_query":false,"infrastruktur_filter":"tidak_ada_toilet"},"is_oot":false,"oot_reason":null}
 
 Query: "SMK yang kekurangan komputer di Jawa Tengah"
-{"module":"list","secondary":[],"scope":"provinsi","sub_queries":{},"entities":{"jenjang":"SMK","jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"distribusi_field":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":"jawa tengah","kabupaten":null,"kecamatan":null,"desa":null,"landmark":null,"pulau":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null,"qc_persen_query":false,"infrastruktur_filter":"komputer_minim"},"is_oot":false,"oot_reason":null}
+{"module":"list","secondary":[],"scope":"provinsi","sub_queries":{},"entities":{"jenjang":"SMK","jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"metric_target_list":[],"distribusi_field":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":"jawa tengah","kabupaten":null,"kecamatan":null,"desa":null,"landmark":null,"pulau":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null,"qc_persen_query":false,"infrastruktur_filter":"komputer_minim"},"is_oot":false,"oot_reason":null}
+
+Query: "berapa siswa laki-laki dan siswa perempuan SMA di Jawa Barat?"
+{"module":"aggregation","secondary":[],"scope":"provinsi","sub_queries":{},"entities":{"jenjang":"SMA","jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"metric_target_list":["siswa_l","siswa_p"],"distribusi_field":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":"jawa barat","kabupaten":null,"kecamatan":null,"desa":null,"landmark":null,"pulau":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null,"qc_persen_query":false,"infrastruktur_filter":null},"is_oot":false,"oot_reason":null}
+
+Query: "guru PNS dan guru honorer di Jakarta berapa masing-masing?"
+{"module":"aggregation","secondary":[],"scope":"kabupaten","sub_queries":{},"entities":{"jenjang":null,"jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"metric_target_list":["guru_pns","guru_honor"],"distribusi_field":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":"jakarta","kecamatan":null,"desa":null,"landmark":null,"pulau":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null,"qc_persen_query":false,"infrastruktur_filter":null},"is_oot":false,"oot_reason":null}
+
+Query: "jenis sekolah apa saja di Bandung?"
+{"module":"aggregation","secondary":[],"scope":"kabupaten","sub_queries":{},"entities":{"jenjang":null,"jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":null,"metric_target_list":[],"distribusi_field":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":"bandung","kecamatan":null,"desa":null,"landmark":null,"pulau":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null,"qc_persen_query":false,"infrastruktur_filter":null},"is_oot":false,"oot_reason":null}
 
 Query: "berapa siswa di seluruh Indonesia"
 {"module":"aggregation","secondary":[],"scope":"nasional","sub_queries":{},"entities":{"jenjang":null,"jenjang_list":[],"status":null,"akreditasi":null,"akreditasi_mode":null,"metric_target":"siswa","distribusi_field":null,"nama_sekolah":null,"npsn":null,"wilayah":{"provinsi":null,"kabupaten":null,"kecamatan":null,"desa":null,"landmark":null,"pulau":null},"wilayah_bandingkan":null,"yayasan":null,"koordinat_user":false,"radius_km":null,"keaktifan":null,"wilayah_terpencil":null,"wilayah_perbatasan":null,"qc_masalah_only":false,"qc_field":null,"qc_min_masalah":null,"sort_by":null,"sort_order":null,"qc_persen_min":null,"qc_persen_max":null,"qc_persen_query":false,"infrastruktur_filter":null},"is_oot":false,"oot_reason":null}

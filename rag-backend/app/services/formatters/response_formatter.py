@@ -281,15 +281,23 @@ def format_school_list_answer(result: Dict[str, Any]) -> Dict[str, str]:
 # =====================================================
  
 _METRIC_LABELS: Dict[str, str] = {
+    "sekolah":          "sekolah",
     "siswa":            "siswa",
     "siswa_l":          "siswa laki-laki",
     "siswa_p":          "siswa perempuan",
+    "siswa_baru":       "siswa baru",
+    "siswa_mengulang":  "siswa mengulang",
+    "siswa_lulus":      "siswa lulus",
     "guru":             "guru/PTK",
-    "guru_pns":         "guru PNS",
+    "guru_pns":         "guru PNS/ASN",
     "guru_honor":       "guru honorer",
     "guru_sertifikasi": "guru bersertifikasi",
+    "guru_s1":          "guru lulusan S1+",
+    "guru_p3k":         "guru PPPK",
+    "guru_l":           "guru laki-laki",
+    "guru_p_gender":    "guru perempuan",
     "tendik":           "tenaga kependidikan",
-    "sekolah":          "sekolah",
+    "total_komputer":   "komputer",
 }
 
 
@@ -334,12 +342,14 @@ def _build_markdown_response(title: str, total: int, metric_label: str = "sekola
 def build_reject_answer() -> Dict[str, Any]:
     return {
         "answer_markdown": (
-            "### Pertanyaan Tidak Relevan\n\n"
-            "Maaf, sistem ini hanya mendukung pertanyaan terkait:\n\n"
-            "- Jumlah sekolah\n"
-            "- Status sekolah (negeri/swasta)\n"
-            "- Lokasi sekolah\n\n"
-            "Silakan ajukan pertanyaan terkait data sekolah."
+            "Maaf, pertanyaan ini di luar cakupan sistem informasi pendidikan.\n\n"
+            "Saya dapat membantu menjawab pertanyaan seperti:\n\n"
+            "- **Jumlah & sebaran** — sekolah, guru, atau siswa berdasarkan wilayah\n"
+            "- **Akreditasi** — sekolah akreditasi A, B, C, TT, atau belum terakreditasi\n"
+            "- **Infrastruktur** — sumber air, listrik, internet, atau waktu belajar\n"
+            "- **Data kualitas (QC)** — sekolah dengan data bermasalah atau tidak lengkap\n"
+            "- **Profil sekolah** — cari berdasarkan nama sekolah atau nomor NPSN\n\n"
+            "*Contoh: 'Berapa guru PPPK di Jawa Barat?' atau 'Daftar SMA akreditasi A di Surabaya'*"
         ),
         "provider": "SYSTEM_REJECT",
         "num_docs": 0,

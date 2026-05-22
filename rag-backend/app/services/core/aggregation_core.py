@@ -53,9 +53,11 @@ _METRIC_NEEDS_PROFILE: frozenset = frozenset({
 })
 
 # ── Distribusi fields yang HANYA ada di idx_sekolah_profile ─────────────────
-# sumber_listrik / akses_internet / waktu_penyelenggaraan ada di kedua index.
+# akses_internet / waktu_penyelenggaraan ada di kedua index.
 # sumber_air hanya dari idx_prompting_agent → hanya di profile index.
-_DISTRIBUSI_NEEDS_PROFILE: frozenset = frozenset({"sumber_air"})
+# sumber_listrik: ada di qc index tapi coverage sangat rendah (8-9 docs per provinsi);
+# profile index memiliki coverage jauh lebih baik.
+_DISTRIBUSI_NEEDS_PROFILE: frozenset = frozenset({"sumber_air", "sumber_listrik"})
 
 # ── Metric target mapping ────────────────────────────────────────────────────
 _METRIC_MAP: Dict[str, str] = {
@@ -236,6 +238,13 @@ async def execute_nested_aggregation_query(
         "track_total_hits": True
     }
 
+    # Tambah sub-agg metric ke by_jenjang ketika metric bukan sekolah,
+    # agar breakdown jenjang menampilkan sum metric (bukan doc_count sekolah).
+    if metric_target and metric_target != "sekolah":
+        body["aggs"]["by_jenjang"]["aggs"] = {
+            "metric_val": list(metric_aggs.values())[0]
+        }
+
     logger.debug("NESTED AGG FILTERS: %s", filters)
     # ── Dynamic aggregation: multi-jenjang + akreditasi ─────────────────
     if _akreditasi and jenjang_multi:
@@ -299,9 +308,15 @@ async def execute_nested_aggregation_query(
         else:
             effective_total = int(main_metric_val or 0) if is_numeric else total_doc
 
-        # Breakdown jenjang
+        # Breakdown jenjang — gunakan sum metric jika numeric, doc_count jika sekolah
         jenjang_buckets = aggs.get("by_jenjang", {}).get("buckets", [])
-        breakdown_jenjang = {b["key"]: b["doc_count"] for b in jenjang_buckets}
+        breakdown_jenjang = {
+            b["key"]: (
+                int(b.get("metric_val", {}).get("value", 0) or 0)
+                if is_numeric else b["doc_count"]
+            )
+            for b in jenjang_buckets
+        }
 
         # Breakdown status
         status_buckets = aggs.get("by_status", {}).get("buckets", [])
@@ -772,44 +787,48 @@ async def execute_drilldown_query(
     entities: Dict[str, Any],
     drilldown_field: str,
     size: int = 3,
+    metric_target: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Ambil top-N wilayah di level bawahnya dalam satu query ES.
-    
-    Contoh:
-        entities = {"provinsi": "prov. jawa barat"}
-        drilldown_field = "kabupaten"
-        → return top 3 kabupaten di Jawa Barat berdasarkan jumlah sekolah
-    
+
+    Jika metric_target diberikan (misal "siswa"), "count" berisi sum metric
+    (jumlah siswa), bukan doc_count (jumlah sekolah).
+
     Return:
         [{"name": "kab. bogor", "count": 8234}, ...]
     """
-    index = os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc")
+    _is_numeric = metric_target and metric_target != "sekolah"
+    _use_profile = metric_target in _METRIC_NEEDS_PROFILE
+    index = (
+        os.getenv("ELASTICSEARCH_PROFILE_INDEX", "idx_sekolah_profile")
+        if _use_profile
+        else os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc")
+    )
     filters = build_filters(entities)
- 
-    body = {
-        "size": 0,
-        "query": {
-            "bool": {
-                "filter": filters
-            }
-        },
-        "aggs": {
-            "drilldown": {
-                "terms": {
-                    "field": drilldown_field,
-                    "size": size,
-                    "order": {"_count": "desc"}
-                }
-            }
+
+    drilldown_agg: Dict[str, Any] = {
+        "terms": {
+            "field": drilldown_field,
+            "size": size,
+            "order": {"_count": "desc"},
         }
     }
- 
+    if _is_numeric:
+        _agg_spec = list(build_metric_aggs(metric_target).values())[0]
+        drilldown_agg["aggs"] = {"metric_val": _agg_spec}
+
+    body = {
+        "size": 0,
+        "query": {"bool": {"filter": filters}},
+        "aggs": {"drilldown": drilldown_agg},
+    }
+
     try:
         response = await es_client.search(
             index=index,
             body=body,
-            request_timeout=10
+            request_timeout=10,
         )
         buckets = (
             response.get("aggregations", {})
@@ -817,13 +836,20 @@ async def execute_drilldown_query(
             .get("buckets", [])
         )
         return [
-            {"name": b["key"], "count": b["doc_count"]}
+            {
+                "name": b["key"],
+                "count": (
+                    int(b.get("metric_val", {}).get("value", 0) or 0)
+                    if _is_numeric
+                    else b["doc_count"]
+                ),
+            }
             for b in buckets
         ]
     except (ApiError, TransportError):
         logger.exception("Drilldown query failed")
         return []
- 
+
 async def handle_qc_percentage_query(
     intent,
     es_client: AsyncElasticsearch,

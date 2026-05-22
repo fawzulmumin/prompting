@@ -138,12 +138,12 @@ class TestRunClassification:
         assert intent.module == "aggregation"
 
     @patch("app.services.core.ask_pipeline.classify_intent")
-    async def test_adjudication_school_keyword_overrides_oot(self, mock_classify):
+    async def test_adjudication_oot_trusted_over_school(self, mock_classify):
         from app.services.core.cognitive_router import CognitiveIntent
         from app.services.core.intent_classifier import IntentType
-        # LLM says OOT, but rule classifier says SCHOOL
+        # LLM says OOT — adjudication is now skipped, OOT is trusted
         mock_classify.return_value = CognitiveIntent(module="out_of_context")
         with patch("app.services.core.ask_pipeline.rule_classify", return_value=IntentType.SCHOOL):
             from app.services.core.ask_pipeline import _run_classification
-            intent, _ = await _run_classification("daftar sekolah di sana", on_step=None)
-        assert intent.primary == "list"
+            intent, _ = await _run_classification("patokannya sekolah bagus itu apa", on_step=None)
+        assert intent.primary == "out_of_context"

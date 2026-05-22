@@ -64,6 +64,15 @@ _SIGNAL_DEFS: list[tuple[str, float, str]] = [
     ("aggregation", 0.40, r"\b(distribusi|breakdown|komposisi|sebaran|persentase|proporsi)\b"),
     ("aggregation", 0.35, r"\b(per\s+(provinsi|kabupaten|kecamatan|desa|kota|wilayah|jenjang))\b"),
     ("aggregation", 0.30, r"\b(statistik|rekapitulasi|rekap)\b"),
+    # Distribusi infrastruktur — "tidak punya listrik" / "tanpa internet" → aggregation
+    ("aggregation", 0.65, r"\b(tidak\s+(punya|ada|memiliki)|tanpa|belum\s+(ada|punya))\s+(listrik|internet|air\s+bersih|pln)\b"),
+    # Keyword infrastruktur saja (moderate) — "listrik apa", "pakai listrik PLN"
+    ("aggregation", 0.50, r"\b(sumber\s+listrik|sumber\s+air|akses\s+internet|pakai\s+listrik|jenis\s+listrik)\b"),
+    # "jenis sekolah" → breakdown jenjang (Phase 21-B1)
+    ("aggregation", 0.60, r"\b(jenis\s+sekolah|tipe\s+sekolah|macam[- ]macam\s+sekolah|jenjang\s+apa\s+saja|ada\s+jenis\s+apa)\b"),
+    # Multi-metric dalam satu query → aggregation (Phase 21-A)
+    ("aggregation", 0.55, r"\bguru\s+(pns|asn|honor\w*|pppk|p3k|laki|perempuan)\s+(dan|dengan)\s+guru\b"),
+    ("aggregation", 0.55, r"\bsiswa\s+(laki|perempuan|baru|lulus|mengulang)\s+(dan|dengan)\s+siswa\b"),
 
     # List
     ("list", 0.65, r"\b(daftar|tampilkan|tunjukkan|lihat|show|sebutkan|list)\b"),

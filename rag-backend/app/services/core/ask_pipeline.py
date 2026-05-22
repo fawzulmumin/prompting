@@ -51,6 +51,7 @@ from app.services.narrator_service import (
     detect_level,
     narrate_multi_module,
     narrate_qc_percentage,
+    narrate_multi_metric_aggregation,
 )
 from app.services.formatters.response_formatter import (
     format_school_answer,
@@ -76,6 +77,15 @@ from app.utils.rag_evaluation_logger import log_rag_evaluation
 logger = logging.getLogger(__name__)
 
 _OnStep = Optional[Callable[[str, str], Awaitable[None]]]
+
+# Override: queries about infrastructure (listrik/internet/air) should route to
+# aggregation even when tier1/tier2 classifies them as list (e.g. "sekolah di
+# Sulawesi yang tidak punya listrik PLN").
+_DISTRIBUSI_QUERY_RE = re.compile(
+    r'\b(tidak.?(punya|ada|memiliki)|tanpa|belum.?(ada|punya))\s*(listrik|internet|air|pln)'
+    r'|\b(sumber.?listrik|akses.?internet|sumber.?air|waktu.?belajar|waktu.?penyelenggaraan)\b',
+    re.IGNORECASE,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -391,30 +401,21 @@ async def _run_classification(query: str, on_step: _OnStep) -> tuple:
     intent = await classify_intent(query, timeout=45.0, use_cache=True)
     logger.info("[RouterV2] primary=%s secondary=%s", intent.primary, intent.secondary)
 
-    # Adjudication: rule-based classifier sebagai tiebreaker
-    if intent.primary == "out_of_context" and not intent.secondary:
-        rule_result = rule_classify(query)
-        if rule_result == RuleIntentType.SCHOOL:
-            intent.primary = "list"
-            intent.is_oot = False
-            intent.oot_reason = None
-        elif rule_result == RuleIntentType.AMBIGUOUS:
-            _q = query.lower()
-            _edu_kws = (
-                "sekolah", "sd", "smp", "sma", "smk", "tk", "paud",
-                "mi", "mts", "ma", "madrasah", "pesantren", "pondok",
-                "pkbm", "slb", "skb", "guru", "siswa", "murid",
-                "tendik", "akreditasi", "npsn",
-            )
-            if any(kw in _q for kw in _edu_kws):
-                intent.primary = "list"
-                intent.is_oot = False
-                intent.oot_reason = None
+    # Adjudication: jika LLM sudah yakin out_of_context, hormati keputusannya
+    if intent.primary == "out_of_context":
+        logger.info("[PIPELINE] out_of_context confirmed — skip adjudication")
 
     # Ranking override: LLM sometimes classifies ranking queries as "list".
     # Detect early via keyword signal and redirect to aggregation handler.
     if intent.primary == "list" and is_ranking_query(query) and detect_ranking_level(query):
         logger.info("[RouterV2] ranking override: list → aggregation for '%s'", query[:60])
+        intent.primary = "aggregation"
+
+    # Distribusi override: infra queries ("tidak punya listrik", "sumber air", etc.)
+    # should always route to aggregation so distribusi breakdown is computed.
+    # Tier1 often catches "sekolah di X yang tidak punya Y" as a list query.
+    if intent.primary == "list" and _DISTRIBUSI_QUERY_RE.search(query):
+        logger.info("[RouterV2] distribusi override: list → aggregation for '%s'", query[:60])
         intent.primary = "aggregation"
 
     return intent, False
@@ -651,6 +652,27 @@ async def _handle_aggregation_route(
 
     await _do_step(on_step, "narrating", "Menyusun narasi agregasi...")
 
+    # ── Multi-metric handler (Phase 21-A) ────────────────────────────────────
+    if agg_prov == "ELASTICSEARCH_MULTI_METRIC":
+        multi_metric = result.get("multi_metric", {})
+        entities_mm  = result.get("entities", {}) or {}
+        wilayah_mm   = build_location_label(entities_mm)
+        level_mm     = detect_level(entities_mm)
+        answer_md = await narrate_multi_metric_aggregation(
+            wilayah=wilayah_mm,
+            level=level_mm,
+            multi_metric=multi_metric,
+        )
+        conf_mm = result.get("confidence", 0.0)
+        metric_list_mm = result.get("metric_target_list", [])
+        ctx_mm  = [f"{k}:{v}" for k, v in entities_mm.items()]
+        ctx_mm += [f"metric:{m}" for m in metric_list_mm]
+        total_mm = sum(v.get("total", 0) for v in multi_metric.values())
+        return _base(query, start_time, user_id, answer_md, "ELASTICSEARCH_MULTI_METRIC",
+                     context_used=ctx_mm, context_sufficiency_score=float(conf_mm),
+                     answer_confident=result.get("answer_confident", False),
+                     confidence_score=conf_mm, num_docs=total_mm)
+
     if result.get("is_multi"):
         comparison_list = result.get("comparison", [])
         if not comparison_list:
@@ -700,6 +722,7 @@ async def _handle_aggregation_route(
             metric_target=result.get("metric_target"),
             distribusi=result.get("distribusi"),
             distribusi_field=result.get("distribusi_field"),
+            qc_detail=result.get("qc_detail") or {},
         )
 
     resolution_metadata = result.get("metadata", {}) or {}
@@ -1098,6 +1121,7 @@ async def run_ask_pipeline(
     intent, _ = await _run_classification(query, on_step)
 
     # ── 4. OOT GUARD (post-classify) ──────────────────────────────────────────
+    logger.info("[PIPELINE] post-adjudication: primary=%s is_oot=%s", intent.primary, getattr(intent, 'is_oot', False))
     if intent.primary == "out_of_context" and not intent.secondary:
         if not is_education_query(query):
             answer = build_reject_answer()

@@ -42,7 +42,8 @@ class CognitiveIntent:
     yayasan:          Optional[str] = None
     koordinat_user:   bool = False
     radius_km:        Optional[float] = None
-    metric_target:    Optional[str] = None
+    metric_target:      Optional[str] = None
+    metric_target_list: List[str] = field(default_factory=list)  # multi-metric query (Phase 21)
     distribusi_field: Optional[str] = None  # "sumber_listrik"|"sumber_air"|"waktu_penyelenggaraan"|"akses_internet"
     infrastruktur_filter: Optional[str] = None  # "tidak_ada_internet"|"tidak_ada_listrik"|"komputer_minim"|"tidak_ada_toilet"
 

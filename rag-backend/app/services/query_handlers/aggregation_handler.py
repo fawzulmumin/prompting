@@ -1,12 +1,13 @@
 # services/query_handlers/aggregation_handler.py
 import asyncio
+import copy
 import json
 import hashlib
 import logging
 import os
 import re
 from rapidfuzz import fuzz
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 
 from elasticsearch import AsyncElasticsearch
 from app.services.core.result_model import ResultStatus, build_result, build_ambiguous_message
@@ -115,7 +116,16 @@ def is_aggregation_query(query: str) -> bool:
         any(j in re.sub(r"[^\w\s]", " ", q).split() for j in JENJANG_KEYWORDS)
     )
 
-    return has_school_signal
+    # Metric keywords juga valid sebagai sinyal aggregation (tanpa kata "sekolah")
+    # Contoh: "berapa guru PPPK di Jakarta?" / "berapa siswa perempuan di Jawa Barat?"
+    _METRIC_SIGNAL_KW = {
+        "guru", "siswa", "murid", "peserta didik", "tendik",
+        "pppk", "p3k", "honorer", "pns", "asn", "sertifikasi",
+        "komputer", "tenaga kependidikan",
+    }
+    has_metric_signal = any(k in q for k in _METRIC_SIGNAL_KW)
+
+    return has_school_signal or has_metric_signal
 
 def is_pure_ranking_query(query: str) -> bool:
     """
@@ -558,6 +568,8 @@ async def _build_resolution(
             kab_raw = (getattr(w, "kabupaten", None) or "").lower().strip()
             if kab_raw:
                 has_prefix = any(kab_raw.startswith(p) for p in ("kab.", "kota ", "kabupaten ", "kota adm."))
+                logger.debug("[AGG] kab_raw=%r has_prefix=%s in_alias_map=%s",
+                             kab_raw, has_prefix, kab_raw in PROVINCE_ALIAS_MAP)
                 if not has_prefix and kab_raw in PROVINCE_ALIAS_MAP:
                     # Bare province alias in kabupaten field → upgrade to province scope
                     wilayah_from_intent["provinsi"] = PROVINCE_ALIAS_MAP[kab_raw]
@@ -589,6 +601,17 @@ async def _build_resolution(
                     "confidence": None,
                 }
 
+    # Diagnostic: metric queries without LLM-provided wilayah fall through here.
+    # resolve_location_from_query strips noise words (komputer, listrik, etc.)
+    # before looking up province aliases → should resolve Kalimantan Barat etc.
+    _mt = getattr(intent, 'metric_target', None) if intent else None
+    if _mt:
+        logger.warning(
+            "[AGG] metric_target=%r but wilayah empty → location resolver fallback for: '%s'",
+            _mt, query[:60],
+        )
+    else:
+        logger.info("[AGG] no trusted wilayah → location resolver for: '%s'", query[:60])
     return await resolve_location_from_query(query, es_client)
 
 
@@ -741,7 +764,7 @@ async def _handle_single_wilayah(
         )
         _drilldown_size = _extract_ranking_size(query) if is_ranking_query(query) else 3
         drilldown_task = (
-            execute_drilldown_query(es_client, normalized, drilldown_field, size=_drilldown_size)
+            execute_drilldown_query(es_client, normalized, drilldown_field, size=_drilldown_size, metric_target=_metric_target)
             if drilldown_field else asyncio.sleep(0, result=[])
         )
         if _extra_qc_aggs:
@@ -848,6 +871,37 @@ async def _handle_single_wilayah(
     )
 
     answer_confident = confidence >= 0.7
+
+    # ── QC detail: top masalah per kolom (hanya saat qc_masalah_only=True) ───
+    _QC_COL_LABELS = {
+        "qc_1": "Keunikan NPSN",    "qc_2": "Format NPSN",       "qc_3": "Nama sekolah",
+        "qc_4": "Alamat jalan",     "qc_5": "Kode wilayah",      "qc_6": "Koordinat lintang",
+        "qc_7": "Koordinat bujur",  "qc_8": "SK izin operasional","qc_9": "Tanggal SK izin",
+        "qc_10": "SK pendirian",    "qc_11": "Tanggal SK pendirian","qc_12": "Foto sekolah",
+        "qc_13": "Data yayasan",
+    }
+    qc_detail: Dict[str, Any] = {}
+    if _qc_masalah_only and _qc_aggs_result:
+        qc_detail["total_bermasalah"] = _qc_aggs_result.get("sekolah_bermasalah", {}).get("doc_count", 0)
+        qc_detail["avg_masalah"] = round(
+            _qc_aggs_result.get("avg_masalah", {}).get("value", 0) or 0, 1
+        )
+        _kolom = [
+            (_qc_aggs_result.get(f"qc_{i}_masalah", {}).get("doc_count", 0), _QC_COL_LABELS[f"qc_{i}"])
+            for i in range(1, 14)
+            if _qc_aggs_result.get(f"qc_{i}_masalah", {}).get("doc_count", 0) > 0
+        ]
+        _kolom.sort(reverse=True)
+        qc_detail["top_masalah"] = _kolom[:5]
+
+    if qc_detail:
+        logger.info("[QC_DETAIL] total_bermasalah=%s avg=%s top_masalah=%s",
+                    qc_detail.get("total_bermasalah"), qc_detail.get("avg_masalah"),
+                    qc_detail.get("top_masalah"))
+    else:
+        logger.info("[QC_DETAIL] empty — qc_masalah_only=%s aggs_keys=%s",
+                    _qc_masalah_only, list(_qc_aggs_result.keys()) if _qc_aggs_result else [])
+
     result = {
         "status": ResultStatus.SUCCESS,
         "provider": "ELASTICSEARCH_AGGREGATION",
@@ -868,6 +922,7 @@ async def _handle_single_wilayah(
         "drilldown_field": drilldown_field or "",
         "drilldown_top3": drilldown_top3,
         "qc_aggs": _qc_aggs_result,
+        "qc_detail": qc_detail,
     }
 
     await set_cache(cache_key, result, 3600)
@@ -900,11 +955,50 @@ def _infer_metric_target(query: str) -> Optional[str]:
     return None
 
 
+# Patterns for multi-metric inference — specific variants only, no generics.
+# Generic "guru"/"siswa" intentionally excluded to avoid false positives
+# (e.g. "berapa guru PPPK" must not become ['guru_p3k','guru']).
+_MULTI_METRIC_PATTERNS: list = [
+    (re.compile(r'\bsiswa\s+laki[- ]?laki\b|\bsiswa\s+lk\b', re.I), "siswa_l"),
+    (re.compile(r'\bsiswa\s+perempuan\b|\bsiswa\s+pr\b', re.I),       "siswa_p"),
+    (re.compile(r'\bguru\s+laki[- ]?laki\b|\bguru\s+lk\b', re.I),     "guru_l"),
+    (re.compile(r'\bguru\s+perempuan\b|\bguru\s+pr\b', re.I),          "guru_p_gender"),
+    (re.compile(r'\bguru\s+p(?:3k|ppk?)\b|\bpppk\b|\bp3k\b', re.I),  "guru_p3k"),
+    (re.compile(r'\bguru\s+(?:pns|asn)\b', re.I),                      "guru_pns"),
+    (re.compile(r'\bguru\s+honor(?:er)?\b', re.I),                     "guru_honor"),
+    (re.compile(r'\bguru\s+sertifika(?:si)?\b', re.I),                 "guru_sertifikasi"),
+    (re.compile(r'\bsiswa\s+baru\b|\bpeserta\s+didik\s+baru\b', re.I),"siswa_baru"),
+    (re.compile(r'\bsiswa\s+lulus\b|\blulusan\b', re.I),               "siswa_lulus"),
+    (re.compile(r'\bsiswa\s+mengulang\b|\btinggal\s+kelas\b|\btidak\s+naik\b', re.I), "siswa_mengulang"),
+]
+
+
+def _infer_metric_target_list(query: str) -> List[str]:
+    """Infer multiple metric_targets from query when LLM didn't fill metric_target_list.
+
+    Returns list of 2+ metrics if multi-metric signals found, else [].
+    Used as fallback when Tier 2 classified the query but Tier 3 didn't run.
+    """
+    found: List[str] = []
+    for pattern, metric in _MULTI_METRIC_PATTERNS:
+        if pattern.search(query) and metric not in found:
+            found.append(metric)
+    return found if len(found) >= 2 else []
+
+
 # ── Distribusi field keyword patterns ────────────────────────────────────────
 _DISTRIBUSI_PATTERNS: list = [
-    (re.compile(r'\b(listrik|sumber.?listrik|PLN|diesel|tenaga.?surya|genset)\b', re.I),
+    (re.compile(
+        r'\b(listrik|sumber.?listrik|PLN|diesel|tenaga.?surya|genset'
+        r'|tidak.?punya.?listrik|tanpa.?listrik|tidak.?ada.?listrik'
+        r'|belum.?ada.?listrik|tidak.?ada.?pln)\b',
+        re.I),
      "sumber_listrik"),
-    (re.compile(r'\b(internet|akses.?internet|wifi|online|provider.?internet|jenis.?internet)\b', re.I),
+    (re.compile(
+        r'\b(internet|akses.?internet|wifi|online|provider.?internet|jenis.?internet'
+        r'|tidak.?punya.?internet|tanpa.?internet|tidak.?ada.?internet'
+        r'|belum.?ada.?internet|tidak.?memiliki.?internet)\b',
+        re.I),
      "akses_internet"),
     (re.compile(r'\b(sumber.?air|air.?minum|air.?bersih|PAM|sumur|sungai|air.?yang.?dipakai)\b', re.I),
      "sumber_air"),
@@ -916,10 +1010,114 @@ _DISTRIBUSI_PATTERNS: list = [
 def _infer_distribusi_field(query: str) -> Optional[str]:
     """Infer distribusi_field from query text when LLM/Tier2 didn't extract it."""
     q = query.lower()
+    logger.debug("[DIST_INFER] query=%r", q[:80])
     for pattern, field in _DISTRIBUSI_PATTERNS:
         if pattern.search(q):
+            logger.debug("[DIST_INFER] matched field=%s via pattern=%r", field, pattern.pattern[:50])
             return field
+    logger.debug("[DIST_INFER] no match for query=%r", q[:80])
     return None
+
+
+_MULTI_METRIC_LABELS: Dict[str, str] = {
+    "siswa":            "siswa",
+    "siswa_l":          "siswa laki-laki",
+    "siswa_p":          "siswa perempuan",
+    "siswa_baru":       "siswa baru",
+    "siswa_mengulang":  "siswa mengulang",
+    "siswa_lulus":      "siswa lulus",
+    "guru":             "guru/PTK",
+    "guru_pns":         "guru PNS/ASN",
+    "guru_honor":       "guru honorer",
+    "guru_sertifikasi": "guru bersertifikasi",
+    "guru_s1":          "guru lulusan S1+",
+    "guru_p3k":         "guru PPPK",
+    "guru_l":           "guru laki-laki",
+    "guru_p_gender":    "guru perempuan",
+    "tendik":           "tenaga kependidikan",
+    "total_komputer":   "komputer",
+}
+
+
+async def _handle_multi_metric_query(
+    query: str,
+    es_client: AsyncElasticsearch,
+    intent,
+    resolution: dict,
+    ranking_gap: float,
+    metric_list: List[str],
+) -> Dict[str, Any]:
+    """
+    Jalankan aggregation paralel untuk setiap metric dalam metric_list.
+    Dipanggil saat user minta dua atau lebih metric sekaligus (Phase 21-A).
+    """
+    data = resolution.get("data", {})
+    entities_base = data.get("entities") or {}
+    entities_base = _apply_entity_bridge(entities_base, data, intent, {})
+
+    _WILAYAH_KEYS = ("provinsi", "kabupaten", "kecamatan", "desa_kelurahan", "pulau")
+    _is_nasional = not any(entities_base.get(k) for k in _WILAYAH_KEYS)
+
+    async def _run_one(metric: str):
+        intent_copy = copy.copy(intent)
+        intent_copy.metric_target = metric
+        intent_copy.metric_target_list = []
+        entities_copy = dict(entities_base)
+        entities_copy["metric_target"] = metric
+        try:
+            if _is_nasional:
+                # Nasional scope: _handle_single_wilayah dengan entities kosong hanya
+                # melakukan count dokumen (execute_aggregation_query={}) tanpa metric sum.
+                # _handle_nasional_scope membangun aggregation ES dengan build_metric_aggs()
+                # yang benar untuk setiap metric.
+                return await _handle_nasional_scope(
+                    query, es_client, intent_copy, resolution, ranking_gap
+                )
+            return await _handle_single_wilayah(
+                query, es_client, entities_copy, intent_copy, resolution, ranking_gap
+            )
+        except Exception as exc:
+            logger.warning("[MULTI_METRIC] error for metric=%s: %s", metric, exc)
+            return None
+
+    results = await asyncio.gather(*[_run_one(m) for m in metric_list])
+
+    multi_metric: Dict[str, Any] = {}
+    for metric, result in zip(metric_list, results):
+        if result and result.get("status") == ResultStatus.SUCCESS:
+            multi_metric[metric] = {
+                "total": result.get("total", 0),
+                "label": _MULTI_METRIC_LABELS.get(metric, metric),
+                "breakdown_jenjang": result.get("breakdown_jenjang", {}),
+                "drilldown_top3": result.get("drilldown_top3", []),
+                "drilldown_field": result.get("drilldown_field", ""),
+            }
+
+    if not multi_metric:
+        return _validation("DATA_NOT_FOUND", query, resolution, ranking_gap, entities_base)
+
+    confidence = compute_aggregation_confidence(
+        query=query,
+        resolution_status=(
+            resolution["status"].value
+            if hasattr(resolution["status"], "value")
+            else str(resolution["status"])
+        ),
+        resolution_metadata=resolution.get("metadata", {}),
+        total_hits=sum(v["total"] for v in multi_metric.values()),
+        ranking_gap=ranking_gap,
+    )
+
+    return {
+        "status": ResultStatus.SUCCESS,
+        "provider": "ELASTICSEARCH_MULTI_METRIC",
+        "multi_metric": multi_metric,
+        "metric_target_list": metric_list,
+        "entities": entities_base,
+        "confidence": confidence,
+        "answer_confident": confidence >= 0.7,
+        "metadata": resolution.get("metadata", {}),
+    }
 
 
 async def handle_aggregation_query(
@@ -961,10 +1159,31 @@ async def handle_aggregation_query(
     if getattr(intent, "qc_persen_query", False):
         return await _handle_qc_percentage_query(intent, es_client, query)
 
-    logger.info("[AGG] pre-inference: metric_target=%s distribusi_field=%s query='%s'",
+    logger.info("[AGG] pre-inference: metric_target=%s metric_target_list=%s distribusi_field=%s query='%s'",
                 getattr(intent, 'metric_target', None),
+                getattr(intent, 'metric_target_list', []),
                 getattr(intent, 'distribusi_field', None),
                 query[:50])
+
+    # ── Multi-metric FIRST: cek metric_target_list sebelum infer single metric ─
+    _metric_list = getattr(intent, 'metric_target_list', []) or []
+
+    # Fallback: infer dari query jika LLM (Tier 3) tidak mengisi metric_target_list
+    # Ini terjadi saat query diklasifikasi oleh Tier 2 (tanpa LLM) atau LLM tidak return field ini
+    if len(_metric_list) < 2:
+        _inferred_list = _infer_metric_target_list(query)
+        if len(_inferred_list) >= 2:
+            _metric_list = _inferred_list
+            logger.info("[AGG] metric_target_list inferred from query: %s", _metric_list)
+
+    if len(_metric_list) >= 2:
+        logger.info("[AGG] multi-metric query detected: %s", _metric_list)
+        _mm_resolution = await _build_resolution(query, es_client, intent, kwargs)
+        if _mm_resolution["status"] == ResultStatus.SUCCESS:
+            return await _handle_multi_metric_query(
+                query, es_client, intent, _mm_resolution, ranking_gap=0.0, metric_list=list(_metric_list)
+            )
+        # Jika resolution gagal, lanjut ke path normal (treat sebagai single metric atau nasional)
 
     # ── Infer metric_target from query if Tier 2 didn't extract it ───────────
     if not getattr(intent, 'metric_target', None):

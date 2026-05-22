@@ -64,6 +64,13 @@ PROVINCE_ALIAS_MAP: Dict[str, str] = {
     "diy":             "prov. d.i. yogyakarta",
     "dki":             "prov. dki jakarta",
     "dki jakarta":     "prov. dki jakarta",
+    # Full Kalimantan names — LocationResolver sometimes fails to resolve these
+    # from full-name queries like "total komputer di sekolah Kalimantan Barat"
+    "kalimantan barat":   "prov. kalimantan barat",
+    "kalimantan timur":   "prov. kalimantan timur",
+    "kalimantan tengah":  "prov. kalimantan tengah",
+    "kalimantan selatan": "prov. kalimantan selatan",
+    "kalimantan utara":   "prov. kalimantan utara",
 }
 
 # Prefixes that signal the user explicitly chose kabupaten/kecamatan level —
@@ -88,9 +95,17 @@ def _get_resolver() -> LocationResolver:
 _NOISE_PATTERN = re.compile(
     r"\b(ada|ada berapa|jumlah|berapa|total|daftar|tampilkan|sekolah|sd|smp|sma|smk|mi|mts|ma|"
     r"tk|paud|slb|pkbm|di|dari|dalam|wilayah|negeri|swasta|"
-    r"bandingkan|perbandingan|vs|versus|dan|dengan|akreditasi|a|b|c)\b",
+    r"bandingkan|perbandingan|vs|versus|dan|dengan|akreditasi|a|b|c|"
+    r"guru|siswa|murid|tendik|komputer|listrik|pln|internet|"
+    r"yang|tidak|punya|memiliki|belum|tanpa)\b",
     re.IGNORECASE,
 )
+
+# Pulau names that map to multi-province filter in aggregation_core.PULAU_PROVINSI_MAP
+_PULAU_NAMES: frozenset = frozenset({
+    "jawa", "sumatera", "kalimantan", "sulawesi", "papua",
+    "bali", "maluku", "nusa tenggara", "indonesia timur",
+})
 
 _VS_PATTERN = re.compile(r"\s+(?:vs\.?|versus)\s+", re.IGNORECASE)
 
@@ -183,10 +198,26 @@ async def resolve_location_from_query(
             confidence=0.0,
         )
 
+    # ── Pulau scope fast-path ─────────────────────────────────────────────────
+    # If loc_text (after noise stripping) is a known pulau name, return
+    # pulau entity so aggregation_core expands it to multi-province filter.
+    _loc_lower = loc_text.lower().strip()
+    if _loc_lower in _PULAU_NAMES:
+        logger.debug("[LR_ADAPTER] pulau scope: '%s'", _loc_lower)
+        _pulau_ent: Dict[str, Any] = {"pulau": _loc_lower}
+        if status_sekolah:
+            _pulau_ent["status_sekolah"] = status_sekolah
+        return build_result(
+            status=ResultStatus.SUCCESS,
+            provider="LOCATION_RESOLVER_ADAPTER",
+            data={"entities": _pulau_ent},
+            metadata={"method": "pulau_scope"},
+            confidence=1.0,
+        )
+
     # ── Province alias fast-path (before LocationResolver) ───────────────────
     # If the bare location token is a known province alias and has no explicit
     # kab/kec prefix, resolve directly to province scope (confidence=1.0).
-    _loc_lower = loc_text.lower().strip()
     if not _is_explicit_kab_kec(_loc_lower):
         # Strip prefix administratif sebelum alias lookup
         _stripped = re.sub(r'^(provinsi|prov\.?)\s+', '', _loc_lower).strip()

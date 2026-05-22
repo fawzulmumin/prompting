@@ -187,6 +187,71 @@ Bug fix lanjutan dari sesi E2E ke-2. Fokus: distribusi_field end-to-end, locatio
 
 ---
 
+## Phase 20 — Distribusi & Location Fixes (2026-05-21)
+**Test count:** 347 passed (unit), 697 passed full suite — tidak ada regresi
+
+Bug fix lanjutan dari E2E Round 2 & Round 3. Fokus: location resolver untuk metric query, distribusi negative-pattern matching, sumber_listrik index routing, dan distribusi routing override.
+
+| Sub-phase | File(s) | Perubahan |
+|-----------|---------|-----------|
+| P20-F: Fix `_NOISE_PATTERN` + pulau scope | `location_resolver_adapter.py` | Perluas `_NOISE_PATTERN` dengan kata metrik/filler: `komputer`, `listrik`, `pln`, `internet`, `guru`, `siswa`, `murid`, `tendik`, `yang`, `tidak`, `punya`, `memiliki`, `belum`, `tanpa` — agar `_extract_location_tokens("total komputer di sekolah Kalimantan Barat")` → `"Kalimantan Barat"` (bukan `"komputer Kalimantan Barat"`). Tambah `_PULAU_NAMES` frozenset dan pulau scope fast-path dalam `resolve_location_from_query()` — kembalikan `{"pulau": <name>}` sebelum province alias check. |
+| P20-G: `sumber_listrik` → profile index | `aggregation_core.py` | Tambah `"sumber_listrik"` ke `_DISTRIBUSI_NEEDS_PROFILE` (sebelumnya hanya `"sumber_air"`). Coverage `sumber_listrik` di `idx_sekolah_qc` sangat rendah (8–9 docs per provinsi); `idx_sekolah_profile` memiliki coverage lebih baik. **Note:** Jika coverage di profile index juga < 500 docs total, ini adalah data quality issue — bukan bug kode. |
+| P20-H: Distribusi negative patterns | `aggregation_handler.py` | Perluas `_DISTRIBUSI_PATTERNS` dengan varian negatif: `sumber_listrik` → tambah `tidak.?punya.?listrik`, `tanpa.?listrik`, `tidak.?ada.?listrik`, `belum.?ada.?listrik`, `tidak.?ada.?pln`; `akses_internet` → tambah `tidak.?punya.?internet`, `tanpa.?internet`, `tidak.?ada.?internet`, `belum.?ada.?internet`, `tidak.?memiliki.?internet`. |
+| P20-I: Distribusi routing override | `ask_pipeline.py` | Tambah `_DISTRIBUSI_QUERY_RE` pattern + override dalam `_run_classification()`: jika `intent.primary == "list"` AND query mengandung pola infrastruktur negatif ("tidak punya listrik/internet/air"), paksa ke `aggregation`. Tier1 sering salah tangkap "sekolah di X yang tidak punya Y" sebagai list query. |
+| P20-J: Debug logs + diagnostik | `aggregation_handler.py` | Tambah `logger.debug` ke `_infer_distribusi_field()` — log query, pattern yang cocok, dan "no match". Tambah WARNING log di `_build_resolution()` ketika `metric_target` diset tapi wilayah kosong dari intent (fallback ke location resolver). |
+
+**Known limitations (data quality — bukan bug kode):**
+- `sumber_listrik`: jika coverage di `idx_sekolah_profile` juga < 500 total dokumen → accept sebagai data quality limitation, tidak bisa difix di sisi aplikasi
+- `akses_internet`: coverage bergantung pada data ES; pattern matching sudah benar (`internet` saja sudah cukup untuk deteksi distribusi)
+- `total_komputer Kalimantan Barat`: jika LLM classifier tidak pernah mengisi `wilayah` untuk query ini → LLM prompt engineering issue terpisah (bukan bug logic location resolver)
+
+---
+
+## Phase 21 — Multi-Metric Query & Perbaikan Variasi Pertanyaan (2026-05-22)
+**Test count:** 347 passed (unit) — tidak ada regresi
+
+Fokus: support query yang meminta dua atau lebih metric sekaligus, perbaikan klasifikasi "jenis sekolah", dan klarifikasi comparison vs aggregation.
+
+| Sub-phase | File(s) | Perubahan |
+|-----------|---------|-----------|
+| P21-A1: `metric_target_list` field | `intent_models.py` | Tambah field `metric_target_list: List[str] = field(default_factory=list)` di `CognitiveIntent` — untuk menampung multi-metric query. |
+| P21-A2: LLM prompt update | `prompts/intent_classifier/system_v1.txt` | (a) Tambah `metric_target_list` ke schema OUTPUT. (b) Tambah aturan METRIC_TARGET_LIST (7 contoh pola multi-metric). (c) Tambah ATURAN 3 KLARIFIKASI: comparison hanya untuk dua wilayah berbeda — dua kategori dalam satu wilayah = aggregation. (d) Tambah 4 contoh query baru termasuk multi-metric dan "jenis sekolah". |
+| P21-A3: Multi-metric aggregation | `aggregation_handler.py` | Tambah `_MULTI_METRIC_LABELS` dict, fungsi `_handle_multi_metric_query()` (asyncio.gather paralel per metric), dan multi-metric check dalam `handle_aggregation_query()`. Returns `provider="ELASTICSEARCH_MULTI_METRIC"`. |
+| P21-A4: Prompt builder | `narrator_prompts.py` | Tambah fungsi `build_multi_metric_aggregation_prompt()` di akhir file. |
+| P21-A5: Narrator | `narrator_service.py` | Tambah import + fungsi `narrate_multi_metric_aggregation()` dengan fallback template bullet list + validasi angka. |
+| P21-A6: Pipeline wiring | `ask_pipeline.py` | Tambah import `narrate_multi_metric_aggregation` + handler `if agg_prov == "ELASTICSEARCH_MULTI_METRIC"` sebelum blok `is_multi`. |
+| P21-B1: "jenis sekolah" → aggregation | `tier2_rule.py` | Tambah 3 signal baru: `jenis sekolah/tipe sekolah/macam-macam sekolah` → aggregation (0.60), `guru X dan guru` → aggregation (0.55), `siswa X dan siswa` → aggregation (0.55). |
+
+**Flow multi-metric (contoh):**
+- Query: `"berapa siswa laki-laki dan siswa perempuan SMA di Jawa Barat?"`
+- LLM classifier: `metric_target_list: ["siswa_l", "siswa_p"]`
+- `handle_aggregation_query`: deteksi `len(_metric_list) >= 2` → `_handle_multi_metric_query`
+- `_handle_multi_metric_query`: asyncio.gather dua `_handle_single_wilayah` call secara paralel
+- Hasil: `provider="ELASTICSEARCH_MULTI_METRIC"`, `multi_metric: {siswa_l: {...}, siswa_p: {...}}`
+- `ask_pipeline`: routing ke `narrate_multi_metric_aggregation` → narasi natural dengan semua angka
+
+---
+
+## Phase 22 — OOT Routing Fix & QC Narasi Breakdown (2026-05-22)
+**Test count:** 347 passed (unit) — tidak ada regresi
+
+Dua bug kritis ditemukan via E2E testing Phase 22. Fix minimal dan targeted.
+
+| Bug | File(s) | Root Cause | Perubahan |
+|-----|---------|------------|-----------|
+| **BUG A**: Query OOT (`"patokannya sekolah bagus itu apa?"`) di-route ke `ELASTICSEARCH_LIST` padahal log `[RouterV2]` sudah benar (`primary=out_of_context`) | `ask_pipeline.py`, `tests/test_ask_pipeline.py` | Adjudication block hanya menangani AMBIGUOUS branch di fix sebelumnya. SCHOOL branch (`rule_classify → SCHOOL`) masih unconditionally upgrade OOT → list tanpa cek lokasi. Log `[RouterV2]` fire sebelum adjudication, sehingga override tidak terlihat dari log. | Hapus seluruh adjudication logic OOT → list. Jika LLM sudah classify `out_of_context`, skip adjudication (`logger.info("[PIPELINE] out_of_context confirmed — skip adjudication")`). Update test `test_adjudication_school_keyword_overrides_oot` → `test_adjudication_oot_trusted_over_school` (assert `primary == "out_of_context"`). |
+| **BUG B**: `"berapa sekolah bermasalah di Jawa Barat?"` tidak menyebut breakdown QC per kolom di narasi | `narrator_prompts.py`, `aggregation_handler.py` | `qc_section` ditanam sebagai sub-line di dalam baris Konteks. Instruksi LLM tidak memiliki heading `## Detail Kualitas Data` — LLM mengikuti heading eksplisit (Gambaran Umum, Komposisi) dan mengabaikan data QC yang tidak direferensikan. | (1) Promosikan QC ke blok terpisah `DATA KUALITAS (WAJIB DISEBUTKAN DI NARASI)`. (2) Tambah `qc_instruksi` dengan heading `## Detail Kualitas Data` di instruksi block — instruksikan LLM menyebut N kolom masalah terbanyak dengan angka persis. (3) Tambah `[QC_DETAIL]` diagnostic log di `aggregation_handler.py` setelah ekstraksi `qc_detail`. |
+
+**Log yang diharapkan setelah fix BUG A:**
+```
+[RouterV2] primary=out_of_context
+[PIPELINE] out_of_context confirmed — skip adjudication
+[PIPELINE] post-adjudication: primary=out_of_context is_oot=False
+→ provider=SYSTEM_REJECT
+```
+
+---
+
 ## Resolved Post-CHANGELOG (2026-04-21)
 
 | Item | File | Perubahan |

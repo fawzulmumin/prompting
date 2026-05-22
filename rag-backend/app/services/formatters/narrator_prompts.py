@@ -332,6 +332,7 @@ def _prompt_aggregation(
     metric_label: str = "satuan pendidikan",
     distribusi: Optional[list] = None,
     distribusi_field: Optional[str] = None,
+    qc_detail: Optional[Dict] = None,
 ) -> str:
     status_info   = f" ({status_filter})" if status_filter else ""
     konteks_bench = _benchmark_label(total, level)
@@ -389,7 +390,23 @@ def _prompt_aggregation(
             f"\n- Top {n_drilldown} {drilldown_label} terbanyak:\n{drilldown_lines}"
         )
 
-    has_breakdown = bool(breakdown_section or drilldown_section)
+    # ── QC detail: blok terpisah agar LLM tidak mengabaikan data kualitas ───
+    qc_data_block = ""
+    if qc_detail and qc_detail.get("top_masalah"):
+        _total_brm = qc_detail.get("total_bermasalah", 0)
+        _avg_brm   = qc_detail.get("avg_masalah", 0)
+        _top_lines = "\n".join(
+            f"  - {label}: {count:,} sekolah".replace(",", ".")
+            for count, label in qc_detail["top_masalah"]
+        )
+        qc_data_block = (
+            f"\nDATA KUALITAS (WAJIB DISEBUTKAN DI NARASI):\n"
+            f"- Sekolah bermasalah (data tidak lengkap): {_total_brm:,}\n"
+            f"- Rata-rata kolom masalah per sekolah: {_avg_brm}\n"
+            f"- Kolom masalah terbanyak:\n{_top_lines}\n"
+        )
+
+    has_breakdown = bool(breakdown_section or drilldown_section or qc_data_block)
 
     # ── Instruksi narasi ─────────────────────────────────────────────────────
     if has_breakdown:
@@ -407,6 +424,17 @@ def _prompt_aggregation(
                 f"\n\n## Persentase\n"
                 f"Sebutkan bahwa {total:,} sekolah ({pct_of_total}%) dari total "
                 f"{total_all:,} sekolah di wilayah ini memenuhi kriteria filter."
+            )
+
+        qc_instruksi = ""
+        if qc_data_block:
+            n_qc = len(qc_detail.get("top_masalah", []))
+            qc_instruksi = (
+                f"\n\n## Detail Kualitas Data\n"
+                f"WAJIB sebutkan {n_qc} kolom masalah terbanyak dengan jumlah sekolahnya "
+                f"— gunakan PERSIS angka dari DATA KUALITAS di atas. "
+                f"Format contoh: 'Kolom dengan masalah terbanyak adalah X ({'{count:,}'} sekolah), "
+                f"diikuti Y dan Z.'"
             )
 
         # ── Instruksi komposisi jenjang (aware filter user) ────────────────
@@ -438,7 +466,8 @@ def _prompt_aggregation(
             "Format: 'Negeri: X (Y%), Swasta: A (B%)'. "
             "Angka dan persentase harus PERSIS dari data di atas — jangan hitung ulang."
             + pct_instruksi
-            + drilldown_instruksi +
+            + drilldown_instruksi
+            + qc_instruksi +
             "\n\n## Implikasi\n"
             "Satu kalimat nilai praktis untuk perencanaan pendidikan.\n\n"
             "LARANGAN (jangan lakukan ini):\n"
@@ -548,7 +577,7 @@ DATA AGREGASI:
 - Metrik       : {metric_label}
 - Jumlah {subyek}{status_info}: {total:,}{filter_section}{pct_section}
 - Konteks      : jumlah ini {konteks_bench}{breakdown_section}{distribusi_section}{drilldown_section}
-
+{qc_data_block}
 {instruksi}
 
 NARASI:"""
@@ -585,17 +614,26 @@ def _prompt_aggregation_with_list(
     filter_str = " ".join(filter_desc) or "semua jenjang"
     # Label metric untuk semua metric_target yang didukung (lihat aggregation_core.py)
     _METRIC_LABELS = {
+        "sekolah":          "sekolah",
         "siswa":            "siswa",
         "siswa_l":          "siswa laki-laki",
         "siswa_p":          "siswa perempuan",
+        "siswa_baru":       "siswa baru",
+        "siswa_mengulang":  "siswa mengulang",
+        "siswa_lulus":      "siswa lulus",
         "guru":             "guru/PTK",
-        "guru_pns":         "guru PNS",
+        "guru_pns":         "guru PNS/ASN",
         "guru_honor":       "guru honorer",
         "guru_sertifikasi": "guru bersertifikasi",
+        "guru_s1":          "guru lulusan S1+",
+        "guru_p3k":         "guru PPPK",
+        "guru_l":           "guru laki-laki",
+        "guru_p_gender":    "guru perempuan",
         "tendik":           "tenaga kependidikan",
+        "total_komputer":   "komputer",
     }
 
-    metric_label = _METRIC_LABELS.get(metric_target, "satuan pendidikan") if metric_target else "satuan pendidikan"
+    metric_label = _METRIC_LABELS.get(metric_target, metric_target or "sekolah") if metric_target else "sekolah"
     is_numeric_metric = metric_target and metric_target != "sekolah"
     school_lines = "\n".join(
         f"- {_safe(s.get('nama'), 'Nama tidak tersedia')} "
@@ -1372,6 +1410,65 @@ INSTRUKSI FORMAT OUTPUT:
 
 NARASI:"""
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MULTI-METRIC AGGREGATION PROMPT (Phase 21-A)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_multi_metric_aggregation_prompt(
+    wilayah: str,
+    level: str,
+    multi_metric: Dict[str, Any],
+    active_filters: Optional[Dict] = None,
+) -> str:
+    """Prompt narasi untuk aggregation multi-metric (dua atau lebih metric sekaligus)."""
+    level_label = {
+        "desa_kelurahan": "desa/kelurahan",
+        "kecamatan":      "kecamatan",
+        "kabupaten":      "kabupaten/kota",
+        "provinsi":       "provinsi",
+        "nasional":       "nasional",
+        "pulau":          "pulau",
+    }.get(level, level)
+
+    data_lines = []
+    for metric_key, data in multi_metric.items():
+        label = data["label"]
+        total = data["total"]
+        data_lines.append(f"- {label.title()}: {total:,}".replace(",", "."))
+        if data.get("drilldown_top3"):
+            dd_field = data.get("drilldown_field", "")
+            dd_label = {"kabupaten": "Kab/Kota", "kecamatan": "Kecamatan", "provinsi": "Provinsi"}.get(dd_field, dd_field.title())
+            for i, item in enumerate(data["drilldown_top3"][:3], 1):
+                data_lines.append(
+                    f"  {i}. {item.get('name','').title()}: {item.get('count', 0):,}".replace(",", ".")
+                    + f" {label}"
+                )
+
+    data_str = "\n".join(data_lines)
+
+    filter_hints = []
+    if active_filters:
+        if active_filters.get("bentuk_pendidikan"):
+            filter_hints.append(f"jenjang {active_filters['bentuk_pendidikan']}")
+        if active_filters.get("status_sekolah"):
+            filter_hints.append(f"status {active_filters['status_sekolah']}")
+    filter_note = f" (filter: {', '.join(filter_hints)})" if filter_hints else ""
+
+    return (
+        f"{_SYSTEM_BASE}\n\n"
+        f"DATA AGREGASI MULTI-METRIK di {wilayah} (level: {level_label}){filter_note}:\n"
+        f"{data_str}\n\n"
+        f"INSTRUKSI NARASI — Format dengan heading markdown ## per metric:\n"
+        f"1. Buat heading ## untuk setiap metric (contoh: ## Siswa Laki-laki).\n"
+        f"2. Di bawah setiap heading: satu kalimat angka total + kalimat distribusi top 3 wilayah (jika ada).\n"
+        f"3. Di akhir: satu paragraf '## Catatan' yang merangkum perbandingan antar metric secara singkat.\n"
+        f"4. Angka PERSIS seperti data — jangan bulatkan atau ubah. Format: titik sebagai pemisah ribuan.\n"
+        f"5. Satuan: guru/siswa/tendik = 'orang', sekolah = 'sekolah', komputer = 'unit'.\n"
+        f"LARANGAN: Jangan sebut 'satuan pendidikan' untuk metric guru/siswa — gunakan 'orang'.\n"
+        f"LARANGAN: Jangan menambahkan angka atau fakta di luar data yang diberikan.\n\n"
+        f"OUTPUT:"
+    )
 
 def _prompt_ooc(query: str) -> str:
     return _prompt_ooc_guardrail(query)

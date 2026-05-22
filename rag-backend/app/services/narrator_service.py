@@ -64,6 +64,7 @@ from app.services.formatters.narrator_prompts import (  # noqa: E402
     _prompt_school_list,
     _prompt_school_profile,
     _prompt_ooc,
+    build_multi_metric_aggregation_prompt,
 )
 
 
@@ -397,6 +398,7 @@ async def narrate_aggregation(
     metric_target: Optional[str] = None,
     distribusi: Optional[list] = None,
     distribusi_field: Optional[str] = None,
+    qc_detail: Optional[Dict] = None,
 ) -> str:
     if total == 0:
         return _zero_result_message(wilayah, active_filters, modul="aggregation")
@@ -414,17 +416,25 @@ async def narrate_aggregation(
 
     # Label metric untuk semua metric_target yang didukung (lihat aggregation_core.py)
     _METRIC_LABELS = {
+        "sekolah":          "sekolah",
         "siswa":            "siswa",
         "siswa_l":          "siswa laki-laki",
         "siswa_p":          "siswa perempuan",
+        "siswa_baru":       "siswa baru",
+        "siswa_mengulang":  "siswa mengulang",
+        "siswa_lulus":      "siswa lulus",
         "guru":             "guru/PTK",
-        "guru_pns":         "guru PNS",
+        "guru_pns":         "guru PNS/ASN",
         "guru_honor":       "guru honorer",
         "guru_sertifikasi": "guru bersertifikasi",
+        "guru_s1":          "guru lulusan S1+",
+        "guru_p3k":         "guru PPPK",
+        "guru_l":           "guru laki-laki",
+        "guru_p_gender":    "guru perempuan",
         "tendik":           "tenaga kependidikan",
-        "sekolah":          "satuan pendidikan",
+        "total_komputer":   "komputer",
     }
-    metric_label = _METRIC_LABELS.get(metric_target or "sekolah", "satuan pendidikan")
+    metric_label = _METRIC_LABELS.get(metric_target or "sekolah", metric_target or "sekolah")
 
     prompt = _prompt_aggregation(
         wilayah, total, level, status_filter,
@@ -438,6 +448,7 @@ async def narrate_aggregation(
         metric_label=metric_label,
         distribusi=distribusi,
         distribusi_field=distribusi_field,
+        qc_detail=qc_detail,
     )
 
     has_breakdown = bool(breakdown_jenjang or breakdown_status or drilldown_top3)
@@ -794,5 +805,58 @@ Instruksi:
         if not _validate_numbers_in_narasi(narasi, expected_numbers):
             logger.warning("[Narrator] Validasi angka gagal (multi_module), pakai merged_context")
             return merged_context
+
+    return narasi
+
+
+# ============================================================
+# MULTI-METRIC NARRATOR (Phase 21-A)
+# ============================================================
+
+async def narrate_multi_metric_aggregation(
+    wilayah: str,
+    level: str,
+    multi_metric: Dict[str, Any],
+    active_filters: Optional[Dict] = None,
+) -> str:
+    """
+    Narasi untuk aggregation multi-metric (dua atau lebih metric sekaligus).
+    Contoh: siswa laki-laki + siswa perempuan di Jawa Barat.
+    """
+    if not multi_metric:
+        return "Data tidak ditemukan untuk lokasi yang dimaksud."
+
+    # Template fallback: bullet list sederhana
+    lines = []
+    for data in multi_metric.values():
+        total_str = f"{data['total']:,}".replace(",", ".")
+        lines.append(f"- **{data['label'].title()}**: {total_str}")
+    template_md = f"### Data {wilayah}\n\n" + "\n".join(lines)
+
+    prompt = build_multi_metric_aggregation_prompt(
+        wilayah=wilayah,
+        level=level,
+        multi_metric=multi_metric,
+        active_filters=active_filters,
+    )
+
+    narasi = await _call_narrator(
+        prompt,
+        fallback=template_md,
+        max_tokens=NARRATOR_TOKENS_AGGREGATION,
+        timeout=NARRATOR_TIMEOUT,
+    )
+
+    if not narasi:
+        return template_md
+
+    # Validasi: semua angka total wajib ada di narasi
+    expected = {data["label"]: data["total"] for data in multi_metric.values()}
+    if not _validate_numbers_in_narasi(narasi, expected):
+        logger.warning(
+            "[Narrator] Validasi angka gagal (multi_metric) — expected=%s, pakai template",
+            expected,
+        )
+        return _enrich_template_on_validation_fail(template_md, expected, context="multi_metric")
 
     return narasi
