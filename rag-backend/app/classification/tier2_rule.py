@@ -73,6 +73,11 @@ _SIGNAL_DEFS: list[tuple[str, float, str]] = [
     # Multi-metric dalam satu query → aggregation (Phase 21-A)
     ("aggregation", 0.55, r"\bguru\s+(pns|asn|honor\w*|pppk|p3k|laki|perempuan)\s+(dan|dengan)\s+guru\b"),
     ("aggregation", 0.55, r"\bsiswa\s+(laki|perempuan|baru|lulus|mengulang)\s+(dan|dengan)\s+siswa\b"),
+    # Numeric threshold → aggregation (Phase 23A)
+    ("aggregation", 0.70, r"\b(lebih dari|kurang dari|di atas|di bawah|minimal|maksimal|setidaknya|paling banyak|paling sedikit)\s+\d+"),
+    ("aggregation", 0.65, r"\b\d+\s*(siswa|guru|murid|peserta didik|kelas|ruangan|toilet|komputer)\b.*\b(lebih|kurang|atas|bawah)\b"),
+    # Sekolah dengan kondisi numerik → list (pengguna ingin lihat daftar sekolah)
+    ("list", 0.70, r"\b(sekolah|sd|smp|sma|smk)\b.*\b(dengan|yang punya|yang memiliki)\b.*\b\d+\b.*\b(siswa|guru|kelas)\b"),
 
     # List
     ("list", 0.65, r"\b(daftar|tampilkan|tunjukkan|lihat|show|sebutkan|list)\b"),

@@ -560,6 +560,20 @@ async def _handle_comparison_route(
                      context_used=ctx_list, context_sufficiency_score=1.0,
                      answer_confident=conf >= 0.6, confidence_score=conf, num_docs=total_sum)
 
+    if prov == "ELASTICSEARCH_COMPARISON_MULTI_METRIC":
+        answer_md  = comparison_result.get("answer_markdown", "")
+        conf       = comparison_result.get("confidence", 0.0)
+        total_hits = comparison_result.get("num_docs", 0)
+        ctx_list   = comparison_result.get("context_used", [])
+        if not answer_md:
+            return _base(query, start_time, user_id,
+                         "Data tidak ditemukan untuk perbandingan.", "SYSTEM_NO_DATA",
+                         context_sufficiency_score=1.0, confidence_score=conf)
+        return _base(query, start_time, user_id, answer_md, "ELASTICSEARCH_COMPARISON",
+                     context_used=ctx_list, context_sufficiency_score=1.0,
+                     answer_confident=comparison_result.get("answer_confident", False),
+                     confidence_score=conf, num_docs=total_hits)
+
     logger.info("[COMPARISON] unhandled provider=%s, fallback → LIST", prov)
     return None
 

@@ -11,6 +11,8 @@ from app.services.query_handlers.comparison_handler import (
     _handle_jenjang_comparison,
     _fetch_location_data,
     _build_comparison_markdown,
+    _compare_multi_metric,
+    _format_multi_metric_comparison,
     _canonicalize_provinsi,
     is_comparison_query,
     detect_status_sekolah,
@@ -325,3 +327,133 @@ async def test_handle_comparison_single_location_returns_validation(mock_resolve
     assert result is not None
     assert result.get("reason") == "COMPARISON_NEEDS_MULTIPLE_LOCATIONS"
     assert result["answer_confident"] is False
+
+
+# ── Phase 23C: Multi-metric comparison ───────────────────────────────────────
+
+@pytest.mark.unit
+def test_format_multi_metric_comparison_structure():
+    by_metric = {
+        "siswa": [{"value": "Jawa Barat", "count": 5000000}, {"value": "Jawa Timur", "count": 4500000}],
+        "guru":  [{"value": "Jawa Barat", "count": 200000},  {"value": "Jawa Timur", "count": 180000}],
+    }
+    md = _format_multi_metric_comparison(by_metric)
+    assert "### Jumlah Siswa" in md
+    assert "### Jumlah Guru" in md
+    assert "Jawa Barat" in md
+    assert "5.000.000" in md or "5,000,000" in md
+
+
+@pytest.mark.unit
+def test_format_multi_metric_comparison_has_summary_footer():
+    by_metric = {
+        "guru_pns": [{"value": "A", "count": 100}, {"value": "B", "count": 50}],
+    }
+    md = _format_multi_metric_comparison(by_metric)
+    assert "multi-metrik" in md.lower() or "metrik" in md.lower()
+
+
+@pytest.mark.unit
+async def test_fetch_location_data_metric_target_override(mock_es):
+    loc = {"kabupaten": "kab. bandung"}
+    result = await _fetch_location_data(loc, mock_es, metric_target="guru")
+    assert result["count"] == 100  # from mock_es fixture
+
+
+@pytest.mark.unit
+async def test_compare_multi_metric_returns_correct_provider():
+    mock_es = AsyncMock()
+    mock_es.search.return_value = {"aggregations": {"main_metric": {"value": 1000}}}
+    locations = [{"kabupaten": "kab. bandung"}, {"kabupaten": "kab. bogor"}]
+    metric_list = ["siswa", "guru"]
+
+    from app.services.core.intent_models import CognitiveIntent, WilayahEntities
+    intent = CognitiveIntent(module="comparison", wilayah=WilayahEntities())
+
+    result = await _compare_multi_metric(
+        query="test", es_client=mock_es, intent=intent,
+        filters={}, locations=locations, metric_list=metric_list,
+    )
+    assert result["provider"] == "ELASTICSEARCH_COMPARISON_MULTI_METRIC"
+    assert "siswa" in result["multi_metric"]
+    assert "guru" in result["multi_metric"]
+    assert len(result["multi_metric"]["siswa"]) == 2
+
+
+@pytest.mark.unit
+@patch("app.services.query_handlers.comparison_handler._resolve_vs_query")
+async def test_handle_comparison_multi_metric_branch(mock_resolve, mock_es):
+    mock_resolve.return_value = [
+        {"kabupaten": "kab. bandung"},
+        {"kabupaten": "kab. bogor"},
+    ]
+    mock_es.search.return_value = {"aggregations": {"main_metric": {"value": 500}}}
+
+    from app.services.core.intent_models import CognitiveIntent, WilayahEntities
+    intent = CognitiveIntent(
+        module="comparison",
+        metric_target_list=["siswa", "guru"],
+        wilayah=WilayahEntities(),
+    )
+
+    result = await handle_comparison_query(
+        query="bandingkan siswa dan guru antara Bandung dan Bogor",
+        es_client=mock_es,
+        intent=intent,
+    )
+    assert result["provider"] == "ELASTICSEARCH_COMPARISON_MULTI_METRIC"
+    assert "multi_metric" in result
+
+
+@pytest.mark.unit
+@patch("app.services.query_handlers.comparison_handler._resolve_vs_query")
+async def test_handle_comparison_single_metric_unchanged(mock_resolve, mock_es):
+    # Jika metric_target_list kosong → single-metric path, provider tetap ELASTICSEARCH_COMPARISON
+    mock_resolve.return_value = [
+        {"kabupaten": "kab. bandung"},
+        {"kabupaten": "kab. bogor"},
+    ]
+    mock_es.search.return_value = {"aggregations": {"main_metric": {"value": 300}}}
+
+    from app.services.core.intent_models import CognitiveIntent, WilayahEntities
+    intent = CognitiveIntent(module="comparison", metric_target_list=[], wilayah=WilayahEntities())
+
+    result = await handle_comparison_query(
+        query="bandingkan Bandung dan Bogor",
+        es_client=mock_es,
+        intent=intent,
+    )
+    assert result is not None
+    assert result.get("provider") == "ELASTICSEARCH_COMPARISON"
+
+
+# ── index routing: profile metrics harus ke idx_sekolah_profile ───────────────
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_fetch_location_data_metric_guru_pns_uses_profile_index(mock_es):
+    """guru_pns ada di idx_sekolah_profile — bukan idx_sekolah_qc."""
+    mock_es.search.return_value = {"aggregations": {"main_metric": {"value": 50000}}}
+    await _fetch_location_data(
+        {"provinsi": "prov. jawa barat"},
+        mock_es,
+        metric_target="guru_pns",
+    )
+    index_used = mock_es.search.call_args.kwargs.get("index")
+    assert index_used is not None, "es_client.search was not called or index kwarg missing"
+    assert "profile" in index_used, f"Expected profile index, got: {index_used}"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_fetch_location_data_no_metric_uses_qc_index(mock_es):
+    """Tanpa metric_target → count sekolah → harus ke idx_sekolah_qc."""
+    mock_es.search.return_value = {"aggregations": {"main_metric": {"value": 100}}}
+    await _fetch_location_data(
+        {"provinsi": "prov. jawa barat"},
+        mock_es,
+        metric_target=None,
+    )
+    index_used = mock_es.search.call_args.kwargs.get("index")
+    assert index_used is not None, "es_client.search was not called or index kwarg missing"
+    assert "qc" in index_used, f"Expected qc index, got: {index_used}"

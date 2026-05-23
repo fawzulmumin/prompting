@@ -9,7 +9,7 @@ import logging
 from typing import Optional
 
 from app.services.core.intent_models import (
-    CognitiveIntent, WilayahEntities,
+    CognitiveIntent, WilayahEntities, NumericFilter,
     VALID_MODULES, VALID_SCOPES,
 )
 
@@ -117,6 +117,23 @@ class LLMClassifier:
                     return v.lower() == "true"
                 return bool(v)
 
+            _VALID_OPS = {"gt", "gte", "lt", "lte", "between"}
+            numeric_filters = []
+            for nf in (ent.get("numeric_filters") or []):
+                if not isinstance(nf, dict):
+                    continue
+                op = str(nf.get("operator", "")).lower()
+                f  = str(nf.get("field", "")).strip()
+                if not f or op not in _VALID_OPS:
+                    continue
+                numeric_filters.append(NumericFilter(
+                    field=f,
+                    operator=op,
+                    value=_safe_float(nf.get("value")),
+                    value_min=_safe_float(nf.get("value_min")),
+                    value_max=_safe_float(nf.get("value_max")),
+                ))
+
             return CognitiveIntent(
                 module=module,
                 secondary=secondary,
@@ -151,6 +168,7 @@ class LLMClassifier:
                 ],
                 distribusi_field=_norm(ent.get("distribusi_field")),
                 infrastruktur_filter=_norm(ent.get("infrastruktur_filter")),
+                numeric_filters=numeric_filters,
                 keaktifan=_norm(ent.get("keaktifan")),
                 wilayah_terpencil=_safe_bool_field(ent.get("wilayah_terpencil")),
                 wilayah_perbatasan=_safe_bool_field(ent.get("wilayah_perbatasan")),

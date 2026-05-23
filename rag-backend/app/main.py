@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field, field_validator  # noqa: F401 — kept fo
 from app.api.models import AskRequest, AskResponse  # noqa: E402
 from app.api.stream import router as stream_router
 from app.api.routes.health import router as health_router
+from app.api.routes.fields import router as fields_router
 from app.services.core.ask_pipeline import run_ask_pipeline
 from app.utils.task_queue import get_task_queue
 
@@ -211,6 +212,7 @@ app.add_middleware(
 )
 app.include_router(stream_router)
 app.include_router(health_router)
+app.include_router(fields_router)
 
 # =================================================
 # HELPERS

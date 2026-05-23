@@ -1,6 +1,7 @@
 # services/query_handlers/aggregation_handler.py
 import asyncio
 import copy
+import dataclasses
 import json
 import hashlib
 import logging
@@ -37,6 +38,7 @@ from app.services.core.aggregation_core import (
 from app.services.core.es_query_builder import (
     extract_filters_from_intent,
     build_aggregation_query,
+    _NUMERIC_FIELD_MAP,
 )
 from app.services.confidence_engine import compute_aggregation_confidence 
 from app.utils.cache import get_cache, set_cache
@@ -651,6 +653,8 @@ def _apply_entity_bridge(entities, data: dict, intent, kwargs: dict):
             entities['qc_persen_max'] = float(intent.qc_persen_max)
         if getattr(intent, 'metric_target', None):
             entities['metric_target'] = intent.metric_target
+        if getattr(intent, 'numeric_filters', None):
+            entities['numeric_filters'] = intent.numeric_filters
 
     # Second bridge: via request.cognitive_intent or kwargs
     request_obj = kwargs.get("request")
@@ -987,23 +991,21 @@ def _infer_metric_target_list(query: str) -> List[str]:
 
 
 # ── Distribusi field keyword patterns ────────────────────────────────────────
+# sumber_listrik (<0.04% coverage) dan akses_internet (<0.01% coverage) sengaja
+# tidak dimasukkan — field ada di ES tapi coverage terlalu rendah untuk query user.
 _DISTRIBUSI_PATTERNS: list = [
-    (re.compile(
-        r'\b(listrik|sumber.?listrik|PLN|diesel|tenaga.?surya|genset'
-        r'|tidak.?punya.?listrik|tanpa.?listrik|tidak.?ada.?listrik'
-        r'|belum.?ada.?listrik|tidak.?ada.?pln)\b',
-        re.I),
-     "sumber_listrik"),
-    (re.compile(
-        r'\b(internet|akses.?internet|wifi|online|provider.?internet|jenis.?internet'
-        r'|tidak.?punya.?internet|tanpa.?internet|tidak.?ada.?internet'
-        r'|belum.?ada.?internet|tidak.?memiliki.?internet)\b',
-        re.I),
-     "akses_internet"),
     (re.compile(r'\b(sumber.?air|air.?minum|air.?bersih|PAM|sumur|sungai|air.?yang.?dipakai)\b', re.I),
      "sumber_air"),
     (re.compile(r'\b(pagi|sore|waktu.?belajar|waktu.?penyelenggaraan|shift|sesi.?belajar)\b', re.I),
      "waktu_penyelenggaraan"),
+    (re.compile(
+        r'\b(status.?kepemilikan|milik.?(yayasan|pemda|pemerintah)|kepemilikan.?sekolah|dikelola.?(yayasan|pemerintah))\b',
+        re.I),
+     "status_kepemilikan"),
+    (re.compile(
+        r'\b(peserta.?bos|ikut.?bos|dapat.?bos|penerima.?bos|bantuan.?operasional|partisipasi.?bos)\b',
+        re.I),
+     "partisipasi_bos"),
 ]
 
 
@@ -1191,6 +1193,17 @@ async def handle_aggregation_query(
         if _inferred_metric:
             intent.metric_target = _inferred_metric
             logger.info("[AGG] metric_target inferred from query: %r → %r", query[:60], _inferred_metric)
+
+    # ── Numeric filter + metric conflict: "sekolah dengan siswa > 300" means
+    # COUNT of schools, not SUM(siswa) — override metric_target to None.
+    _nf = getattr(intent, 'numeric_filters', []) or []
+    if _nf and getattr(intent, 'metric_target', None):
+        _metric_es  = _NUMERIC_FIELD_MAP.get(intent.metric_target, intent.metric_target)
+        _filter_es  = {_NUMERIC_FIELD_MAP.get(f.field, f.field) for f in _nf}
+        if _metric_es in _filter_es:
+            logger.info("[NUMERIC_FILTER] metric_target=%r → None (filter=metric field, count sekolah)",
+                        intent.metric_target)
+            intent.metric_target = None
 
     # ── Infer distribusi_field from query if LLM didn't extract it ───────────
     if not getattr(intent, 'distribusi_field', None):
@@ -1401,15 +1414,13 @@ async def handle_aggregation_query(
     return await _handle_single_wilayah(query, es_client, entities, intent, resolution, ranking_gap)
 
 def _cache_key(entities: Any) -> str:
+    def _default(obj):
+        if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+            return dataclasses.asdict(obj)
+        raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
-    raw = json.dumps(
-        entities,
-        sort_keys=True,
-        ensure_ascii=False
-    )
-
+    raw = json.dumps(entities, sort_keys=True, ensure_ascii=False, default=_default)
     prefix = "agg_multi:" if isinstance(entities, list) else "agg:"
-
     return f"{prefix}{hashlib.md5(raw.encode()).hexdigest()}"
 
 

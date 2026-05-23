@@ -57,7 +57,23 @@ _METRIC_NEEDS_PROFILE: frozenset = frozenset({
 # sumber_air hanya dari idx_prompting_agent → hanya di profile index.
 # sumber_listrik: ada di qc index tapi coverage sangat rendah (8-9 docs per provinsi);
 # profile index memiliki coverage jauh lebih baik.
-_DISTRIBUSI_NEEDS_PROFILE: frozenset = frozenset({"sumber_air", "sumber_listrik"})
+_DISTRIBUSI_NEEDS_PROFILE: frozenset = frozenset({
+    "sumber_air",
+    "sumber_listrik",
+    "status_kepemilikan",
+    "partisipasi_bos",
+})
+
+# ── Numeric filter ES fields yang ada di idx_sekolah_profile (bukan QC) ─────
+# Dipakai untuk memaksa profile index ketika numeric_filters menyertakan field ini.
+_PROFILE_NUMERIC_FIELDS: frozenset = frozenset({
+    "siswa_total", "siswa_l", "siswa_p",
+    "guru_total", "guru_pns", "guru_honor", "guru_sertifikasi",
+    "guru_p3k", "guru_l", "guru_p",
+    "tendik_l", "tendik_p",
+    "total_komputer", "ruang_kelas",
+    "toilet_siswa_laki", "toilet_siswa_perempuan",
+})
 
 # ── Metric target mapping ────────────────────────────────────────────────────
 _METRIC_MAP: Dict[str, str] = {
@@ -204,6 +220,25 @@ async def execute_nested_aggregation_query(
         metric_target in _METRIC_NEEDS_PROFILE
         or distribusi_field in _DISTRIBUSI_NEEDS_PROFILE
     )
+    # Cek numeric_filters: jika filter menggunakan field dari profile index,
+    # paksa route ke profile meski metric_target=None (count sekolah).
+    if not _use_profile_index:
+        _numeric_filters = entities.get("numeric_filters", [])
+        if _numeric_filters:
+            from app.services.core.es_query_builder import _NUMERIC_FIELD_MAP
+            _filter_es_fields = {
+                _NUMERIC_FIELD_MAP.get(
+                    f.field if hasattr(f, "field") else (f.get("field", "") if isinstance(f, dict) else ""),
+                    f.field if hasattr(f, "field") else (f.get("field", "") if isinstance(f, dict) else ""),
+                )
+                for f in _numeric_filters
+            }
+            if _filter_es_fields & _PROFILE_NUMERIC_FIELDS:
+                _use_profile_index = True
+                logger.info(
+                    "[AGG_CORE] numeric_filter uses profile fields %s → force index=profile",
+                    _filter_es_fields & _PROFILE_NUMERIC_FIELDS,
+                )
     index = (
         os.getenv("ELASTICSEARCH_PROFILE_INDEX", "idx_sekolah_profile")
         if _use_profile_index
@@ -414,6 +449,8 @@ def build_filters(entities: Dict[str, Any]) -> List[Dict[str, Any]]:
         # Pulau — ditangani secara eksplisit di bawah
         "pulau",
         "provinsi_list",
+        # Numeric range filters — ditangani secara eksplisit di bawah
+        "numeric_filters",
     }
 
     # ── Pulau → expand ke terms filter multi-provinsi ─────────────────────────
@@ -571,6 +608,15 @@ def build_filters(entities: Dict[str, Any]) -> List[Dict[str, Any]]:
             range_clause["lte"] = float(_persen_max)
         filters.append({"range": {"qc_score.persen_bersih": range_clause}})
         logger.debug("[AGG_CORE] persen_bersih filter: %s", range_clause)
+
+    # ── Numeric range filters (siswa, guru, dll.) ────────────────────────────
+    _numeric_filters = entities.get("numeric_filters", [])
+    if _numeric_filters:
+        from app.services.core.es_query_builder import build_numeric_filters
+        range_clauses = build_numeric_filters(_numeric_filters)
+        if range_clauses:
+            filters.extend(range_clauses)
+            logger.info("[NUMERIC_FILTER] Applied %d range filter(s)", len(range_clauses))
 
     return filters
  

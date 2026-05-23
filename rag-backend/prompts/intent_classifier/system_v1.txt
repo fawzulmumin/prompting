@@ -29,7 +29,7 @@ SCHEMA OUTPUT:
     "akreditasi_list": "<array misal [\"A\",\"B\"] jika mode=in, atau [] jika tidak>",
     "metric_target": "<null|siswa|siswa_l|siswa_p|guru|guru_pns|guru_honor|guru_sertifikasi|guru_s1|tendik|guru_p3k|guru_l|guru_p_gender|siswa_baru|siswa_mengulang|siswa_lulus|total_komputer — null jika hitung sekolah>",
     "metric_target_list": "<array metric jika user minta lebih dari satu, contoh [\"siswa_l\",\"siswa_p\"], atau []>",
-    "distribusi_field": "<null|sumber_listrik|sumber_air|waktu_penyelenggaraan|akses_internet>",
+    "distribusi_field": "<null|akreditasi|sumber_air|waktu_penyelenggaraan|status_kepemilikan>",
     "nama_sekolah": "<nama sekolah spesifik atau null>",
     "npsn": "<8 digit atau null>",
     "wilayah": {
@@ -56,7 +56,8 @@ SCHEMA OUTPUT:
     "qc_persen_max": "<angka 0-100 atau null — filter sekolah dengan persen_bersih <= nilai ini>",
     "qc_field_list": "<array int 1-13 jika ada lebih dari satu kondisi QC spesifik, atau []>",
     "qc_persen_query": "<true jika user minta persentase/proporsi sekolah bersih atau bermasalah>",
-    "infrastruktur_filter": "<tidak_ada_internet|tidak_ada_listrik|komputer_minim|tidak_ada_toilet|null>"
+    "infrastruktur_filter": "<tidak_ada_internet|tidak_ada_listrik|komputer_minim|tidak_ada_toilet|null>",
+    "numeric_filters": "<array kondisi numerik, atau []>"
   },
   "is_oot": false,
   "oot_reason": null
@@ -261,10 +262,13 @@ METRIC_TARGET_LIST — gunakan saat user tanya DUA ATAU LEBIH metric sekaligus d
   ATURAN: metric_target_list: [] (kosong) jika tidak ada multi-metric
 
 DISTRIBUSI_FIELD — deteksi ketika user tanya distribusi/komposisi suatu field keyword:
-  "kebanyakan pakai listrik apa" / "sumber listrik sekolah" / "distribusi listrik" / "listrik PLN atau diesel" → distribusi_field: "sumber_listrik"
-  "internet yang dipakai" / "akses internet sekolah" / "jenis internet" / "provider internet" → distribusi_field: "akses_internet"
-  "sumber air sekolah" / "air yang dipakai" / "sumber air minum" / "pakai air PAM" → distribusi_field: "sumber_air"
+  "distribusi akreditasi" / "berapa yang terakreditasi A" / "sekolah akreditasi B berapa" → distribusi_field: "akreditasi"
+  "sumber air sekolah" / "air yang dipakai" / "sumber air minum" / "pakai air ledeng/PAM/sumur" → distribusi_field: "sumber_air"
+    Nilai sumber_air aktual ES: "Sumur terlindungi", "Ledeng/PAM", "Pompa", "Mata air terlindungi", "Air hujan", "Air sungai"
   "sekolah pagi atau sore" / "waktu belajar" / "penyelenggaraan pagi sore" / "shift sekolah" → distribusi_field: "waktu_penyelenggaraan"
+  "kepemilikan sekolah" / "milik yayasan berapa" / "dikelola pemerintah" / "status kepemilikan" → distribusi_field: "status_kepemilikan"
+    Nilai status_kepemilikan aktual ES: "Yayasan", "Pemerintah Daerah", "Pemerintah Pusat", "Lainnya"
+  JANGAN gunakan: sumber_listrik (coverage <0.04%), akses_internet (coverage <0.01%), kondisi_bangunan (tidak ada di ES), kepemilikan_lahan (tidak ada di ES)
   ATURAN: distribusi_field diisi untuk module=aggregation, metric_target tetap null
   ATURAN: jika tidak ada distribusi field → distribusi_field: null
 
@@ -283,6 +287,20 @@ INFRASTRUKTUR — filter berdasarkan kondisi fisik/fasilitas sekolah:
   "kekurangan komputer" / "tidak punya komputer" / "komputer kurang" / "komputer sedikit" → infrastruktur_filter: "komputer_minim"
   "tidak ada toilet" / "tidak punya jamban" / "tanpa jamban" / "tidak ada jamban" → infrastruktur_filter: "tidak_ada_toilet"
   Jika tidak ada kondisi infrastruktur → infrastruktur_filter: null
+
+NUMERIC_FILTERS — filter sekolah berdasarkan ambang batas angka:
+  Format setiap item: {"field": "<field>", "operator": "<op>", "value": <angka>}
+  Untuk "between": {"field": "<field>", "operator": "between", "value_min": <min>, "value_max": <max>}
+  field valid: siswa, guru, guru_pns, guru_honor, ruang_kelas, toilet, komputer, siswa_laki, siswa_perempuan
+  operator valid: gt (lebih dari), gte (minimal), lt (kurang dari), lte (maksimal), between
+  Contoh:
+    "siswa lebih dari 300" → numeric_filters: [{"field": "siswa", "operator": "gt", "value": 300}]
+    "guru kurang dari 10" → numeric_filters: [{"field": "guru", "operator": "lt", "value": 10}]
+    "minimal 5 komputer" → numeric_filters: [{"field": "komputer", "operator": "gte", "value": 5}]
+    "antara 200 sampai 500 siswa" → numeric_filters: [{"field": "siswa", "operator": "between", "value_min": 200, "value_max": 500}]
+  ATURAN: gunakan module=list jika user ingin daftar sekolah dengan kondisi tersebut
+  ATURAN: gunakan module=aggregation jika user ingin menghitung jumlah/total sekolah yang memenuhi kondisi
+  ATURAN: jika tidak ada kondisi numerik → numeric_filters: []
 
 FILTER QC — Kualitas Data:
 TRIGGER qc_masalah_only: true — gunakan jika query mengandung salah satu dari:

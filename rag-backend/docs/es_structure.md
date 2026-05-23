@@ -1,4 +1,5 @@
-// mapping index : idx_prompting_agent
+//mapping index idx_prompting_agent
+
 {
   "idx_prompting_agent": {
     "mappings": {
@@ -241,7 +242,271 @@
   }
 }
 
-// mapping index : idx_sekolah_profile
+
+//mapping index idx_sekolah_qc
+
+{
+  "idx_sekolah_qc": {
+    "mappings": {
+      "dynamic": "strict",
+      "properties": {
+        "akreditasi": {
+          "type": "keyword",
+          "eager_global_ordinals": true
+        },
+        "akses_internet": {
+          "type": "keyword"
+        },
+        "alamat_jalan": {
+          "type": "text",
+          "index_options": "docs",
+          "analyzer": "indonesian_text"
+        },
+        "bentuk_pendidikan": {
+          "type": "keyword",
+          "eager_global_ordinals": true
+        },
+        "bujur": {
+          "type": "float",
+          "index": false
+        },
+        "content": {
+          "type": "text",
+          "analyzer": "indonesian_text"
+        },
+        "content_vector": {
+          "type": "dense_vector",
+          "dims": 384,
+          "index": true,
+          "similarity": "cosine",
+          "index_options": {
+            "type": "int8_hnsw",
+            "m": 16,
+            "ef_construction": 100
+          }
+        },
+        "desa_kelurahan": {
+          "type": "keyword",
+          "eager_global_ordinals": true,
+          "normalizer": "lowercase_normalizer",
+          "fields": {
+            "text": {
+              "type": "text",
+              "analyzer": "indonesian_text"
+            }
+          }
+        },
+        "email": {
+          "type": "keyword"
+        },
+        "kabupaten": {
+          "type": "keyword",
+          "eager_global_ordinals": true,
+          "normalizer": "lowercase_normalizer",
+          "fields": {
+            "text": {
+              "type": "text",
+              "analyzer": "indonesian_text"
+            }
+          }
+        },
+        "keaktifan": {
+          "type": "keyword"
+        },
+        "kecamatan": {
+          "type": "keyword",
+          "eager_global_ordinals": true,
+          "normalizer": "lowercase_normalizer",
+          "fields": {
+            "text": {
+              "type": "text",
+              "analyzer": "indonesian_text"
+            }
+          }
+        },
+        "kode_pos": {
+          "type": "keyword",
+          "index": false,
+          "doc_values": false
+        },
+        "kode_wilayah": {
+          "type": "keyword",
+          "index": false,
+          "doc_values": false
+        },
+        "lintang": {
+          "type": "float",
+          "index": false
+        },
+        "lokasi": {
+          "type": "geo_point"
+        },
+        "nama": {
+          "type": "text",
+          "fields": {
+            "autocomplete": {
+              "type": "text",
+              "analyzer": "edge_ngram_analyzer",
+              "search_analyzer": "indonesian_text"
+            },
+            "keyword": {
+              "type": "keyword",
+              "ignore_above": 256,
+              "normalizer": "lowercase_normalizer"
+            }
+          },
+          "analyzer": "indonesian_text"
+        },
+        "nomor_telepon": {
+          "type": "keyword"
+        },
+        "npsn": {
+          "type": "keyword"
+        },
+        "partisipasi_bos": {
+          "type": "boolean"
+        },
+        "provinsi": {
+          "type": "keyword",
+          "eager_global_ordinals": true,
+          "normalizer": "lowercase_normalizer",
+          "fields": {
+            "text": {
+              "type": "text",
+              "analyzer": "indonesian_text"
+            }
+          }
+        },
+        "qc": {
+          "properties": {
+            "qc_1": {
+              "type": "byte"
+            },
+            "qc_10": {
+              "type": "byte"
+            },
+            "qc_11": {
+              "type": "byte"
+            },
+            "qc_12": {
+              "type": "byte"
+            },
+            "qc_13": {
+              "type": "byte"
+            },
+            "qc_14": {
+              "type": "byte"
+            },
+            "qc_15": {
+              "type": "byte"
+            },
+            "qc_2": {
+              "type": "byte"
+            },
+            "qc_3": {
+              "type": "byte"
+            },
+            "qc_4": {
+              "type": "byte"
+            },
+            "qc_5": {
+              "type": "byte"
+            },
+            "qc_6": {
+              "type": "byte"
+            },
+            "qc_7": {
+              "type": "byte"
+            },
+            "qc_8": {
+              "type": "byte"
+            },
+            "qc_9": {
+              "type": "byte"
+            }
+          }
+        },
+        "qc_score": {
+          "properties": {
+            "persen_bersih": {
+              "type": "float"
+            },
+            "total_masalah": {
+              "type": "integer"
+            }
+          }
+        },
+        "sekolah_id": {
+          "type": "keyword",
+          "index": false,
+          "doc_values": false
+        },
+        "sertifikasi_iso": {
+          "type": "keyword"
+        },
+        "sk_izin_operasional": {
+          "type": "keyword",
+          "index": false,
+          "doc_values": false
+        },
+        "sk_pendirian_sekolah": {
+          "type": "keyword",
+          "index": false,
+          "doc_values": false
+        },
+        "status_kepemilikan": {
+          "type": "keyword"
+        },
+        "status_sekolah": {
+          "type": "keyword",
+          "eager_global_ordinals": true
+        },
+        "sumber_listrik": {
+          "type": "keyword"
+        },
+        "tanggal_sk_izin_operasional": {
+          "type": "date",
+          "format": "yyyy-MM-dd||yyyy-MM-dd HH:mm:ss||yyyy-MM-dd HH.mm.ss.SSS||yyyy-MM-dd'T'HH:mm:ss.SSS'Z'||epoch_millis"
+        },
+        "tanggal_sk_pendirian": {
+          "type": "date",
+          "format": "yyyy-MM-dd||yyyy-MM-dd HH:mm:ss||yyyy-MM-dd HH.mm.ss.SSS||yyyy-MM-dd'T'HH:mm:ss.SSS'Z'||epoch_millis"
+        },
+        "waktu_penyelenggaraan": {
+          "type": "keyword"
+        },
+        "website": {
+          "type": "keyword",
+          "index": false,
+          "doc_values": false
+        },
+        "wilayah_key": {
+          "type": "keyword"
+        },
+        "wilayah_perbatasan": {
+          "type": "boolean"
+        },
+        "wilayah_terpencil": {
+          "type": "boolean"
+        },
+        "yayasan": {
+          "type": "text",
+          "fields": {
+            "keyword": {
+              "type": "keyword",
+              "ignore_above": 256,
+              "normalizer": "lowercase_normalizer"
+            }
+          },
+          "analyzer": "indonesian_text"
+        }
+      }
+    }
+  }
+}
+
+//mapping index idx_sekolah_profile
+
 {
   "idx_sekolah_profile": {
     "mappings": {
@@ -621,268 +886,8 @@
   }
 }
 
-// mapping index : idx_sekolah_qc
-{
-  "idx_sekolah_qc": {
-    "mappings": {
-      "dynamic": "strict",
-      "properties": {
-        "akreditasi": {
-          "type": "keyword",
-          "eager_global_ordinals": true
-        },
-        "akses_internet": {
-          "type": "keyword"
-        },
-        "alamat_jalan": {
-          "type": "text",
-          "index_options": "docs",
-          "analyzer": "indonesian_text"
-        },
-        "bentuk_pendidikan": {
-          "type": "keyword",
-          "eager_global_ordinals": true
-        },
-        "bujur": {
-          "type": "float",
-          "index": false
-        },
-        "content": {
-          "type": "text",
-          "analyzer": "indonesian_text"
-        },
-        "content_vector": {
-          "type": "dense_vector",
-          "dims": 384,
-          "index": true,
-          "similarity": "cosine",
-          "index_options": {
-            "type": "int8_hnsw",
-            "m": 16,
-            "ef_construction": 100
-          }
-        },
-        "desa_kelurahan": {
-          "type": "keyword",
-          "eager_global_ordinals": true,
-          "normalizer": "lowercase_normalizer",
-          "fields": {
-            "text": {
-              "type": "text",
-              "analyzer": "indonesian_text"
-            }
-          }
-        },
-        "email": {
-          "type": "keyword"
-        },
-        "kabupaten": {
-          "type": "keyword",
-          "eager_global_ordinals": true,
-          "normalizer": "lowercase_normalizer",
-          "fields": {
-            "text": {
-              "type": "text",
-              "analyzer": "indonesian_text"
-            }
-          }
-        },
-        "keaktifan": {
-          "type": "keyword"
-        },
-        "kecamatan": {
-          "type": "keyword",
-          "eager_global_ordinals": true,
-          "normalizer": "lowercase_normalizer",
-          "fields": {
-            "text": {
-              "type": "text",
-              "analyzer": "indonesian_text"
-            }
-          }
-        },
-        "kode_pos": {
-          "type": "keyword",
-          "index": false,
-          "doc_values": false
-        },
-        "kode_wilayah": {
-          "type": "keyword",
-          "index": false,
-          "doc_values": false
-        },
-        "lintang": {
-          "type": "float",
-          "index": false
-        },
-        "lokasi": {
-          "type": "geo_point"
-        },
-        "nama": {
-          "type": "text",
-          "fields": {
-            "autocomplete": {
-              "type": "text",
-              "analyzer": "edge_ngram_analyzer",
-              "search_analyzer": "indonesian_text"
-            },
-            "keyword": {
-              "type": "keyword",
-              "ignore_above": 256,
-              "normalizer": "lowercase_normalizer"
-            }
-          },
-          "analyzer": "indonesian_text"
-        },
-        "nomor_telepon": {
-          "type": "keyword"
-        },
-        "npsn": {
-          "type": "keyword"
-        },
-        "partisipasi_bos": {
-          "type": "boolean"
-        },
-        "provinsi": {
-          "type": "keyword",
-          "eager_global_ordinals": true,
-          "normalizer": "lowercase_normalizer",
-          "fields": {
-            "text": {
-              "type": "text",
-              "analyzer": "indonesian_text"
-            }
-          }
-        },
-        "qc": {
-          "properties": {
-            "qc_1": {
-              "type": "byte"
-            },
-            "qc_10": {
-              "type": "byte"
-            },
-            "qc_11": {
-              "type": "byte"
-            },
-            "qc_12": {
-              "type": "byte"
-            },
-            "qc_13": {
-              "type": "byte"
-            },
-            "qc_14": {
-              "type": "byte"
-            },
-            "qc_15": {
-              "type": "byte"
-            },
-            "qc_2": {
-              "type": "byte"
-            },
-            "qc_3": {
-              "type": "byte"
-            },
-            "qc_4": {
-              "type": "byte"
-            },
-            "qc_5": {
-              "type": "byte"
-            },
-            "qc_6": {
-              "type": "byte"
-            },
-            "qc_7": {
-              "type": "byte"
-            },
-            "qc_8": {
-              "type": "byte"
-            },
-            "qc_9": {
-              "type": "byte"
-            }
-          }
-        },
-        "qc_score": {
-          "properties": {
-            "persen_bersih": {
-              "type": "float"
-            },
-            "total_masalah": {
-              "type": "integer"
-            }
-          }
-        },
-        "sekolah_id": {
-          "type": "keyword",
-          "index": false,
-          "doc_values": false
-        },
-        "sertifikasi_iso": {
-          "type": "keyword"
-        },
-        "sk_izin_operasional": {
-          "type": "keyword",
-          "index": false,
-          "doc_values": false
-        },
-        "sk_pendirian_sekolah": {
-          "type": "keyword",
-          "index": false,
-          "doc_values": false
-        },
-        "status_kepemilikan": {
-          "type": "keyword"
-        },
-        "status_sekolah": {
-          "type": "keyword",
-          "eager_global_ordinals": true
-        },
-        "sumber_listrik": {
-          "type": "keyword"
-        },
-        "tanggal_sk_izin_operasional": {
-          "type": "date",
-          "format": "yyyy-MM-dd||yyyy-MM-dd HH:mm:ss||yyyy-MM-dd HH.mm.ss.SSS||yyyy-MM-dd'T'HH:mm:ss.SSS'Z'||epoch_millis"
-        },
-        "tanggal_sk_pendirian": {
-          "type": "date",
-          "format": "yyyy-MM-dd||yyyy-MM-dd HH:mm:ss||yyyy-MM-dd HH.mm.ss.SSS||yyyy-MM-dd'T'HH:mm:ss.SSS'Z'||epoch_millis"
-        },
-        "waktu_penyelenggaraan": {
-          "type": "keyword"
-        },
-        "website": {
-          "type": "keyword",
-          "index": false,
-          "doc_values": false
-        },
-        "wilayah_key": {
-          "type": "keyword"
-        },
-        "wilayah_perbatasan": {
-          "type": "boolean"
-        },
-        "wilayah_terpencil": {
-          "type": "boolean"
-        },
-        "yayasan": {
-          "type": "text",
-          "fields": {
-            "keyword": {
-              "type": "keyword",
-              "ignore_above": 256,
-              "normalizer": "lowercase_normalizer"
-            }
-          },
-          "analyzer": "indonesian_text"
-        }
-      }
-    }
-  }
-}
+//sample data idx_prompting_agent
 
-// sample data index : idx_prompting_agent
 "hits": [
       {
         "_index": "idx_prompting_agent",
@@ -944,118 +949,15 @@
             -0.004491256549954414,
             0.11866862326860428,
             -0.037320397794246674,
-            dan seterusnya angka vector
+            ...
           ]
         }
       }
-]
+    ]
 
-// sample data index : idx_sekolah_profile
-"hits": [
-      {
-        "_index": "idx_sekolah_profile",
-        "_id": "70007837",
-        "_score": 1,
-        "_source": {
-          "sekolah_id": "353d9a7b-fb53-4416-8274-eaecb0900d82",
-          "npsn": "70007837",
-          "nama": "TK MIFTAHUL ULUM",
-          "bentuk_pendidikan": "TK",
-          "status_sekolah": "SWASTA",
-          "keaktifan": "1",
-          "alamat_jalan": "Jl. Komplek Kranggan Barat",
-          "desa_kelurahan": "Kranggan Barat",
-          "kecamatan": "Kec. Tanah Merah",
-          "kabupaten": "Kab. Bangkalan",
-          "provinsi": "Prov. Jawa Timur",
-          "kode_wilayah": "052908AD",
-          "wilayah_key": "prov. jawa timur|kab. bangkalan|kec. tanah merah|kranggan barat",
-          "lintang": -7.1035,
-          "bujur": 112.8947,
-          "lokasi": {
-            "lat": -7.1035,
-            "lon": 112.8947
-          },
-          "website": "http://",
-          "status_kepemilikan": "Yayasan",
-          "yayasan": "MIFTAHUL ULUM AL-FAUZAN",
-          "akreditasi": "C",
-          "sk_pendirian_sekolah": "421.1/2740/433.101/2018",
-          "tanggal_sk_pendirian": "2018-07-31",
-          "sk_izin_operasional": "421.1/7007/433.101/2024",
-          "tanggal_sk_izin_operasional": "2024-11-06",
-          "waktu_penyelenggaraan": "Pagi/6 hari",
-          "sertifikasi_iso": "Belum Bersertifikat",
-          "wilayah_terpencil": false,
-          "wilayah_perbatasan": false,
-          "partisipasi_bos": true,
-          "qc": {
-            "qc_1": 1,
-            "qc_2": 1,
-            "qc_3": 1,
-            "qc_4": 1,
-            "qc_5": 1,
-            "qc_6": 1,
-            "qc_7": 1,
-            "qc_8": 1,
-            "qc_9": 1,
-            "qc_10": 1,
-            "qc_11": 1,
-            "qc_12": 1,
-            "qc_13": 1,
-            "qc_14": 0,
-            "qc_15": 0
-          },
-          "qc_score": {
-            "total_masalah": 0,
-            "persen_bersih": 100
-          },
-          "content": "TK MIFTAHUL ULUM. TK. sekolah swasta. akreditasi C. status 1. di Kranggan Barat, Kec. Tanah Merah, Kab. Bangkalan, Prov. Jawa Timur. alamat Jl. Komplek Kranggan Barat. yayasan MIFTAHUL ULUM AL-FAUZAN. Data lengkap.",
-          "content_vector": [
-            -0.020225120708346367,
-            0.03437444567680359,
-            -0.03251834586262703,
-            dan seterusnya angka vector
-          ],
-          "siswa_total": 35,
-          "siswa_l": 22,
-          "siswa_p": 13,
-          "siswa_baru_l": 22,
-          "siswa_baru_p": 13,
-          "siswa_lulus_l": 1,
-          "siswa_lulus_p": 2,
-          "siswa_mengulang_l": 0,
-          "siswa_mengulang_p": 0,
-          "guru_total": 1,
-          "guru_l": 0,
-          "guru_p": 1,
-          "guru_pns": 0,
-          "guru_p3k": 0,
-          "guru_honor": 0,
-          "guru_sertifikasi": 0,
-          "guru_s1_keatas": 0,
-          "tendik_l": 0,
-          "tendik_p": 1,
-          "tipe_jamban": 1,
-          "kecukupan_air": 2,
-          "minum_siswa": 0,
-          "sumber_air": "Sumur terlindungi",
-          "toilet_siswa_laki": 0,
-          "toilet_siswa_perempuan": 0,
-          "semester_id": "20252",
-          "tahun": 2025,
-          "nilai_akhir": 664,
-          "sk_penetapan": "561/BAN-PDM/SK/2025",
-          "last_update_sekolah": "2025-11-13T11:14:26.050Z",
-          "_meta_sync": {
-            "synced_at": "2026-05-04T15:32:18.978215Z",
-            "source": "idx_sekolah_qc+idx_prompting_agent"
-          }
-        }
-      },
-]
 
-// sample data index : idx_sekolah_qc
+//sample data idx_sekolah_qc
+
 "hits": [
       {
         "_index": "idx_sekolah_qc",
@@ -1114,9 +1016,93 @@
             -0.03452510014176369,
             0.04887421429157257,
             -0.033089280128479004,
-            dan seterusnya vector angkat
           ]
         }
-      },
-]
+      }
+    ]
 
+//sample data idx_sekolah_profile
+
+"hits": [
+      {
+        "_index": "idx_sekolah_profile",
+        "_id": "60706839",
+        "_score": 1,
+        "_source": {
+          "npsn": "60706839",
+          "sekolah_id": "a8d5f133-3649-4bd8-a28a-3b6fc18ceea0",
+          "nama": "MIS KHOERUL HUDA",
+          "bentuk_pendidikan": "MI",
+          "status_sekolah": "SWASTA",
+          "keaktifan": "1",
+          "alamat_jalan": "Jl.Pahlawan Gg. Masjid RT 02/03 Ds.Cibinong, Kec. Gunungsindur-Bogor",
+          "desa_kelurahan": "Cibinong",
+          "kecamatan": "Kec. Gunung Sindur",
+          "kabupaten": "Kab. Bogor",
+          "provinsi": "Prov. Jawa Barat",
+          "kode_wilayah": "020525AC",
+          "wilayah_key": "prov. jawa barat|kab. bogor|kec. gunung sindur|cibinong",
+          "lintang": -6.396,
+          "bujur": 106.6844,
+          "lokasi": {
+            "lat": -6.396,
+            "lon": 106.6844
+          },
+          "status_kepemilikan": "Yayasan",
+          "akreditasi": "B",
+          "sk_pendirian_sekolah": "W.i/HK.008/392/1991",
+          "tanggal_sk_pendirian": "1991-05-01",
+          "sk_izin_operasional": "Kd.10.01/4/PP.00.4/704/2010",
+          "tanggal_sk_izin_operasional": "2010-06-03",
+          "qc": {
+            "qc_1": 1,
+            "qc_2": 1,
+            "qc_3": 1,
+            "qc_4": 1,
+            "qc_5": 1,
+            "qc_6": 1,
+            "qc_7": 1,
+            "qc_8": 1,
+            "qc_9": 1,
+            "qc_10": 1,
+            "qc_11": 1,
+            "qc_12": 2,
+            "qc_13": 3,
+            "qc_14": 0,
+            "qc_15": 0
+          },
+          "qc_score": {
+            "total_masalah": 2,
+            "persen_bersih": 84.62
+          },
+          "siswa_total": 165,
+          "siswa_l": 87,
+          "siswa_p": 78,
+          "siswa_baru_l": 0,
+          "siswa_baru_p": 0,
+          "siswa_lulus_l": 0,
+          "siswa_lulus_p": 0,
+          "siswa_mengulang_l": 0,
+          "siswa_mengulang_p": 0,
+          "guru_total": 0,
+          "guru_l": 0,
+          "guru_p": 0,
+          "guru_pns": 0,
+          "guru_p3k": 0,
+          "guru_honor": 0,
+          "guru_sertifikasi": 0,
+          "guru_s1_keatas": 0,
+          "tendik_l": 0,
+          "tendik_p": 0,
+          "semester_id": "20251",
+          "tahun": 2012,
+          "nilai_akhir": 80,
+          "sk_penetapan": "02.00/205/BAP-SM/SK/X/2012",
+          "last_update_sekolah": "2022-07-25T10:40:22.813Z",
+          "_meta_sync": {
+            "synced_at": "2026-05-19T06:37:56.346431Z",
+            "source": "idx_sekolah_qc+idx_prompting_agent"
+          }
+        }
+      }
+    ]

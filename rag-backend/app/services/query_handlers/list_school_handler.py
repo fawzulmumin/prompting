@@ -815,7 +815,7 @@ class ListSchoolHandler:
         return parsed
 
     def _apply_filter_from_intent(self, parsed: dict, intent) -> None:
-        """Inject filter bentuk/akreditasi/status dari intent ke parsed jika belum ada."""
+        """Inject filter bentuk/akreditasi/status/numeric_filters dari intent ke parsed jika belum ada."""
         _if = extract_filters_from_intent(intent)
         if _if.get("bentuk_pendidikan") and not parsed.get("bentuk"):
             parsed["bentuk"] = _if["bentuk_pendidikan"]
@@ -827,6 +827,11 @@ class ListSchoolHandler:
             parsed["akreditasi_in"] = _if["akreditasi_in"]
         if _if.get("status_sekolah") and not parsed.get("status"):
             parsed["status"] = _if["status_sekolah"]
+        numeric_filters = getattr(intent, "numeric_filters", None) or []
+        if numeric_filters and not parsed.get("numeric_filters"):
+            parsed["numeric_filters"] = numeric_filters
+            logger.info("[LIST] numeric_filters injected: %s",
+                        [(f.field, f.operator, f.value) for f in numeric_filters])
 
     async def _query_single_wilayah(
         self, query: str, parsed: dict, wilayah_level: str,

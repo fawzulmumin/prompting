@@ -6,7 +6,7 @@ import re
 import logging
 from typing import Dict, List, Optional
 
-from app.services.core.es_query_builder import build_qc_filter
+from app.services.core.es_query_builder import build_qc_filter, build_numeric_filters
 from app.services.core.jenjang_constants import JENJANG_MAP
 from app.services.query_handlers.list_sort_utils import detect_sort_mode, build_sort_clause
 
@@ -275,6 +275,13 @@ def build_base_filters(parsed: Dict, query_raw: str = "", intent=None) -> List:
         if qc_filters:
             filters.extend(qc_filters)
             logger.info("[LIST] QC filters injected: %s", qc_filters)
+
+    numeric_filters = parsed.get("numeric_filters") or []
+    if numeric_filters:
+        nf_clauses = build_numeric_filters(numeric_filters)
+        if nf_clauses:
+            filters.extend(nf_clauses)
+            logger.info("[LIST] numeric_filters applied: %d clause(s)", len(nf_clauses))
 
     return filters
 

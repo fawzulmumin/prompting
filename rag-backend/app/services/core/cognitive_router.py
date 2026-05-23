@@ -111,6 +111,7 @@ async def classify_and_extract(
                 cached_copy.setdefault("infrastruktur_filter", None)
                 cached_copy.setdefault("distribusi_field", None)
                 cached_copy.setdefault("metric_target_list", [])
+                cached_copy.setdefault("numeric_filters", [])
                 wil_data.setdefault("pulau", None)
                 intent = CognitiveIntent(**cached_copy)
                 intent.wilayah = WilayahEntities(**wil_data)

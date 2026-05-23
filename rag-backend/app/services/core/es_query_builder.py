@@ -12,6 +12,64 @@ from app.services.core.aggregation_core import PULAU_PROVINSI_MAP
 
 logger = logging.getLogger(__name__)
 
+def _normalize_status_sekolah(value: str) -> List[str]:
+    """Return kedua varian kapitalisasi untuk status_sekolah (ES tidak konsisten)."""
+    upper = value.strip().upper()
+    if upper == "NEGERI":
+        return ["NEGERI", "Negeri"]
+    if upper == "SWASTA":
+        return ["SWASTA", "Swasta"]
+    return [value]
+
+
+_NUMERIC_FIELD_MAP: Dict[str, str] = {
+    "siswa":            "siswa_total",
+    "siswa_total":      "siswa_total",
+    "siswa_laki":       "siswa_l",
+    "siswa_perempuan":  "siswa_p",
+    "guru":             "guru_total",
+    "guru_pns":         "guru_pns",
+    "guru_honor":       "guru_honor",
+    "guru_sertifikasi": "guru_sertifikasi",
+    "guru_p3k":         "guru_p3k",
+    "guru_pppk":        "guru_p3k",
+    "guru_s1":          "guru_s1_keatas",
+    "guru_sarjana":     "guru_s1_keatas",
+    "ruang_kelas":      "ruang_kelas",
+    "toilet":           "toilet_siswa_laki",
+    "tendik":           "tendik_l",
+    "nilai_akhir":      "nilai_akhir",
+    # total_komputer: ada di mapping idx_sekolah_profile tapi tidak terisi saat indexing.
+    # Nilai null untuk hampir semua dokumen — tidak bisa dipakai untuk range filter.
+    # Lihat: _LOW_COVERAGE_FIELDS di field_catalog.py
+}
+
+
+def build_numeric_filters(numeric_filters: list) -> List[Dict]:
+    """Konversi list NumericFilter → list ES range query clause."""
+    if not numeric_filters:
+        return []
+    clauses = []
+    for nf in numeric_filters:
+        es_field = _NUMERIC_FIELD_MAP.get(getattr(nf, "field", ""), getattr(nf, "field", ""))
+        op = getattr(nf, "operator", "")
+        if op == "between":
+            vmin = getattr(nf, "value_min", None)
+            vmax = getattr(nf, "value_max", None)
+            if vmin is not None or vmax is not None:
+                range_body: Dict[str, Any] = {}
+                if vmin is not None:
+                    range_body["gte"] = vmin
+                if vmax is not None:
+                    range_body["lte"] = vmax
+                clauses.append({"range": {es_field: range_body}})
+        elif op in ("gt", "gte", "lt", "lte"):
+            val = getattr(nf, "value", None)
+            if val is not None:
+                clauses.append({"range": {es_field: {op: val}}})
+    return clauses
+
+
 _INFRASTRUKTUR_FILTER_MAP: Dict[str, Dict] = {
     "tidak_ada_internet": {
         "bool": {
@@ -253,12 +311,7 @@ def build_es_query(
 
     # ── Status Sekolah → HARD FILTER ──
     if "status_sekolah" in es_filters:
-        raw = es_filters["status_sekolah"]  # "NEGERI" atau "SWASTA"
-        variants = {
-            "NEGERI":  ["NEGERI", "Negeri"],
-            "SWASTA":  ["SWASTA", "Swasta", "Luar Negeri"],
-        }
-        terms = variants.get(raw.upper(), [raw])
+        terms = _normalize_status_sekolah(es_filters["status_sekolah"])
         hard_filters.append({"terms": {"status_sekolah": terms}})
 
     # ── Jenjang → HARD FILTER ──
@@ -287,6 +340,11 @@ def build_es_query(
     _infra = getattr(intent, "infrastruktur_filter", None)
     if _infra and _infra in _INFRASTRUKTUR_FILTER_MAP:
         hard_filters.append(_INFRASTRUKTUR_FILTER_MAP[_infra])
+
+    # ── Numeric Threshold Filter (Phase 23A) ──
+    _num_filters = getattr(intent, "numeric_filters", [])
+    if _num_filters:
+        hard_filters.extend(build_numeric_filters(_num_filters))
 
     # ── Nama Sekolah → SCORING ──
     if intent.nama_sekolah:
@@ -350,7 +408,7 @@ def build_aggregation_query(intent_or_filters, es_filters: Dict = None) -> Dict:
         if "bentuk_pendidikan_in" in legacy:
             must.append({"terms": {"bentuk_pendidikan": legacy["bentuk_pendidikan_in"]}})
         if "status_sekolah" in legacy:
-            must.append({"term": {"status_sekolah": legacy["status_sekolah"]}})
+            must.append({"terms": {"status_sekolah": _normalize_status_sekolah(legacy["status_sekolah"])}})
         if "akreditasi_exact" in legacy:
             must.append({"term": {"akreditasi": legacy["akreditasi_exact"]}})
         if "akreditasi_gte" in legacy:
@@ -399,7 +457,7 @@ def build_geo_query(
         must_filters.append({"term": {"bentuk_pendidikan": es_filters["bentuk_pendidikan"]}})
 
     if "status_sekolah" in es_filters:
-        must_filters.append({"term": {"status_sekolah": es_filters["status_sekolah"]}})
+        must_filters.append({"terms": {"status_sekolah": _normalize_status_sekolah(es_filters["status_sekolah"])}})
 
     query = {
         "query": {

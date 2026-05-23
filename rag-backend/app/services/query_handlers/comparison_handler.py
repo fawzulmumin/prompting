@@ -18,6 +18,7 @@ from app.services.core.aggregation_core import (
     execute_nested_aggregation_query,
     _build_provinsi_filter,
     build_metric_aggs,
+    _METRIC_NEEDS_PROFILE,
 )
 from app.services.query_handlers import profile_handler
 from app.services.core.es_query_builder import extract_filters_from_intent
@@ -375,6 +376,7 @@ async def _fetch_location_data(
     es_client: AsyncElasticsearch,
     intent=None,
     filters: Optional[Dict[str, Any]] = None,
+    metric_target: Optional[str] = None,
 ) -> dict:
     """
     Fetch aggregation count for a single location.
@@ -401,11 +403,17 @@ async def _fetch_location_data(
         normalized["akreditasi_exact"] = qf["akreditasi_exact"]
 
     jenjang = qf.get("bentuk_pendidikan")
-    metric_target = getattr(intent, "metric_target", None)
-    agg_query = _build_comparison_agg_query(entities, jenjang, qf=qf, metric_target=metric_target)
+    _metric = metric_target if metric_target is not None else getattr(intent, "metric_target", None)
+    agg_query = _build_comparison_agg_query(entities, jenjang, qf=qf, metric_target=_metric)
 
+    _index = (
+        os.getenv("ELASTICSEARCH_PROFILE_INDEX", "idx_sekolah_profile")
+        if _metric in _METRIC_NEEDS_PROFILE
+        else os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc")
+    )
+    logger.debug("[COMPARISON] _fetch_location_data metric=%r → index=%s", _metric, _index)
     es_result = await es_client.search(
-        index=os.getenv("ELASTICSEARCH_INDEX", "idx_sekolah_qc"),
+        index=_index,
         body=agg_query,
     )
 
@@ -419,6 +427,76 @@ async def _fetch_location_data(
         "count": total_value,
         "entities": entities,
     }
+
+
+async def _compare_multi_metric(
+    query: str,
+    es_client: AsyncElasticsearch,
+    intent,
+    filters: Optional[Dict[str, Any]],
+    locations: List[Dict[str, Any]],
+    metric_list: List[str],
+) -> Dict[str, Any]:
+    """
+    Jalankan comparison untuk setiap metric di metric_list secara paralel.
+    Return handler response dict langsung.
+    """
+    import asyncio as _aio
+    sem = _aio.Semaphore(4)
+
+    async def _fetch(loc, metric):
+        async with sem:
+            try:
+                return await _fetch_location_data(
+                    loc, es_client, intent=intent, filters=filters, metric_target=metric
+                )
+            except Exception:
+                logger.exception("[COMPARISON] multi-metric fetch error metric=%s loc=%s", metric, loc)
+                return {"value": get_display_value(loc), "count": 0, "entities": loc}
+
+    tasks = [_fetch(loc, m) for m in metric_list for loc in locations]
+    flat = await _aio.gather(*tasks)
+
+    # Susun ulang: {metric: [result_per_loc]}
+    n_loc = len(locations)
+    by_metric: Dict[str, List[Dict]] = {}
+    for i, m in enumerate(metric_list):
+        by_metric[m] = list(flat[i * n_loc: (i + 1) * n_loc])
+        by_metric[m].sort(key=lambda r: r["count"], reverse=True)
+
+    markdown = _format_multi_metric_comparison(by_metric)
+    total_hits = sum(r["count"] for results in by_metric.values() for r in results)
+    confidence = compute_comparison_confidence(entities_count=len(locations), total_hits=total_hits)
+
+    return {
+        "query": query,
+        "answer_markdown": markdown,
+        "provider": "ELASTICSEARCH_COMPARISON_MULTI_METRIC",
+        "multi_metric": by_metric,
+        "context_used": [f"{k}:{v}" for loc in locations for k, v in loc.items() if v],
+        "answer_confident": confidence >= 0.7,
+        "confidence": confidence,
+        "num_docs": total_hits,
+    }
+
+
+def _format_multi_metric_comparison(by_metric: Dict[str, List[Dict]]) -> str:
+    """Format hasil multi-metric comparison sebagai section per metric."""
+    parts = []
+    for metric, results in by_metric.items():
+        label = _COMPARISON_METRIC_LABEL.get(metric, metric.replace("_", " ").title())
+        section = f"### {label}\n"
+        for r in results:
+            loc_label = format_location(r["value"])
+            section += f"- {loc_label}: **{r['count']:,}**\n"
+        if results:
+            best = format_location(results[0]["value"])
+            section += f"\n*{label} tertinggi: **{best}***"
+        parts.append(section)
+
+    summary = "\n\n".join(parts)
+    summary += "\n\n---\n*Perbandingan multi-metrik — setiap bagian menunjukkan satu indikator.*"
+    return summary
 
 
 def _build_comparison_markdown(
@@ -629,6 +707,12 @@ async def handle_comparison_query(
             "answer_confident": False
         }
  
+    # ── Multi-metric comparison (Phase 23C) ───────────────────
+    _metric_list = getattr(intent, "metric_target_list", [])
+    if len(_metric_list) >= 2 and len(locations) >= 2:
+        logger.info("[COMPARISON] multi-metric: metrics=%s locations=%d", _metric_list, len(locations))
+        return await _compare_multi_metric(query, es_client, intent, filters, locations[:2], _metric_list)
+
     # ── Execute aggregation per lokasi ────────────────────────
     results: List[Dict[str, Any]] = []
  

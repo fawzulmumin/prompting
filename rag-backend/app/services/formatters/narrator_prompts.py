@@ -406,7 +406,8 @@ def _prompt_aggregation(
             f"- Kolom masalah terbanyak:\n{_top_lines}\n"
         )
 
-    has_breakdown = bool(breakdown_section or drilldown_section or qc_data_block)
+    has_distribusi = bool(distribusi and distribusi_field)
+    has_breakdown = bool(breakdown_section or drilldown_section or qc_data_block or has_distribusi)
 
     # ── Instruksi narasi ─────────────────────────────────────────────────────
     if has_breakdown:
@@ -435,6 +436,22 @@ def _prompt_aggregation(
                 f"— gunakan PERSIS angka dari DATA KUALITAS di atas. "
                 f"Format contoh: 'Kolom dengan masalah terbanyak adalah X ({'{count:,}'} sekolah), "
                 f"diikuti Y dan Z.'"
+            )
+
+        distribusi_instruksi = ""
+        if has_distribusi:
+            _dl = {
+                "sumber_air":            "Sumber Air",
+                "waktu_penyelenggaraan": "Waktu Belajar",
+                "status_kepemilikan":    "Status Kepemilikan",
+                "partisipasi_bos":       "Partisipasi BOS",
+                "akreditasi":            "Akreditasi",
+            }.get(distribusi_field, distribusi_field.replace("_", " ").title())
+            distribusi_instruksi = (
+                f"\n\n## Distribusi {_dl}\n"
+                f"WAJIB sebutkan distribusi {_dl} per kategori dengan angka dan persentasenya "
+                f"— gunakan PERSIS data distribusi dari DATA AGREGASI di atas. "
+                f"Ini adalah informasi utama yang diminta user."
             )
 
         # ── Instruksi komposisi jenjang (aware filter user) ────────────────
@@ -467,7 +484,8 @@ def _prompt_aggregation(
             "Angka dan persentase harus PERSIS dari data di atas — jangan hitung ulang."
             + pct_instruksi
             + drilldown_instruksi
-            + qc_instruksi +
+            + qc_instruksi
+            + distribusi_instruksi +
             "\n\n## Implikasi\n"
             "Satu kalimat nilai praktis untuk perencanaan pendidikan.\n\n"
             "LARANGAN (jangan lakukan ini):\n"
@@ -543,12 +561,13 @@ def _prompt_aggregation(
     distribusi_section = ""
     if distribusi and distribusi_field:
         _DIST_LABELS = {
-            "sumber_listrik":      "Sumber Listrik",
-            "akses_internet":      "Akses Internet",
-            "sumber_air":          "Sumber Air",
+            "sumber_air":            "Sumber Air",
             "waktu_penyelenggaraan": "Waktu Belajar",
+            "status_kepemilikan":    "Status Kepemilikan",
+            "partisipasi_bos":       "Partisipasi BOS",
+            "akreditasi":            "Akreditasi",
         }
-        dist_label = _DIST_LABELS.get(distribusi_field, distribusi_field)
+        dist_label = _DIST_LABELS.get(distribusi_field, distribusi_field.replace("_", " ").title())
         dist_lines = ", ".join(
             f"{item['key']}: {item['count']:,} ({item['pct']}%)"
             for item in distribusi[:8]

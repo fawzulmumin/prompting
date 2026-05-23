@@ -21,6 +21,15 @@ class WilayahEntities:
 
 
 @dataclass
+class NumericFilter:
+    field: str
+    operator: str                    # "gt" | "gte" | "lt" | "lte" | "between"
+    value: Optional[float] = None    # untuk gt/gte/lt/lte
+    value_min: Optional[float] = None  # untuk "between"
+    value_max: Optional[float] = None  # untuk "between"
+
+
+@dataclass
 class CognitiveIntent:
     # Routing
     module:      str = "out_of_context"
@@ -46,6 +55,7 @@ class CognitiveIntent:
     metric_target_list: List[str] = field(default_factory=list)  # multi-metric query (Phase 21)
     distribusi_field: Optional[str] = None  # "sumber_listrik"|"sumber_air"|"waktu_penyelenggaraan"|"akses_internet"
     infrastruktur_filter: Optional[str] = None  # "tidak_ada_internet"|"tidak_ada_listrik"|"komputer_minim"|"tidak_ada_toilet"
+    numeric_filters: List["NumericFilter"] = field(default_factory=list)  # range filter (Phase 23A)
 
     # QC filters
     qc_masalah_only:  bool = False
