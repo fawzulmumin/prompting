@@ -167,3 +167,87 @@ def test_list_handler_numeric_filter_injection():
     result = build_numeric_filters(filters)
     assert len(result) == 1
     assert result[0] == {"range": {"siswa_total": {"gte": 100}}}
+
+
+@pytest.mark.unit
+def test_guru_p3k_in_field_map():
+    from app.services.core.es_query_builder import _NUMERIC_FIELD_MAP
+    assert "guru_p3k" in _NUMERIC_FIELD_MAP
+    assert _NUMERIC_FIELD_MAP["guru_p3k"] == "guru_p3k"
+    assert "guru_pppk" in _NUMERIC_FIELD_MAP
+    assert _NUMERIC_FIELD_MAP["guru_pppk"] == "guru_p3k"
+
+
+@pytest.mark.unit
+def test_guru_s1_in_field_map():
+    from app.services.core.es_query_builder import _NUMERIC_FIELD_MAP
+    assert "guru_s1" in _NUMERIC_FIELD_MAP
+    assert _NUMERIC_FIELD_MAP["guru_s1"] == "guru_s1_keatas"
+
+
+# ── Drilldown index routing: numeric_filters → profile index ──────────────────
+
+@pytest.mark.unit
+def test_drilldown_numeric_filter_mapping_forces_profile():
+    """
+    Field 'siswa' dipetakan ke 'siswa_total' yang ada di _PROFILE_NUMERIC_FIELDS.
+    Routing logic drilldown harus mendeteksi ini dan memilih profile index.
+    """
+    from app.services.core.aggregation_core import _PROFILE_NUMERIC_FIELDS
+    from app.services.core.es_query_builder import _NUMERIC_FIELD_MAP
+    from app.services.core.intent_models import NumericFilter
+
+    f = NumericFilter(field="siswa", operator="gt", value=300)
+    es_field = _NUMERIC_FIELD_MAP.get(
+        f.field if hasattr(f, "field") else "",
+        f.field if hasattr(f, "field") else "",
+    )
+    assert es_field == "siswa_total"
+    assert es_field in _PROFILE_NUMERIC_FIELDS
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_drilldown_uses_profile_index_with_siswa_filter():
+    """
+    execute_drilldown_query harus memilih idx_sekolah_profile ketika entities
+    mengandung numeric_filters pada field profile (siswa > 300).
+    Tanpa fix ini drilldown akan query idx_sekolah_qc → data tidak ada → top3 kosong.
+    """
+    from unittest.mock import AsyncMock
+    from app.services.core.aggregation_core import execute_drilldown_query
+    from app.services.core.intent_models import NumericFilter
+    import os
+
+    mock_es = AsyncMock()
+    mock_es.search.return_value = {
+        "aggregations": {
+            "drilldown": {
+                "buckets": [
+                    {"key": "kab. bogor", "doc_count": 1200},
+                    {"key": "kab. bandung", "doc_count": 900},
+                ]
+            }
+        }
+    }
+
+    entities = {
+        "provinsi": "prov. jawa barat",
+        "bentuk_pendidikan": "SD",
+        "numeric_filters": [NumericFilter(field="siswa", operator="gt", value=300)],
+    }
+
+    result = await execute_drilldown_query(
+        mock_es, entities, drilldown_field="kabupaten", size=3
+    )
+
+    assert mock_es.search.called
+    call_kwargs = mock_es.search.call_args
+    index_used = call_kwargs.kwargs.get("index") or call_kwargs.args[0] if call_kwargs.args else None
+    profile_index = os.getenv("ELASTICSEARCH_PROFILE_INDEX", "idx_sekolah_profile")
+    assert index_used == profile_index, (
+        f"Drilldown harus pakai profile index saat ada numeric_filter siswa, "
+        f"tapi pakai: {index_used}"
+    )
+    assert len(result) == 2
+    assert result[0]["name"] == "kab. bogor"

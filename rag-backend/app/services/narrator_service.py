@@ -399,14 +399,17 @@ async def narrate_aggregation(
     distribusi: Optional[list] = None,
     distribusi_field: Optional[str] = None,
     qc_detail: Optional[Dict] = None,
+    numeric_filters: Optional[List] = None,
 ) -> str:
     if total == 0:
         return _zero_result_message(wilayah, active_filters, modul="aggregation")
 
     # ── Fast path: simple query tanpa breakdown/drilldown ────────────────────
+    # Skip fast path jika ada numeric_filters — LLM perlu menyebut kondisi filter.
     _is_simple = not (breakdown_jenjang or breakdown_status or drilldown_top3)
     _is_metric = bool(metric_target and metric_target not in (None, "sekolah"))
-    if _is_simple and not _is_metric:
+    _has_numeric_filter = bool(numeric_filters)
+    if _is_simple and not _is_metric and not _has_numeric_filter:
         from app.services.core.local_narrator import narrate_aggregation_simple
         _jenjang = (active_filters or {}).get("bentuk_pendidikan")
         _status  = (active_filters or {}).get("status_sekolah") or status_filter
@@ -449,6 +452,7 @@ async def narrate_aggregation(
         distribusi=distribusi,
         distribusi_field=distribusi_field,
         qc_detail=qc_detail,
+        numeric_filters=numeric_filters,
     )
 
     has_breakdown = bool(breakdown_jenjang or breakdown_status or drilldown_top3)

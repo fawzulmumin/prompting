@@ -15,6 +15,67 @@ logger = logging.getLogger(__name__)
 # MODULE-LEVEL CONSTANTS (dipindah dari list_school_handler)
 # ================================================================
 
+# Token kondisi numerik yang harus di-strip sebelum ekstraksi keyword lokasi.
+# HANYA dipakai di _extract_location_keyword — bukan untuk tujuan lain.
+_WILAYAH_QUALIFIER_PATTERNS = re.compile(
+    r'\b('
+    r'wilayah\s+(?:terpencil|perbatasan|3[Tt]|terdepan|tertinggal)|'
+    r'daerah\s+(?:terpencil|perbatasan|3[Tt]|terdepan|tertinggal)|'
+    r'terpencil|perbatasan|tertinggal|terdepan|'
+    r'3[Tt]\s+(?:terpencil|terdepan|tertinggal)'
+    r')\b',
+    re.IGNORECASE
+)
+
+_NUMERIC_CONDITION_PATTERNS = re.compile(
+    r'\b('
+    # Compound: subject noun + numeric operator — strip both together so "guru kurang dari" vanishes
+    r'(?:(?:jumlah\s+)?(?:guru|siswa|murid|kelas|komputer|toilet|ruang|tendik)\s+'
+    r'(?:lebih dari|kurang dari|di atas|di bawah|minimal|maksimal|'
+    r'setidaknya|paling banyak|paling sedikit|antara|sampai|hingga))|'
+    # Compound: "dengan [noun]" — strip the whole prep phrase so "dengan guru" vanishes
+    r'(?:dengan\s+(?:jumlah\s+)?(?:guru|siswa|murid|kelas|komputer|toilet|ruang|tendik))|'
+    # Individual operators
+    r'lebih dari|kurang dari|di atas|di bawah|'
+    r'minimal|maksimal|minimum|maximum|'
+    r'setidaknya|paling banyak|paling sedikit|'
+    r'yang punya|yang memiliki|yang ada|'
+    r'dengan|punya|memiliki|'
+    r'antara|sampai|hingga|'
+    r'\d+\s*(?:siswa|guru|murid|kelas|komputer|toilet|ruang|orang|unit)?'
+    r')\b',
+    re.IGNORECASE
+)
+
+
+def _strip_numeric_condition_tokens(query: str) -> str:
+    """
+    Hapus token kondisi numerik dan qualifier wilayah dari query sebelum ekstraksi keyword lokasi.
+    Contoh: "SMA dengan guru lebih dari 5 di Sulawesi" → "SMA di Sulawesi"
+    Contoh: "daftar SMP di wilayah perbatasan Kalimantan" → "daftar SMP di Kalimantan"
+    HANYA dipanggil untuk keyword lokasi — query asli tetap diteruskan ke pipeline lain.
+    """
+    cleaned = _WILAYAH_QUALIFIER_PATTERNS.sub(' ', query)
+    cleaned = _NUMERIC_CONDITION_PATTERNS.sub(' ', cleaned)
+    cleaned = re.sub(r'\s{2,}', ' ', cleaned).strip()
+    if cleaned != query:
+        logger.info("[LIST] stripped tokens: '%s' → '%s'", query[:60], cleaned[:60])
+    return cleaned
+
+
+def _resolve_pulau_keyword(kw: str):
+    """
+    Cek apakah keyword adalah nama pulau/region besar (Jawa, Sulawesi, dll).
+    Menerima "pulau jawa" atau "jawa" langsung.
+    Return (pulau_name, provinsi_list) atau None.
+    """
+    from app.services.core.aggregation_core import PULAU_PROVINSI_MAP
+    kw_clean = re.sub(r'^pulau\s+', '', kw.lower().strip())
+    if kw_clean in PULAU_PROVINSI_MAP:
+        return kw_clean, PULAU_PROVINSI_MAP[kw_clean]
+    return None
+
+
 _AMBIGUOUS_SINGLE_WORDS = {
     "timur", "barat", "utara", "selatan", "tengah",
     "dalam", "luar", "baru", "lama", "raya", "induk",
@@ -541,6 +602,9 @@ def _extract_location_keyword(query: str) -> str:
         # Kata area generik
         "daerah", "wilayah", "area", "kawasan", "sekitar",
     }
-    tokens = re.sub(r"[^\w\s]", " ", query.lower()).split()
+    clean_query = _strip_numeric_condition_tokens(query)
+    if clean_query != query:
+        logger.info("[LIST] stripped numeric tokens: '%s' → '%s'", query[:60], clean_query[:60])
+    tokens = re.sub(r"[^\w\s]", " ", clean_query.lower()).split()
     keywords = [t for t in tokens if t not in stopwords and len(t) >= 3]
     return " ".join(keywords).strip()

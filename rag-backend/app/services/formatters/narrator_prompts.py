@@ -7,6 +7,80 @@ from typing import Dict, Any, List, Optional
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# NUMERIC FILTER FORMATTER
+# ─────────────────────────────────────────────────────────────────────────────
+
+_NUMERIC_FIELD_LABELS = {
+    "siswa":                  "siswa",
+    "siswa_total":            "siswa",
+    "siswa_l":                "siswa laki-laki",
+    "siswa_p":                "siswa perempuan",
+    "guru":                   "guru",
+    "guru_total":             "guru",
+    "guru_pns":               "guru PNS/ASN",
+    "guru_honor":             "guru honorer",
+    "guru_p3k":               "guru PPPK",
+    "guru_sertifikasi":       "guru bersertifikasi",
+    "guru_s1_keatas":         "guru S1 ke atas",
+    "ruang_kelas":            "ruang kelas",
+    "toilet_siswa_laki":      "toilet siswa laki-laki",
+    "toilet_siswa_perempuan": "toilet siswa perempuan",
+    "tendik":                 "tenaga kependidikan",
+    "nilai_akhir":            "nilai akreditasi",
+}
+
+_OPERATOR_LABELS = {
+    "gt":  "lebih dari",
+    "gte": "minimal",
+    "lt":  "kurang dari",
+    "lte": "maksimal",
+}
+
+
+def format_numeric_filter_text(numeric_filters) -> str:
+    """
+    Konversi list NumericFilter ke deskripsi Bahasa Indonesia.
+    Handle input None, list kosong, dataclass, maupun dict.
+
+    Contoh output:
+    - [gt siswa 300]            → "dengan lebih dari 300 siswa"
+    - [gte guru_pns 5]          → "dengan minimal 5 guru PNS/ASN"
+    - [between siswa 100 500]   → "dengan jumlah siswa antara 100 hingga 500"
+    - []                        → ""
+    """
+    if not numeric_filters:
+        return ""
+
+    from app.services.core.es_query_builder import _NUMERIC_FIELD_MAP
+
+    parts = []
+    for f in numeric_filters:
+        if hasattr(f, 'field'):
+            field   = f.field
+            op      = f.operator
+            value   = f.value
+            v_min   = f.value_min
+            v_max   = f.value_max
+        else:
+            field   = f.get('field', '')
+            op      = f.get('operator', '')
+            value   = f.get('value')
+            v_min   = f.get('value_min')
+            v_max   = f.get('value_max')
+
+        es_field = _NUMERIC_FIELD_MAP.get(field, field)
+        label = _NUMERIC_FIELD_LABELS.get(es_field, _NUMERIC_FIELD_LABELS.get(field, field))
+
+        if op == "between" and v_min is not None and v_max is not None:
+            parts.append(f"dengan jumlah {label} antara {int(v_min)} hingga {int(v_max)}")
+        elif op in _OPERATOR_LABELS and value is not None:
+            val_str = str(int(value)) if isinstance(value, float) and value == int(value) else str(value)
+            parts.append(f"dengan {_OPERATOR_LABELS[op]} {val_str} {label}")
+
+    return ", ".join(parts) if parts else ""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SYSTEM BASE PROMPT
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -333,6 +407,7 @@ def _prompt_aggregation(
     distribusi: Optional[list] = None,
     distribusi_field: Optional[str] = None,
     qc_detail: Optional[Dict] = None,
+    numeric_filters: Optional[list] = None,
 ) -> str:
     status_info   = f" ({status_filter})" if status_filter else ""
     konteks_bench = _benchmark_label(total, level)
@@ -507,6 +582,16 @@ def _prompt_aggregation(
             "tapi isinya harus terbatas pada data yang sudah disuplai (jenjang, status, wilayah, dsb)."
         )
     else:
+        _nf_instruksi = ""
+        if numeric_filters:
+            _nf_desc = format_numeric_filter_text(numeric_filters)
+            if _nf_desc:
+                _nf_instruksi = (
+                    f"\nPERHATIAN FILTER: Angka {total:,} adalah hasil filter ({_nf_desc}). "
+                    f"Kalimat 1 WAJIB menyebutkan kondisi filter ini, "
+                    f"contoh: 'Terdapat {total:,} {metric_label} di {wilayah} yang {_nf_desc[7:] if _nf_desc.startswith('dengan ') else _nf_desc}.' "
+                    f"JANGAN gunakan kata 'tergolong sedikit/banyak' untuk angka yang merupakan hasil filter.\n"
+                )
         instruksi = (
             "INSTRUKSI NARASI (3 kalimat tepat, TANPA bullet point, TANPA heading):\n"
             f"Kalimat 1: Sebutkan PERSIS angka {total:,} {metric_label} di {wilayah} "
@@ -514,7 +599,8 @@ def _prompt_aggregation(
             "Kalimat 2: Bandingkan dengan benchmark — gunakan label konteks yang "
             "sudah disediakan (banyak/sedang/sedikit).\n"
             "Kalimat 3: Satu implikasi praktis bagi perencanaan pendidikan di wilayah ini.\n"
-            f"LARANGAN KERAS: Jangan tulis angka selain {total:,} untuk jumlah {metric_label}.\n\n"
+            f"LARANGAN KERAS: Jangan tulis angka selain {total:,} untuk jumlah {metric_label}.\n"
+            + _nf_instruksi + "\n"
             "LARANGAN (jangan lakukan ini):\n"
             "- JANGAN tulis bagian dengan header \"Implikasi\", \"Rekomendasi Kebijakan\", "
             "\"Saran\", atau sejenisnya.\n"
@@ -536,19 +622,22 @@ def _prompt_aggregation(
 
     # ── Filter aktif & persentase ────────────────────────────────────────────
     filter_section = ""
+    _filter_parts = []
     if active_filters:
-        parts = []
         if active_filters.get("bentuk_pendidikan"):
-            parts.append(f"jenjang {active_filters['bentuk_pendidikan']}")
+            _filter_parts.append(f"jenjang {active_filters['bentuk_pendidikan']}")
         if active_filters.get("status_sekolah"):
-            parts.append(f"status {active_filters['status_sekolah']}")
+            _filter_parts.append(f"status {active_filters['status_sekolah']}")
         if active_filters.get("akreditasi_gte"):
             grades = "/".join(active_filters["akreditasi_gte"])
-            parts.append(f"akreditasi {grades}")
+            _filter_parts.append(f"akreditasi {grades}")
         elif active_filters.get("akreditasi_exact"):
-            parts.append(f"akreditasi {active_filters['akreditasi_exact']}")
-        if parts:
-            filter_section = f"\n- Filter aktif: {', '.join(parts)}"
+            _filter_parts.append(f"akreditasi {active_filters['akreditasi_exact']}")
+    numeric_filter_desc = format_numeric_filter_text(numeric_filters or [])
+    if numeric_filter_desc:
+        _filter_parts.append(numeric_filter_desc)
+    if _filter_parts:
+        filter_section = f"\n- Filter aktif: {', '.join(_filter_parts)}"
 
     pct_section = ""
     if total_all and pct_of_total is not None:

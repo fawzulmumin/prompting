@@ -64,6 +64,9 @@ _DISTRIBUSI_NEEDS_PROFILE: frozenset = frozenset({
     "partisipasi_bos",
 })
 
+# ── Boolean fields yang HANYA ada di idx_sekolah_profile ────────────────────
+_PROFILE_BOOLEAN_FIELDS: frozenset = frozenset({"wilayah_terpencil", "wilayah_perbatasan"})
+
 # ── Numeric filter ES fields yang ada di idx_sekolah_profile (bukan QC) ─────
 # Dipakai untuk memaksa profile index ketika numeric_filters menyertakan field ini.
 _PROFILE_NUMERIC_FIELDS: frozenset = frozenset({
@@ -239,6 +242,14 @@ async def execute_nested_aggregation_query(
                     "[AGG_CORE] numeric_filter uses profile fields %s → force index=profile",
                     _filter_es_fields & _PROFILE_NUMERIC_FIELDS,
                 )
+    if not _use_profile_index:
+        boolean_fields_in_entities = set(entities.keys()) & _PROFILE_BOOLEAN_FIELDS
+        if boolean_fields_in_entities:
+            _use_profile_index = True
+            logger.info(
+                "[AGG_CORE] boolean_filter uses profile fields %s → force index=profile",
+                boolean_fields_in_entities,
+            )
     index = (
         os.getenv("ELASTICSEARCH_PROFILE_INDEX", "idx_sekolah_profile")
         if _use_profile_index
@@ -846,6 +857,33 @@ async def execute_drilldown_query(
     """
     _is_numeric = metric_target and metric_target != "sekolah"
     _use_profile = metric_target in _METRIC_NEEDS_PROFILE
+    # Mirror index routing dari execute_nested_aggregation_query:
+    # numeric_filters pada field profile → paksa profile index
+    if not _use_profile:
+        _drilldown_numeric_filters = entities.get("numeric_filters", [])
+        if _drilldown_numeric_filters:
+            from app.services.core.es_query_builder import _NUMERIC_FIELD_MAP
+            _filter_es_fields = {
+                _NUMERIC_FIELD_MAP.get(
+                    f.field if hasattr(f, "field") else (f.get("field", "") if isinstance(f, dict) else ""),
+                    f.field if hasattr(f, "field") else (f.get("field", "") if isinstance(f, dict) else ""),
+                )
+                for f in _drilldown_numeric_filters
+            }
+            if _filter_es_fields & _PROFILE_NUMERIC_FIELDS:
+                _use_profile = True
+                logger.info(
+                    "[DRILLDOWN] numeric_filter uses profile fields %s → force index=profile",
+                    _filter_es_fields & _PROFILE_NUMERIC_FIELDS,
+                )
+    # boolean fields di entities → paksa profile index
+    if not _use_profile:
+        if set(entities.keys()) & _PROFILE_BOOLEAN_FIELDS:
+            _use_profile = True
+            logger.info(
+                "[DRILLDOWN] boolean_filter uses profile fields %s → force index=profile",
+                set(entities.keys()) & _PROFILE_BOOLEAN_FIELDS,
+            )
     index = (
         os.getenv("ELASTICSEARCH_PROFILE_INDEX", "idx_sekolah_profile")
         if _use_profile

@@ -6,7 +6,7 @@ import re
 import logging
 from typing import Dict, List, Optional
 
-from app.services.core.es_query_builder import build_qc_filter, build_numeric_filters
+from app.services.core.es_query_builder import build_qc_filter, build_numeric_filters, build_boolean_filters
 from app.services.core.jenjang_constants import JENJANG_MAP
 from app.services.query_handlers.list_sort_utils import detect_sort_mode, build_sort_clause
 
@@ -89,6 +89,11 @@ def build_wilayah_filters_and_should(
     Build (filters, should) list berdasarkan wilayah dan level.
     Return: (filters: List, should: List)
     """
+    # Pulau multi-province filter takes precedence over single-wilayah logic
+    provinsi_list = parsed.get("provinsi_list")
+    if provinsi_list:
+        return [{"terms": {"provinsi": provinsi_list}}], []
+
     wilayah = parsed.get("wilayah")
     filters = []
     should = []
@@ -282,6 +287,11 @@ def build_base_filters(parsed: Dict, query_raw: str = "", intent=None) -> List:
         if nf_clauses:
             filters.extend(nf_clauses)
             logger.info("[LIST] numeric_filters applied: %d clause(s)", len(nf_clauses))
+
+    boolean_clauses = build_boolean_filters(parsed)
+    if boolean_clauses:
+        filters.extend(boolean_clauses)
+        logger.info("[LIST] boolean filters applied: %d", len(boolean_clauses))
 
     return filters
 

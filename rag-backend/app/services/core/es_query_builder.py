@@ -45,6 +45,27 @@ _NUMERIC_FIELD_MAP: Dict[str, str] = {
 }
 
 
+_BOOLEAN_FIELD_MAP: Dict[str, str] = {
+    "wilayah_terpencil":  "wilayah_terpencil",
+    "terpencil":          "wilayah_terpencil",
+    "wilayah_perbatasan": "wilayah_perbatasan",
+    "perbatasan":         "wilayah_perbatasan",
+}
+
+
+def build_boolean_filters(entities: dict) -> List[Dict]:
+    """
+    Bangun ES filter untuk field boolean (wilayah_terpencil, wilayah_perbatasan).
+    Membaca key 'wilayah_terpencil' dan 'wilayah_perbatasan' dari entities dict.
+    """
+    filters = []
+    for key, es_field in _BOOLEAN_FIELD_MAP.items():
+        val = entities.get(key)
+        if val is not None and isinstance(val, bool):
+            filters.append({"term": {es_field: val}})
+    return filters
+
+
 def build_numeric_filters(numeric_filters: list) -> List[Dict]:
     """Konversi list NumericFilter → list ES range query clause."""
     if not numeric_filters:

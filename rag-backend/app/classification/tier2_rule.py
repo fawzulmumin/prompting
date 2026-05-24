@@ -91,6 +91,12 @@ _SIGNAL_DEFS: list[tuple[str, float, str]] = [
     ("profile", 0.50, r"\b(sdn|sd negeri|smpn|smp negeri|sman|sma negeri|smkn|smk negeri|man|mtsn|min)\s+\d+\b"),
     ("profile", 0.40, r"\b(visi|misi|sejarah|kepala sekolah)\b"),
 
+    # Wilayah terpencil / perbatasan
+    ("aggregation", 0.72, r"\b(terpencil|wilayah\s+terpencil|daerah\s+terpencil|3[Tt]|terdepan|tertinggal)\b"),
+    ("list",        0.72, r"\b(terpencil|wilayah\s+terpencil|daerah\s+terpencil|3[Tt])\b"),
+    ("aggregation", 0.70, r"\b(perbatasan|wilayah\s+perbatasan|daerah\s+perbatasan|perbatasan\s+negara)\b"),
+    ("list",        0.70, r"\b(perbatasan|wilayah\s+perbatasan|daerah\s+perbatasan)\b"),
+
     # Comparison
     ("comparison", 0.65, r"\b(vs|versus)\b"),
     ("comparison", 0.65, r"\b(bandingkan|perbandingan|dibandingkan|compare)\b"),

@@ -20,6 +20,7 @@ from app.services.core.list_location_detector import (
     _is_multikata_location,
     _is_multikata_with_context,
     _has_province_siblings,
+    _resolve_pulau_keyword,
 )
 from app.services.core.cognitive_router import CognitiveIntent, WilayahEntities
 from app.services.core.location_resolver_adapter import PROVINCE_ALIAS_MAP
@@ -147,6 +148,14 @@ def _inject_intent_filters(parsed, intent):
 
     if _if.get("status_sekolah") and not parsed.get("status"):
         parsed["status"] = _if["status_sekolah"]
+
+    if getattr(intent, 'wilayah_terpencil', None) is not None:
+        parsed['wilayah_terpencil'] = intent.wilayah_terpencil
+        logger.info("[LIST] wilayah_terpencil filter: %s", intent.wilayah_terpencil)
+
+    if getattr(intent, 'wilayah_perbatasan', None) is not None:
+        parsed['wilayah_perbatasan'] = intent.wilayah_perbatasan
+        logger.info("[LIST] wilayah_perbatasan filter: %s", intent.wilayah_perbatasan)
 
     return parsed
 
@@ -599,7 +608,21 @@ class ListSchoolHandler:
                 wilayah_level = "kabupaten"
 
         if not parsed.get("wilayah"):
-            kw         = _extract_location_keyword(query)
+            kw = _extract_location_keyword(query)
+
+            # Pulau alias: "pulau jawa", "sulawesi", etc. → multi-province terms filter
+            pulau_result = _resolve_pulau_keyword(kw) if kw else None
+            if pulau_result:
+                pulau_name, provinsi_list = pulau_result
+                parsed["wilayah"] = kw.lower().strip()
+                parsed["provinsi_list"] = provinsi_list
+                parsed = _inject_intent_filters(parsed, intent)
+                logger.info("[LIST] Pulau alias: '%s' → %d provinsi", pulau_name, len(provinsi_list))
+                return await self._query_single_wilayah(
+                    query, parsed, "provinsi",
+                    has_level_hint=True, is_from_multikata=True, intent=intent,
+                )
+
             candidates = _find_location_candidates(kw) if kw else []
 
             if not candidates and kw and len(kw) >= 4:

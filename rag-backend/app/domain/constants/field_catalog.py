@@ -148,6 +148,20 @@ _LOW_COVERAGE_FIELDS: Dict[str, str] = {
     "kepemilikan_lahan": "Tidak ditemukan di ES. False positive dari Phase 23B — jangan digunakan.",
     "total_komputer": "Ada di mapping idx_sekolah_profile tapi tidak diisi saat indexing. "
                       "Nilai null untuk hampir semua dokumen — tidak bisa dipakai untuk range filter.",
+    "wilayah_terpencil": (
+        "Coverage sangat rendah: hanya 10 dari 416.633 dokumen bernilai True (0.002%). "
+        "Data tidak diisi secara konsisten saat indexing. "
+        "Code infrastructure tersedia (build_boolean_filters, _PROFILE_BOOLEAN_FIELDS, "
+        "tier2 signals, strip regex) tapi filter tidak berguna untuk user query. "
+        "Perlu re-indexing dengan field yang terisi lengkap sebelum bisa dipakai."
+    ),
+    "wilayah_perbatasan": (
+        "Coverage sangat rendah: hanya 6 dari 416.633 dokumen bernilai True (0.001%). "
+        "Diverifikasi via live ES aggregation. Data tidak diisi secara konsisten saat indexing. "
+        "Code infrastructure tersedia (build_boolean_filters, _PROFILE_BOOLEAN_FIELDS, "
+        "tier2 signals, strip regex) tapi filter tidak berguna untuk user query. "
+        "Perlu re-indexing dengan field yang terisi lengkap sebelum bisa dipakai."
+    ),
 }
 
 DISTRIBUSI_FIELDS: List[str] = [

@@ -723,6 +723,7 @@ async def _handle_aggregation_route(
         wilayah_narasi      = build_location_label(entities_for_narasi)
         total_narasi        = result.get("total", 0) or 0
         status_narasi       = entities_for_narasi.get("status_sekolah")
+        _numeric_filters    = entities_for_narasi.get("numeric_filters") or []
         answer_md = await narrate_aggregation(
             wilayah=wilayah_narasi, total=total_narasi, template_md=answer_md,
             status_filter=status_narasi, level=detect_level(result.get("entities", {})),
@@ -737,6 +738,7 @@ async def _handle_aggregation_route(
             distribusi=result.get("distribusi"),
             distribusi_field=result.get("distribusi_field"),
             qc_detail=result.get("qc_detail") or {},
+            numeric_filters=_numeric_filters,
         )
 
     resolution_metadata = result.get("metadata", {}) or {}
