@@ -183,6 +183,71 @@ def _base(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# CONTEXT + SUGGESTION HELPERS (Phase 25)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _format_context_used(entities: dict) -> List[str]:
+    """Format entities dict → readable context_used tanpa NumericFilter repr."""
+    result: List[str] = []
+    for key, val in entities.items():
+        if key == "numeric_filters":
+            if val:
+                parts: List[str] = []
+                for f in val:
+                    fd = f.field if hasattr(f, "field") else ""
+                    op = f.operator if hasattr(f, "operator") else ""
+                    v  = f.value if hasattr(f, "value") else None
+                    vm = f.value_min if hasattr(f, "value_min") else None
+                    vx = f.value_max if hasattr(f, "value_max") else None
+                    _syms = {"gt": ">", "gte": ">=", "lt": "<", "lte": "<="}
+                    if op == "between":
+                        parts.append(f"{fd}:{int(vm)}-{int(vx)}")
+                    elif v is not None:
+                        parts.append(f"{fd}{_syms.get(op, op)}{int(v)}")
+                result.append(f"filter:{','.join(parts)}")
+        elif key == "partisipasi_bos" and val is not None:
+            result.append(f"bos:{'ya' if val else 'tidak'}")
+        elif val is not None:
+            result.append(f"{key}:{val}")
+    return result
+
+
+def _generate_suggestions(intent, module: str) -> List[str]:
+    """Generate 2-3 query terkait berdasarkan context intent yang baru dijawab."""
+    suggestions: List[str] = []
+
+    def _clean(prov: str) -> str:
+        return prov.replace("prov. ", "").replace("prov.", "").strip().title()
+
+    wilayah = getattr(intent, "wilayah", None)
+    jenjang = getattr(intent, "jenjang", None)
+    metric  = getattr(intent, "metric_target", None)
+    prov_raw = getattr(wilayah, "provinsi", None) if wilayah else None
+    kab_raw  = getattr(wilayah, "kabupaten", None) if wilayah else None
+    prov  = _clean(prov_raw) if prov_raw else None
+    kab   = kab_raw.title() if kab_raw else None
+    lokasi = kab or prov
+
+    if module == "aggregation":
+        if lokasi and jenjang:
+            suggestions.append(f"Kabupaten mana di {lokasi} dengan {jenjang} terbanyak?")
+        if lokasi and metric in ("guru_pns", "guru_honor", "guru_p3k"):
+            suggestions.append(f"Berapa total siswa di {lokasi}?")
+        if lokasi and not jenjang:
+            suggestions.append(f"Berapa SD di {lokasi}?")
+        if not lokasi:
+            suggestions.append("Berapa total sekolah di seluruh Indonesia?")
+
+    elif module == "list":
+        if jenjang and lokasi:
+            suggestions.append(f"Berapa total {jenjang} di {lokasi}?")
+        if lokasi:
+            suggestions.append(f"Daftar {jenjang or 'sekolah'} akreditasi A di {lokasi}")
+
+    return suggestions[:3]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PIPELINE SUB-FUNCTIONS (Phase 14)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -554,7 +619,7 @@ async def _handle_comparison_route(
         ctx_list = []
         for r in (results_detail or []):
             ent = r.get("entities", {})
-            ctx_list.extend(f"{k}:{v}" for k, v in ent.items() if v)
+            ctx_list.extend(_format_context_used(ent))
 
         return _base(query, start_time, user_id, answer_md, "ELASTICSEARCH_COMPARISON",
                      context_used=ctx_list, context_sufficiency_score=1.0,
@@ -679,7 +744,7 @@ async def _handle_aggregation_route(
         )
         conf_mm = result.get("confidence", 0.0)
         metric_list_mm = result.get("metric_target_list", [])
-        ctx_mm  = [f"{k}:{v}" for k, v in entities_mm.items()]
+        ctx_mm  = _format_context_used(entities_mm)
         ctx_mm += [f"metric:{m}" for m in metric_list_mm]
         total_mm = sum(v.get("total", 0) for v in multi_metric.values())
         return _base(query, start_time, user_id, answer_md, "ELASTICSEARCH_MULTI_METRIC",
@@ -755,17 +820,20 @@ async def _handle_aggregation_route(
     conf    = result.get("confidence", 0.0)
     entities = result.get("entities", {}) or {}
     if result.get("is_multi"):
-        cmp_list      = result.get("comparison", [])
-        total_docs    = sum(x.get("total", 0) for x in cmp_list)
-        ctx_list      = [f"{k}:{v}" for item in cmp_list for k, v in item.get("entities", {}).items()]
+        cmp_list   = result.get("comparison", [])
+        total_docs = sum(x.get("total", 0) for x in cmp_list)
+        ctx_list   = []
+        for _cmp_item in cmp_list:
+            ctx_list.extend(_format_context_used(_cmp_item.get("entities", {})))
     else:
         total_docs = result.get("total", 0)
-        ctx_list   = [f"{k}:{v}" for k, v in entities.items()]
+        ctx_list   = _format_context_used(entities)
 
     return _base(query, start_time, user_id, answer_md, result.get("provider", "UNKNOWN"),
                  context_used=ctx_list, context_sufficiency_score=float(conf),
                  answer_confident=result.get("answer_confident", False),
-                 confidence_score=conf, num_docs=total_docs)
+                 confidence_score=conf, num_docs=total_docs,
+                 suggestions=_generate_suggestions(intent, "aggregation"))
 
 
 async def _handle_profile_route(
@@ -938,7 +1006,8 @@ async def _handle_list_route(
 
     return _base(query, start_time, user_id, formatted["answer_markdown"], "ELASTICSEARCH_LIST",
                  context_used=ctx_parts, context_sufficiency_score=float(conf),
-                 answer_confident=answer_confident, confidence_score=conf, num_docs=total)
+                 answer_confident=answer_confident, confidence_score=conf, num_docs=total,
+                 suggestions=_generate_suggestions(intent, "list"))
 
 
 async def _handle_rag_fallback(

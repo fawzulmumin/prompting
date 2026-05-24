@@ -65,7 +65,7 @@ _DISTRIBUSI_NEEDS_PROFILE: frozenset = frozenset({
 })
 
 # ── Boolean fields yang HANYA ada di idx_sekolah_profile ────────────────────
-_PROFILE_BOOLEAN_FIELDS: frozenset = frozenset({"wilayah_terpencil", "wilayah_perbatasan"})
+_PROFILE_BOOLEAN_FIELDS: frozenset = frozenset({"wilayah_terpencil", "wilayah_perbatasan", "partisipasi_bos"})
 
 # ── Numeric filter ES fields yang ada di idx_sekolah_profile (bukan QC) ─────
 # Dipakai untuk memaksa profile index ketika numeric_filters menyertakan field ini.

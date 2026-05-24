@@ -47,6 +47,7 @@ SCHEMA OUTPUT:
     "keaktifan": "<A|T|null — A=aktif, T=tidak aktif>",
     "wilayah_terpencil": null,
     "wilayah_perbatasan": null,
+    "partisipasi_bos": "<true|false|null — true jika sekolah menerima BOS, false jika tidak, null jika tidak disebutkan>",
     "qc_masalah_only": "<true|false — true jika user minta sekolah yang datanya bermasalah>",
     "qc_field": "<1-13 atau null — nomor kolom QC spesifik yang bermasalah>",
     "qc_min_masalah": "<angka atau null — minimum jumlah kolom bermasalah>",
@@ -281,6 +282,15 @@ WILAYAH KHUSUS:
   wilayah_terpencil / wilayah_perbatasan: field boolean ada di ES tapi coverage sangat rendah
   (<0.01%). JANGAN isi field ini — akan menghasilkan 0 results. Data perlu re-indexing
   sebelum field ini dapat digunakan. Selalu output wilayah_terpencil: null, wilayah_perbatasan: null.
+
+PARTISIPASI BOS:
+  partisipasi_bos: true jika user minta sekolah yang menerima BOS, false jika tidak menerima BOS.
+  Null jika tidak disebutkan (default — mayoritas query tidak menyebut BOS).
+  Coverage: ~409.622 sekolah ikut BOS (98.3%), ~7.021 tidak ikut (1.7%).
+  Contoh: "sekolah yang tidak dapat BOS di NTT" → partisipasi_bos: false
+          "penerima BOS di Papua" → partisipasi_bos: true
+          "berapa sekolah bukan peserta BOS di Jawa Barat" → partisipasi_bos: false
+  Jika tidak ada konteks BOS → partisipasi_bos: null
 
 INFRASTRUKTUR — filter berdasarkan kondisi fisik/fasilitas sekolah:
   "tidak punya akses internet" / "tidak ada internet" / "tanpa internet" / "belum ada internet" → infrastruktur_filter: "tidak_ada_internet"

@@ -72,6 +72,7 @@ class CognitiveIntent:
     keaktifan:          Optional[str]  = None
     wilayah_terpencil:  Optional[bool] = None
     wilayah_perbatasan: Optional[bool] = None
+    partisipasi_bos:    Optional[bool] = None
 
     # OOT
     is_oot:     bool = False

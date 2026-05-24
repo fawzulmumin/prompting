@@ -157,6 +157,10 @@ def _inject_intent_filters(parsed, intent):
         parsed['wilayah_perbatasan'] = intent.wilayah_perbatasan
         logger.info("[LIST] wilayah_perbatasan filter: %s", intent.wilayah_perbatasan)
 
+    if getattr(intent, 'partisipasi_bos', None) is not None:
+        parsed['partisipasi_bos'] = intent.partisipasi_bos
+        logger.info("[LIST] partisipasi_bos filter: %s", intent.partisipasi_bos)
+
     return parsed
 
 def _inject_intent_wilayah(parsed: dict, intent) -> None:

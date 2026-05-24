@@ -50,13 +50,15 @@ _BOOLEAN_FIELD_MAP: Dict[str, str] = {
     "terpencil":          "wilayah_terpencil",
     "wilayah_perbatasan": "wilayah_perbatasan",
     "perbatasan":         "wilayah_perbatasan",
+    "partisipasi_bos":    "partisipasi_bos",
+    "bos":                "partisipasi_bos",
 }
 
 
 def build_boolean_filters(entities: dict) -> List[Dict]:
     """
-    Bangun ES filter untuk field boolean (wilayah_terpencil, wilayah_perbatasan).
-    Membaca key 'wilayah_terpencil' dan 'wilayah_perbatasan' dari entities dict.
+    Bangun ES filter untuk field boolean (wilayah_terpencil, wilayah_perbatasan, partisipasi_bos).
+    Membaca key sesuai _BOOLEAN_FIELD_MAP dari entities dict.
     """
     filters = []
     for key, es_field in _BOOLEAN_FIELD_MAP.items():

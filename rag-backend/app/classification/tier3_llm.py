@@ -172,6 +172,7 @@ class LLMClassifier:
                 keaktifan=_norm(ent.get("keaktifan")),
                 wilayah_terpencil=_safe_bool_field(ent.get("wilayah_terpencil")),
                 wilayah_perbatasan=_safe_bool_field(ent.get("wilayah_perbatasan")),
+                partisipasi_bos=_safe_bool_field(ent.get("partisipasi_bos")),
                 qc_masalah_only=bool(ent.get("qc_masalah_only", False)),
                 qc_field=_safe_int(ent.get("qc_field")),
                 qc_min_masalah=_safe_int(ent.get("qc_min_masalah")),

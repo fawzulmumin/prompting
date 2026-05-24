@@ -97,6 +97,12 @@ _SIGNAL_DEFS: list[tuple[str, float, str]] = [
     ("aggregation", 0.70, r"\b(perbatasan|wilayah\s+perbatasan|daerah\s+perbatasan|perbatasan\s+negara)\b"),
     ("list",        0.70, r"\b(perbatasan|wilayah\s+perbatasan|daerah\s+perbatasan)\b"),
 
+    # BOS (Bantuan Operasional Sekolah) filter
+    ("aggregation", 0.75, r"\b(tidak\s+(dapat|menerima|ikut|peserta)\s+bos|bukan\s+peserta\s+bos|tanpa\s+bos|non.?bos)\b"),
+    ("aggregation", 0.72, r"\b(peserta\s+bos|dapat\s+bos|menerima\s+bos|ikut\s+bos|penerima\s+bos)\b"),
+    ("list",        0.72, r"\b(tidak\s+(dapat|menerima|ikut)\s+bos|bukan\s+peserta\s+bos)\b"),
+    ("list",        0.70, r"\b(peserta\s+bos|dapat\s+bos|penerima\s+bos)\b"),
+
     # Comparison
     ("comparison", 0.65, r"\b(vs|versus)\b"),
     ("comparison", 0.65, r"\b(bandingkan|perbandingan|dibandingkan|compare)\b"),

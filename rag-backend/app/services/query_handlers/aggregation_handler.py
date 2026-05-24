@@ -639,6 +639,9 @@ def _apply_entity_bridge(entities, data: dict, intent, kwargs: dict):
             entities['wilayah_terpencil'] = intent.wilayah_terpencil
         if getattr(intent, 'wilayah_perbatasan', None) is not None:
             entities['wilayah_perbatasan'] = intent.wilayah_perbatasan
+        if getattr(intent, 'partisipasi_bos', None) is not None:
+            entities['partisipasi_bos'] = intent.partisipasi_bos
+            logger.info("[AGG] partisipasi_bos filter: %s", intent.partisipasi_bos)
         if getattr(intent, 'qc_masalah_only', False):
             entities['qc_masalah_only'] = True
         if getattr(intent, 'qc_min_masalah', None) is not None:
