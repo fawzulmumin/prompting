@@ -518,12 +518,20 @@ async def _build_resolution(
     if _scope == "pulau":
         w = getattr(intent, "wilayah", None)
         _pulau = (getattr(w, "pulau", None) or "").lower().strip() if w else ""
-        # Fallback: extract pulau name from query when LLM didn't fill wilayah.pulau
+        # Fallback 1: explicit "pulau XXX" pattern
         if not _pulau:
             _m = re.search(r'\bpulau\s+(\w+)', query, re.IGNORECASE)
             if _m:
                 _pulau = _m.group(1).lower().strip()
-                logger.info("[AGG] pulau extracted from query: %r", _pulau)
+                logger.info("[AGG] pulau extracted from query (regex): %r", _pulau)
+        # Fallback 2: scan known pulau names in query ("di Sulawesi" → "sulawesi")
+        if not _pulau:
+            _q_lower = query.lower()
+            for _k in PULAU_PROVINSI_MAP:
+                if _k in _q_lower:
+                    _pulau = _k
+                    logger.info("[AGG] pulau extracted from query (scan): %r", _pulau)
+                    break
         if _pulau and _pulau in PULAU_PROVINSI_MAP:
             logger.info("[AGG] intent.scope=pulau, pulau=%s → multi-provinsi filter", _pulau)
             return {
@@ -565,6 +573,17 @@ async def _build_resolution(
             wilayah_from_intent: Dict[str, str] = {}
 
             if getattr(w, "provinsi", None):
+                _prov_bare = (w.provinsi or "").lower().strip()
+                if _prov_bare in PULAU_PROVINSI_MAP:
+                    logger.info("[AGG] wilayah.provinsi=%r is pulau name → redirect to pulau scope", _prov_bare)
+                    return {
+                        "status": ResultStatus.SUCCESS,
+                        "provider": "SYSTEM",
+                        "data": {"entities": {"pulau": _prov_bare}},
+                        "reason": None,
+                        "metadata": {"pulau_scope": True, "pulau": _prov_bare, "trigger": "provinsi_pulau_redirect"},
+                        "confidence": None,
+                    }
                 wilayah_from_intent["provinsi"] = _normalize_wilayah_prefix(w.provinsi, "prov.")
 
             kab_raw = (getattr(w, "kabupaten", None) or "").lower().strip()

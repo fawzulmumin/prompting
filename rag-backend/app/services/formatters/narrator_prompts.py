@@ -10,6 +10,49 @@ from typing import Dict, Any, List, Optional
 # NUMERIC FILTER FORMATTER
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# BOOLEAN DISTRIBUSI LABELS (Phase 26A)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_BOOLEAN_DISTRIBUSI_LABELS: Dict[str, Dict] = {
+    "partisipasi_bos": {
+        True: "Ikut BOS", False: "Tidak ikut BOS",
+        1: "Ikut BOS", 0: "Tidak ikut BOS",
+        "true": "Ikut BOS", "false": "Tidak ikut BOS",
+        "1": "Ikut BOS", "0": "Tidak ikut BOS",
+    },
+    "wilayah_terpencil": {
+        True: "Terpencil", False: "Tidak terpencil",
+        1: "Terpencil", 0: "Tidak terpencil",
+        "true": "Terpencil", "false": "Tidak terpencil",
+    },
+    "wilayah_perbatasan": {
+        True: "Perbatasan", False: "Tidak perbatasan",
+        1: "Perbatasan", 0: "Tidak perbatasan",
+        "true": "Perbatasan", "false": "Tidak perbatasan",
+    },
+}
+
+
+def _apply_boolean_labels(distribusi: list, field: str) -> list:
+    """Ganti key numerik/boolean di distribusi dengan label readable sebelum dikirim ke LLM."""
+    label_map = _BOOLEAN_DISTRIBUSI_LABELS.get(field, {})
+    if not label_map:
+        return distribusi
+    result = []
+    for bucket in distribusi:
+        key = bucket.get("key")
+        if key is None:
+            key = bucket.get("name")
+        label = label_map.get(key, label_map.get(str(key).lower() if key is not None else "", str(key)))
+        result.append({**bucket, "key": label, "name": label})
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NUMERIC FILTER FORMATTER
+# ─────────────────────────────────────────────────────────────────────────────
+
 _NUMERIC_FIELD_LABELS = {
     "siswa":                  "siswa",
     "siswa_total":            "siswa",
@@ -657,9 +700,10 @@ def _prompt_aggregation(
             "akreditasi":            "Akreditasi",
         }
         dist_label = _DIST_LABELS.get(distribusi_field, distribusi_field.replace("_", " ").title())
+        _dist_items = _apply_boolean_labels(distribusi[:8], distribusi_field)
         dist_lines = ", ".join(
             f"{item['key']}: {item['count']:,} ({item['pct']}%)"
-            for item in distribusi[:8]
+            for item in _dist_items
         )
         distribusi_section = (
             f"\n- Distribusi {dist_label}: {dist_lines}"

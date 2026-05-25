@@ -219,8 +219,8 @@ async def test_drilldown_uses_profile_index_with_siswa_filter():
     from app.services.core.intent_models import NumericFilter
     import os
 
-    mock_es = AsyncMock()
-    mock_es.search.return_value = {
+    profile_index = os.getenv("ELASTICSEARCH_PROFILE_INDEX", "idx_sekolah_profile")
+    _resp = {
         "aggregations": {
             "drilldown": {
                 "buckets": [
@@ -230,6 +230,14 @@ async def test_drilldown_uses_profile_index_with_siswa_filter():
             }
         }
     }
+    captured: dict = {}
+
+    async def _side_effect(**kwargs):
+        captured["index"] = kwargs.get("index")
+        return _resp
+
+    mock_es = AsyncMock()
+    mock_es.search.side_effect = _side_effect
 
     entities = {
         "provinsi": "prov. jawa barat",
@@ -242,12 +250,19 @@ async def test_drilldown_uses_profile_index_with_siswa_filter():
     )
 
     assert mock_es.search.called
-    call_kwargs = mock_es.search.call_args
-    index_used = call_kwargs.kwargs.get("index") or call_kwargs.args[0] if call_kwargs.args else None
-    profile_index = os.getenv("ELASTICSEARCH_PROFILE_INDEX", "idx_sekolah_profile")
-    assert index_used == profile_index, (
+    assert captured.get("index") == profile_index, (
         f"Drilldown harus pakai profile index saat ada numeric_filter siswa, "
-        f"tapi pakai: {index_used}"
+        f"tapi pakai: {captured.get('index')}"
     )
     assert len(result) == 2
     assert result[0]["name"] == "kab. bogor"
+
+
+# ── 26B: guru field mapping ───────────────────────────────────────────────────
+
+@pytest.mark.unit
+def test_guru_field_mapping():
+    from app.services.core.es_query_builder import _NUMERIC_FIELD_MAP
+    assert _NUMERIC_FIELD_MAP.get("guru") == "guru_total", (
+        "\"guru\" harus map ke \"guru_total\" agar numeric filter guru < 5 memetakan field yang benar di ES"
+    )
