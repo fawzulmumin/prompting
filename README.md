@@ -55,6 +55,15 @@ prompting/
 | Data sekolah | ~560K (38 provinsi, 600+ kab/kota) |
 | LLM calls ditekan | 74% query no-LLM |
 
+## Konfigurasi Environment
+
+File `.env` tidak disimpan di repo. Salin dari template lalu isi nilainya:
+
+```bash
+cp rag-backend/.env.example rag-backend/.env
+cp rag-middleware/.env.example rag-middleware/.env
+```
+
 ## Quick Start
 
 Lihat README masing-masing komponen untuk instruksi lengkap:

@@ -5,3 +5,16 @@ Thumbs.db
 # Kubernetes secrets
 k8s/secret-backend.yaml
 k8s/secret-middleware.yaml
+# Environment files (pakai .env.example sebagai template)
+.env
+.env.*
+!.env.example
+*.local.yaml
+
+# Python / Node
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+node_modules/
+.pytest_cache/
