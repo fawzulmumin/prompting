@@ -1,5 +1,13 @@
 # RAG Kemendikdasmen — Sistem Pencarian Data Pendidikan
 
+![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
+![Express](https://img.shields.io/badge/Express.js-000000?logo=express&logoColor=white)
+![Elasticsearch](https://img.shields.io/badge/Elasticsearch-8.x-005571?logo=elasticsearch&logoColor=white)
+![Redis](https://img.shields.io/badge/Redis-7.x-DC382D?logo=redis&logoColor=white)
+![Kubernetes](https://img.shields.io/badge/Kubernetes-326CE5?logo=kubernetes&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-blue)
+
 Sistem Retrieval-Augmented Generation (RAG) untuk pencarian dan narasi data ~560.000 sekolah seluruh Indonesia. Dibangun untuk Kementerian Pendidikan Dasar dan Menengah (Kemendikdasmen).
 
 ## Deskripsi
@@ -13,24 +21,38 @@ Sistem ini memungkinkan pejabat Kemendikdasmen, dinas pendidikan daerah, dan mas
 - "Bandingkan jumlah SMK di Jakarta dan Surabaya"
 - "Sekolah terdekat dari lokasi saya"
 
+## Fitur utama
+
+- **Pencarian bahasa natural** untuk daftar sekolah, agregasi, profil sekolah, dan perbandingan antar wilayah.
+- **Klasifikasi query berlapis (Tier 1–3)** yang menekan pemakaian LLM: 74% query selesai tanpa LLM.
+- **Streaming jawaban** lewat Server-Sent Events (SSE).
+- **Cache berlapis** dan antrean tugas latar belakang dengan Redis.
+- **Rate limiting dua lapis** di middleware (per IP) dan backend (per user).
+- **Siap deploy ke Kubernetes**, dengan worker arq sebagai sidecar.
+
 ## Arsitektur
 
-```
-User
- ↓
-rag-middleware (Express.js, port 4000)
-  — CORS, rate limiting, validasi input, UUID tracing
- ↓
-rag-backend (FastAPI, port 3000)
-  — Klasifikasi intent (Tier 1→2→3)
-  — Query handler (list/aggregation/profile/comparison)
-  — Narasi via DeepSeek API
-  — SSE streaming response
- ↓
-Elasticsearch (~560K dokumen) + Redis (cache + queue)
+```mermaid
+flowchart TD
+    U[Pengguna] --> M["rag-middleware<br/>Express.js :4000<br/>CORS, rate limit, validasi, UUID tracing"]
+    M --> B["rag-backend<br/>FastAPI :3000<br/>klasifikasi intent, query handler, SSE"]
+    B --> E[("Elasticsearch<br/>~560K dokumen")]
+    B --> R[("Redis<br/>cache + queue")]
+    B -->|query kompleks| L["DeepSeek API<br/>narasi / router Tier 3"]
 ```
 
-**Klasifikasi berlapis — 74% query tanpa LLM:**
+### Klasifikasi berlapis — 74% query tanpa LLM
+
+```mermaid
+flowchart LR
+    Q[Query] --> T1["Tier 1<br/>regex pattern<br/>di bawah 5 ms"]
+    T1 -->|tidak cocok| T2["Tier 2<br/>rule scoring<br/>di bawah 20 ms"]
+    T2 -->|ambigu| T3["Tier 3<br/>DeepSeek LLM<br/>5–65 s"]
+    T1 -->|cocok| H[Query handler]
+    T2 -->|cocok| H
+    T3 --> H
+```
+
 - Tier 1: regex pattern, <5ms
 - Tier 2: rule scoring, <20ms
 - Tier 3: DeepSeek LLM, 5–65s (hanya untuk query kompleks)
