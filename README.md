@@ -101,3 +101,7 @@ Deployment backend menggunakan dua container dalam satu pod:
 | Embedding | sentence-transformers all-MiniLM-L6-v2 |
 | LLM | DeepSeek API (deepseek-chat) |
 | Orchestration | Kubernetes |
+
+## Lisensi
+
+Dirilis di bawah lisensi MIT. Lihat berkas [LICENSE](LICENSE).
