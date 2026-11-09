@@ -60,7 +60,7 @@ flowchart LR
 ## Struktur Repository
 
 ```
-prompting/
+rag-pencarian-data-sekolah/
 ├── rag-backend/        # FastAPI — business logic, klasifikasi, handler
 ├── rag-middleware/     # Express.js — proxy, rate limit, validasi
 ├── k8s/                # Kubernetes manifests (ConfigMap, Secret, Deployment)
